@@ -5,6 +5,12 @@
 
     SCVMM = @{
         Server = "scvmm.domain.local"
+
+        # Les valeurs ci-dessous doivent correspondre exactement aux objets SCVMM existants
+        Network = @{
+            PortClassificationName = "PC_VMNetwork"
+            LogicalSwitchName      = "LS_SET_VMNetwork"
+        }
     }
 
     HyperV = @{
