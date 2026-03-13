@@ -65,8 +65,8 @@ Write-Log "VMs à traiter : $($VMNames -join ', ')" -LogFile $LogFile
 
 # Récupération des VMs sur VMware avec leur VLAN
 $VMs = @()
-foreach ($VMName in $VMNames) {
-    $VMObject = VMware.VimAutomation.Core\Get-VM -Name $VMName -ErrorAction SilentlyContinue
+foreach ($vmNameFromCsv in $VMNames) {
+    $VMObject = VMware.VimAutomation.Core\Get-VM -Name $vmNameFromCsv -ErrorAction SilentlyContinue
     if ($VMObject) {
         $NetworkAdapter = Get-NetworkAdapter -VM $VMObject -ErrorAction SilentlyContinue
         if ($NetworkAdapter) {
@@ -87,8 +87,8 @@ foreach ($VMName in $VMNames) {
     } else {
         $VLANID = "VM introuvable"
     }
-    Write-Log "VM: $VMName - VLAN: $VLANID" -LogFile $LogFile
-    $VMs += [PSCustomObject]@{ Name = $VMName; VLAN = $VLANID }
+    Write-Log "VM: $vmNameFromCsv - VLAN: $VLANID" -LogFile $LogFile
+    $VMs += [PSCustomObject]@{ Name = $vmNameFromCsv; VLAN = $VLANID }
 }
 
 Disconnect-VCenter -LogFile $LogFile
@@ -101,55 +101,55 @@ $PortClassification = Get-SCPortClassification -VMMServer $VMMServer | Where-Obj
 
 Write-Log "VMNetworks : $($VMNetworks.Count) | VMSubnets : $($VMSubnets.Count)" -LogFile $LogFile
 
-foreach ($VM in $VMs) {
-    $VMName = $VM.Name
-    $VLANID = $VM.VLAN
+foreach ($vmRecord in $VMs) {
+    $targetVmName = $vmRecord.Name
+    $vlanId = $vmRecord.VLAN
 
-    Write-Log "Traitement de $VMName (VLAN $VLANID)..." -LogFile $LogFile
+    Write-Log "Traitement de $targetVmName (VLAN $vlanId)..." -LogFile $LogFile
 
-    if ($VLANID -match "^\d+$") {
-        $MatchingVMNetwork = $VMNetworks | Where-Object { $_.Name -like "*$VLANID*" -or $_.Description -like "*$VLANID*" }
-        $MatchingVMSubnet  = $VMSubnets  | Where-Object { $_.Name -like "*$VLANID*" -or $_.Description -like "*$VLANID*" }
+    if ($vlanId -match "^\d+$") {
+        $MatchingVMNetwork = $VMNetworks | Where-Object { $_.Name -like "*$vlanId*" -or $_.Description -like "*$vlanId*" }
+        $MatchingVMSubnet  = $VMSubnets  | Where-Object { $_.Name -like "*$vlanId*" -or $_.Description -like "*$vlanId*" }
 
         if ($MatchingVMNetwork -and $MatchingVMSubnet) {
-            $TargetVM = Get-SCVirtualMachine -Name $VMName -VMMServer $VMMServer | Where-Object { $_.VirtualizationPlatform -eq "HyperV" }
+            $TargetVM = Get-SCVirtualMachine -Name $targetVmName -VMMServer $VMMServer | Where-Object { $_.VirtualizationPlatform -eq "HyperV" }
             if ($TargetVM) {
                 # Configuration réseau
                 $NetworkAdapter = Get-SCVirtualNetworkAdapter -VM $TargetVM
-                Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $NetworkAdapter -VMNetwork $MatchingVMNetwork -VMSubnet $MatchingVMSubnet -VLanEnabled $true -VLanID $VLANID -VirtualNetwork $Config.SCVMM.Network.LogicalSwitchName -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $PortClassification | Out-Null
-                Write-Log "Réseau configuré sur $VMName (VLAN $VLANID, VMNetwork $($MatchingVMNetwork.Name))." -Level SUCCESS -LogFile $LogFile
+                Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $NetworkAdapter -VMNetwork $MatchingVMNetwork -VMSubnet $MatchingVMSubnet -VLanEnabled $true -VLanID $vlanId -VirtualNetwork $Config.SCVMM.Network.LogicalSwitchName -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $PortClassification | Out-Null
+                Write-Log "Réseau configuré sur $targetVmName (VLAN $vlanId, VMNetwork $($MatchingVMNetwork.Name))." -Level SUCCESS -LogFile $LogFile
 
                 # Integration Services
                 Set-SCVirtualMachine -VM $TargetVM -EnableOperatingSystemShutdown $true -EnableTimeSynchronization $false -EnableDataExchange $true -EnableHeartbeat $true -EnableBackup $true -EnableGuestServicesInterface $true | Out-Null
-                Write-Log "Integration Services configuré pour $VMName." -LogFile $LogFile
+                Write-Log "Integration Services configuré pour $targetVmName." -LogFile $LogFile
 
                 # Cluster failover
                 try {
                     Add-ClusterVirtualMachineRole -Cluster $HyperVCluster -VirtualMachine $TargetVM.Name
-                    Write-Log "VM $VMName intégrée au cluster $HyperVCluster." -Level SUCCESS -LogFile $LogFile
+                    Write-Log "VM $targetVmName intégrée au cluster $HyperVCluster." -Level SUCCESS -LogFile $LogFile
                 } catch {
-                    Write-Log "Erreur cluster pour $VMName : $_" -Level ERROR -LogFile $LogFile
+                    Write-Log "Erreur cluster pour $targetVmName : $_" -Level ERROR -LogFile $LogFile
                 }
 
                 # LiveMigration
                 try {
                     Move-VM -Name $TargetVM.Name -DestinationHost $HyperVHost2
-                    Write-Log "LiveMigration de $VMName vers $HyperVHost2 effectuée." -Level SUCCESS -LogFile $LogFile
+                    Write-Log "LiveMigration de $targetVmName vers $HyperVHost2 effectuée." -Level SUCCESS -LogFile $LogFile
                 } catch {
-                    Write-Log "Erreur LiveMigration pour $VMName : $_" -Level ERROR -LogFile $LogFile
+                    Write-Log "Erreur LiveMigration pour $targetVmName : $_" -Level ERROR -LogFile $LogFile
                 }
 
                 # Tag backup
                 Set-SCVirtualMachine -VM $TargetVM -Tag $BackupTag
-                Write-Log "Tag backup '$BackupTag' appliqué à $VMName." -LogFile $LogFile
+                Write-Log "Tag backup '$BackupTag' appliqué à $targetVmName." -LogFile $LogFile
             } else {
-                Write-Log "VM $VMName non trouvée dans SCVMM." -Level WARNING -LogFile $LogFile
+                Write-Log "VM $targetVmName non trouvée dans SCVMM." -Level WARNING -LogFile $LogFile
             }
         } else {
-            Write-Log "Aucun VMNetwork/VMSubnet trouvé pour VLAN $VLANID sur $VMName." -Level WARNING -LogFile $LogFile
+            Write-Log "Aucun VMNetwork/VMSubnet trouvé pour VLAN $vlanId sur $targetVmName." -Level WARNING -LogFile $LogFile
         }
     } else {
-        Write-Log "VLAN ID invalide pour $VMName : $VLANID" -Level WARNING -LogFile $LogFile
+        Write-Log "VLAN ID invalide pour $targetVmName : $vlanId" -Level WARNING -LogFile $LogFile
     }
 }
 

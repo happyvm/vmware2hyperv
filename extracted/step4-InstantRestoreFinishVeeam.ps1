@@ -42,19 +42,19 @@ if (!$IRSessions) {
 Write-Log "Nombre de VM en Instant Recovery : $($IRSessions.Count)" -LogFile $LogFile
 
 $IRSessions | ForEach-Object {
-    $VMName   = $_.VMName
-    $VMExists = Get-SCVirtualMachine -Name $VMName
+    $currentVmName = $_.VMName
+    $vmExists = Get-SCVirtualMachine -Name $currentVmName
 
-    if ($VMExists) {
-        Write-Log "Finalisation de l'Instant Recovery pour $VMName..." -LogFile $LogFile
+    if ($vmExists) {
+        Write-Log "Finalisation de l'Instant Recovery pour $currentVmName..." -LogFile $LogFile
         try {
             Start-VBRHvInstantRecoveryMigration -InstantRecovery $_
-            Write-Log "Finalisation complète pour $VMName." -Level SUCCESS -LogFile $LogFile
+            Write-Log "Finalisation complète pour $currentVmName." -Level SUCCESS -LogFile $LogFile
         } catch {
-            Write-Log "Erreur lors de la finalisation de $VMName : $_" -Level ERROR -LogFile $LogFile
+            Write-Log "Erreur lors de la finalisation de $currentVmName : $_" -Level ERROR -LogFile $LogFile
         }
     } else {
-        Write-Log "La VM $VMName n'existe pas dans Hyper-V, ignorée." -Level WARNING -LogFile $LogFile
+        Write-Log "La VM $currentVmName n'existe pas dans Hyper-V, ignorée." -Level WARNING -LogFile $LogFile
     }
 }
 

@@ -39,8 +39,8 @@ foreach ($entry in $csvData) {
     $vmName  = $entry.VMName
     $tagName = $entry.Tag.Trim()
 
-    $tag = Get-Tag -Name $tagName -ErrorAction SilentlyContinue
-    if (-not $tag) {
+    $existingTag = Get-Tag -Name $tagName -ErrorAction SilentlyContinue
+    if (-not $existingTag) {
         Write-Log "Création du tag : $tagName" -LogFile $LogFile
         New-Tag -Name $tagName -Category $TagCategory
     }
@@ -64,13 +64,13 @@ foreach ($entry in $csvData) {
 $backupRepo = Get-VBRBackupRepository -Name $BackupRepoName
 $vmwareTags = Find-VBRViEntity -Tags -Server $VCenterServer | Where-Object { $_.Name -like "HypMig-lot-*" }
 
-foreach ($tag in $vmwareTags) {
-    $jobName = "Backup-$($tag.Name)"
+foreach ($vmwareTag in $vmwareTags) {
+    $jobName = "Backup-$($vmwareTag.Name)"
     $job     = Get-VBRJob -Name $jobName -ErrorAction SilentlyContinue
 
     if (-not $job) {
         Write-Log "Création du job de sauvegarde : $jobName" -LogFile $LogFile
-        Add-VBRViBackupJob -Name $jobName -Description "Sauvegarde pour le tag $($tag.Name)" -BackupRepository $backupRepo -Entity $tag | Out-Null
+        Add-VBRViBackupJob -Name $jobName -Description "Sauvegarde pour le tag $($vmwareTag.Name)" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
     } else {
         Write-Log "Le job $jobName existe déjà." -LogFile $LogFile
     }

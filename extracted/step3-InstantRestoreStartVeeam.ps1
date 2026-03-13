@@ -50,12 +50,12 @@ if ($VMName) {
 Write-Log "Nombre de VM à restaurer : $($RestorePoints.Count)" -LogFile $LogFile
 
 $RestorePoints | ForEach-Object {
-    $VMName = $_.Name
-    Write-Log "Instant Recovery pour $VMName via SCVMM ($SCVMMServer)..." -LogFile $LogFile
+    $currentVmName = $_.Name
+    Write-Log "Instant Recovery pour $currentVmName via SCVMM ($SCVMMServer)..." -LogFile $LogFile
 
     try {
-        Start-VBRHvInstantRecovery -RestorePoint $_ -Server $HyperVHost -Path "$TargetPath\$VMName" -PowerUp $false -NICsEnabled $true -PreserveMACs $true -PreserveVmID $true
-        Write-Log "Instant Recovery lancé pour $VMName." -Level SUCCESS -LogFile $LogFile
+        Start-VBRHvInstantRecovery -RestorePoint $_ -Server $HyperVHost -Path "$TargetPath\$currentVmName" -PowerUp $false -NICsEnabled $true -PreserveMACs $true -PreserveVmID $true
+        Write-Log "Instant Recovery lancé pour $currentVmName." -Level SUCCESS -LogFile $LogFile
 
         $elapsed = 0
         do {
@@ -63,8 +63,8 @@ $RestorePoints | ForEach-Object {
                 Where-Object { $_.State -eq "WaitingForUserAction" } |
                 Select-Object -ExpandProperty VMName
 
-            if ($waitingVmNames -contains $VMName) {
-                Write-Log "Instant Recovery en attente de validation utilisateur pour $VMName (State=WaitingForUserAction)." -Level SUCCESS -LogFile $LogFile
+            if ($waitingVmNames -contains $currentVmName) {
+                Write-Log "Instant Recovery en attente de validation utilisateur pour $currentVmName (State=WaitingForUserAction)." -Level SUCCESS -LogFile $LogFile
                 break
             }
 
@@ -73,10 +73,10 @@ $RestorePoints | ForEach-Object {
         } while ($elapsed -lt $WaitingTimeoutSeconds)
 
         if ($elapsed -ge $WaitingTimeoutSeconds) {
-            throw "Timeout de $WaitingTimeoutSeconds secondes atteint en attente de WaitingForUserAction pour $VMName."
+            throw "Timeout de $WaitingTimeoutSeconds secondes atteint en attente de WaitingForUserAction pour $currentVmName."
         }
     } catch {
-        Write-Log "Erreur lors de la restauration de $VMName : $_" -Level ERROR -LogFile $LogFile
+        Write-Log "Erreur lors de la restauration de $currentVmName : $_" -Level ERROR -LogFile $LogFile
         throw
     }
 }
