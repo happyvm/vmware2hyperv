@@ -32,11 +32,11 @@ Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $vmList = Import-Csv -Path $CsvFile -Delimiter ";"
 
-foreach ($vm in $vmList) {
-    Write-Log "Arrêt propre de la VM : $($vm.VMName)" -LogFile $LogFile
-    $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vm.VMName -ErrorAction SilentlyContinue
+foreach ($vmEntry in $vmList) {
+    Write-Log "Arrêt propre de la VM : $($vmEntry.VMName)" -LogFile $LogFile
+    $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vmEntry.VMName -ErrorAction SilentlyContinue
     if (-not $vmObj) {
-        Write-Log "VM introuvable : $($vm.VMName)" -Level WARNING -LogFile $LogFile
+        Write-Log "VM introuvable : $($vmEntry.VMName)" -Level WARNING -LogFile $LogFile
         continue
     }
     if ($vmObj.PowerState -ne "PoweredOff") {
@@ -46,15 +46,15 @@ foreach ($vm in $vmList) {
         do {
             Start-Sleep -Seconds 10
             $elapsed += 10
-            $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vm.VMName
+            $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vmEntry.VMName
         } while ($vmObj.PowerState -ne "PoweredOff" -and $elapsed -lt $timeout)
 
         if ($vmObj.PowerState -ne "PoweredOff") {
-            Write-Log "VM $($vm.VMName) non éteinte après ${timeout}s — power-off forcé." -Level WARNING -LogFile $LogFile
-            VMware.VimAutomation.Core\Stop-VM -VM $vm.VMName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Log "VM $($vmEntry.VMName) non éteinte après ${timeout}s — power-off forcé." -Level WARNING -LogFile $LogFile
+            VMware.VimAutomation.Core\Stop-VM -VM $vmEntry.VMName -Confirm:$false -ErrorAction SilentlyContinue
         }
     }
-    Write-Log "VM $($vm.VMName) éteinte." -Level SUCCESS -LogFile $LogFile
+    Write-Log "VM $($vmEntry.VMName) éteinte." -Level SUCCESS -LogFile $LogFile
 }
 
 Disconnect-VCenter -LogFile $LogFile
