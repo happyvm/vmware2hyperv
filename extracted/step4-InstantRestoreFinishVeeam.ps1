@@ -5,6 +5,7 @@ param (
     [string]$HyperVHost,
     [string]$CsvFile,
     [string]$Tag,      # Optionnel - pour contextualiser le log
+    [string]$VMName,
     [string]$LogFile
 )
 
@@ -23,6 +24,13 @@ Write-Log "Démarrage step4 - finalisation Instant Recovery" -LogFile $LogFile
 
 Assert-FileExists -Path $CsvFile -Label "CSV lotissement" -LogFile $LogFile
 $vmNames = (Import-Csv -Path $CsvFile -Delimiter ";").VMName
+if ($VMName) {
+    $vmNames = @($vmNames | Where-Object { $_ -eq $VMName })
+    if (-not $vmNames) {
+        Write-Log "VM $VMName absente du CSV, aucune finalisation à effectuer." -Level WARNING -LogFile $LogFile
+        exit 0
+    }
+}
 
 $VMMServer  = Get-SCVMMServer -ComputerName $SCVMMServer
 $IRSessions = Get-VBRInstantRecovery | Where-Object { $_.VMName -in $vmNames }

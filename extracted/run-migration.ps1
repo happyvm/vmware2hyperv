@@ -36,55 +36,110 @@ Write-Log "Étape de départ : $StartFrom" -LogFile $LogFile
 Write-Log "======================================================" -LogFile $LogFile
 
 $steps = @("step1", "step2", "step3", "step4", "step5")
-$run   = $false
+$startIndex = [array]::IndexOf($steps, $StartFrom)
 
-foreach ($step in $steps) {
-    if ($step -eq $StartFrom) { $run = $true }
-    if (-not $run) { continue }
+function Invoke-OrchestratorStep {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Step,
 
-    Write-Log "--- Démarrage $step ---" -LogFile $LogFile
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
 
+    Write-Log "--- Démarrage $Step ---" -LogFile $LogFile
     try {
-        switch ($step) {
-            "step1" {
-                & "$PSScriptRoot\step1-TagResources_CreateVeeamJob.ps1" -Tag $Tag -LogFile $LogFile
-            }
-            "step2" {
-                & "$PSScriptRoot\step2-ShutdownVM_StartBackupVeeam.ps1" -Tag $Tag -RecipientGroup $RecipientGroup -LogFile $LogFile
-            }
-            "step3" {
-                & "$PSScriptRoot\step3-InstantRestoreStartVeeam.ps1" -BackupJobName "Backup-$Tag" -LogFile $LogFile
-            }
-            "step4" {
-                & "$PSScriptRoot\step4-InstantRestoreFinishVeeam.ps1" -Tag $Tag -LogFile $LogFile
-            }
-            "step5" {
-                & "$PSScriptRoot\step5-MapVMwareToHyper-v.ps1" -Tag $Tag -LogFile $LogFile
-            }
-        }
+        & $Action
+        Write-Log "--- $Step terminé avec succès ---" -Level SUCCESS -LogFile $LogFile
     } catch {
-        Write-Log "$step a échoué : $_. Migration interrompue." -Level ERROR -LogFile $LogFile
-        Write-Log "Pour reprendre depuis cette étape : .\run-migration.ps1 -Tag $Tag -StartFrom $step" -Level WARNING -LogFile $LogFile
+        Write-Log "$Step a échoué : $_. Migration interrompue." -Level ERROR -LogFile $LogFile
+        Write-Log "Pour reprendre depuis cette étape : .\run-migration.ps1 -Tag $Tag -StartFrom $Step" -Level WARNING -LogFile $LogFile
+        throw
+    }
+}
+
+if ($startIndex -le 0) {
+    Invoke-OrchestratorStep -Step "step1" -Action {
+        & "$PSScriptRoot\step1-TagResources_CreateVeeamJob.ps1" -Tag $Tag -LogFile $LogFile
+    }
+}
+
+if ($startIndex -le 1) {
+    Invoke-OrchestratorStep -Step "step2" -Action {
+        & "$PSScriptRoot\step2-ShutdownVM_StartBackupVeeam.ps1" -Tag $Tag -RecipientGroup $RecipientGroup -LogFile $LogFile
+    }
+
+    Write-Host ""
+    Write-Host ">>> PAUSE avant step3 (Instant Recovery)" -ForegroundColor Yellow
+    Write-Host "    Vérifiez dans la console Veeam que le job 'Backup-$Tag' est bien terminé." -ForegroundColor Yellow
+    Read-Host "    Appuyez sur Entrée pour continuer"
+    Write-Log "Validation manuelle confirmée — lancement step3." -LogFile $LogFile
+}
+
+if ($startIndex -ge 2) {
+    $csvFile = $Config.Paths.CsvFile
+    Assert-FileExists -Path $csvFile -Label "CSV lotissement" -LogFile $LogFile
+
+    $vmNames = (Import-Csv -Path $csvFile -Delimiter ";" | Select-Object -ExpandProperty VMName | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+    if (-not $vmNames) {
+        Write-Log "Aucune VM trouvée dans le CSV pour exécuter les étapes 3 à 5." -Level ERROR -LogFile $LogFile
         exit 1
     }
 
-    Write-Log "--- $step terminé avec succès ---" -Level SUCCESS -LogFile $LogFile
+    $runStep3 = $startIndex -le 2
+    $runStep4 = $startIndex -le 3
+    $runStep5 = $startIndex -le 4
 
-    # Points de contrôle manuels avant les étapes critiques
-    if ($step -eq "step2") {
-        Write-Host ""
-        Write-Host ">>> PAUSE avant step3 (Instant Recovery)" -ForegroundColor Yellow
-        Write-Host "    Vérifiez dans la console Veeam que le job 'Backup-$Tag' est bien terminé." -ForegroundColor Yellow
-        Read-Host "    Appuyez sur Entrée pour continuer"
-        Write-Log "Validation manuelle confirmée — lancement step3." -LogFile $LogFile
+    Write-Log "Exécution parallèle par VM pour les étapes $(($steps[$startIndex..4]) -join ', ')" -LogFile $LogFile
+    Write-Log "VMs ciblées : $($vmNames -join ', ')" -LogFile $LogFile
+
+    $jobs = foreach ($vmName in $vmNames) {
+        $vmLogFile = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+
+        Start-Job -Name "migration-$vmName" -ScriptBlock {
+            param(
+                [string]$ScriptsRoot,
+                [string]$Tag,
+                [string]$VmName,
+                [string]$VmLogFile,
+                [bool]$RunStep3,
+                [bool]$RunStep4,
+                [bool]$RunStep5
+            )
+
+            $ErrorActionPreference = "Stop"
+
+            if ($RunStep3) {
+                & "$ScriptsRoot\step3-InstantRestoreStartVeeam.ps1" -BackupJobName "Backup-$Tag" -VMName $VmName -LogFile $VmLogFile
+            }
+            if ($RunStep4) {
+                & "$ScriptsRoot\step4-InstantRestoreFinishVeeam.ps1" -Tag $Tag -VMName $VmName -LogFile $VmLogFile
+            }
+            if ($RunStep5) {
+                & "$ScriptsRoot\step5-MapVMwareToHyper-v.ps1" -Tag $Tag -VMName $VmName -LogFile $VmLogFile
+            }
+        } -ArgumentList $PSScriptRoot, $Tag, $vmName, $vmLogFile, $runStep3, $runStep4, $runStep5
     }
-    if ($step -eq "step3") {
-        Write-Host ""
-        Write-Host ">>> PAUSE avant step4 (bascule Instant Recovery)" -ForegroundColor Yellow
-        Write-Host "    Vérifiez dans la console Veeam que l'Instant Recovery est opérationnel et validé." -ForegroundColor Yellow
-        Read-Host "    Appuyez sur Entrée pour lancer la bascule"
-        Write-Log "Validation manuelle confirmée — lancement step4." -LogFile $LogFile
+
+    Wait-Job -Job $jobs | Out-Null
+
+    foreach ($job in $jobs) {
+        $jobOutput = Receive-Job -Job $job
+        if ($jobOutput) {
+            $jobOutput | ForEach-Object { Write-Log "[$($job.Name)] $_" -LogFile $LogFile }
+        }
     }
+
+    $failedJobs = $jobs | Where-Object { $_.State -ne "Completed" }
+    if ($failedJobs) {
+        $failedNames = $failedJobs.Name -join ", "
+        Write-Log "Exécution parallèle incomplète. Jobs en échec: $failedNames" -Level ERROR -LogFile $LogFile
+        Remove-Job -Job $jobs -Force
+        exit 1
+    }
+
+    Remove-Job -Job $jobs -Force
+    Write-Log "Étapes parallélisées terminées avec succès pour toutes les VMs." -Level SUCCESS -LogFile $LogFile
 }
 
 Write-Log "======================================================" -LogFile $LogFile

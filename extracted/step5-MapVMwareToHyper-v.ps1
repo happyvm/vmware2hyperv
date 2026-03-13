@@ -10,6 +10,7 @@ param (
     [string]$ClusterStorage,
     [string]$BackupTag,
     [string]$Tag,      # Optionnel - pour contextualiser le log
+    [string]$VMName,
     [string]$LogFile
 )
 
@@ -52,6 +53,13 @@ Write-Log "Connexion à SCVMM réussie." -Level SUCCESS -LogFile $LogFile
 
 Write-Log "Chargement du fichier CSV..." -LogFile $LogFile
 $VMList  = Import-Csv -Path $CsvFile -Delimiter ";"
+if ($VMName) {
+    $VMList = $VMList | Where-Object { $_.VMName -eq $VMName }
+    if (-not $VMList) {
+        Write-Log "VM $VMName absente du CSV, aucune opération de mapping à réaliser." -Level WARNING -LogFile $LogFile
+        exit 0
+    }
+}
 $VMNames = $VMList.VMName
 Write-Log "VMs à traiter : $($VMNames -join ', ')" -LogFile $LogFile
 
