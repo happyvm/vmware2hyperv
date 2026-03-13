@@ -28,7 +28,7 @@ Write-Log "Démarrage step0 - uptime mail" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $Subject = "Uptime des VMs - $(Get-Date -Format 'dd/MM/yyyy HH:mm')"
-$VMs     = VMware.VimAutomation.Core\Get-VM | Where-Object { $_.PowerState -eq "PoweredOn" }
+$VMs     = Get-VMWareVM | Where-Object { $_.PowerState -eq "PoweredOn" }
 $Results = @()
 
 foreach ($VM in $VMs) {
