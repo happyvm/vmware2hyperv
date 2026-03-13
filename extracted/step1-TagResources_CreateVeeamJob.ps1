@@ -21,7 +21,6 @@ if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step1-tag-v
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
 
-Set-Alias -Name Get-VMWareVM -Value VMware.VimAutomation.Core\Get-VM
 
 Write-Log "Démarrage step1 - tagging et création jobs Veeam" -LogFile $LogFile
 Assert-FileExists -Path $CsvFile -Label "CSV lotissement" -LogFile $LogFile
@@ -46,13 +45,13 @@ foreach ($entry in $csvData) {
         New-Tag -Name $tagName -Category $TagCategory
     }
 
-    $existingTags = Get-TagAssignment -Entity (Get-VMWareVM -Name $vmName) | Where-Object { $_.Tag.Category -eq $TagCategory }
+    $existingTags = Get-TagAssignment -Entity (VMware.VimAutomation.Core\Get-VM -Name $vmName) | Where-Object { $_.Tag.Category -eq $TagCategory }
     foreach ($existingTag in $existingTags) {
         Write-Log "Suppression du tag existant $($existingTag.Tag.Name) sur $vmName" -Level WARNING -LogFile $LogFile
         Remove-TagAssignment -TagAssignment $existingTag -Confirm:$false
     }
 
-    $vm = Get-VMWareVM -Name $vmName -ErrorAction SilentlyContinue
+    $vm = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if ($vm) {
         Write-Log "Ajout du tag $tagName à $vmName" -LogFile $LogFile
         New-TagAssignment -Tag $tagName -Entity $vm

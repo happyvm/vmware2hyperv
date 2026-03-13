@@ -64,7 +64,7 @@ if ($null -eq $tag) {
     exit 1
 }
 
-$vms = Get-VM | Where-Object { Get-TagAssignment -Entity $_ | Where-Object { $_.Tag -eq $tag } }
+$vms = VMware.VimAutomation.Core\Get-VM | Where-Object { Get-TagAssignment -Entity $_ | Where-Object { $_.Tag -eq $tag } }
 Write-Log "VMs trouvées avec le tag '$tagName' : $($vms.Count)" -LogFile $LogFile
 
 if ($vms.Count -eq 0) {

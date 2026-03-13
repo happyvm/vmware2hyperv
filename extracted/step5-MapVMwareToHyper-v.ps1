@@ -26,7 +26,6 @@ if (-not $ClusterStorage){ $ClusterStorage = $Config.HyperV.ClusterStorage }
 if (-not $BackupTag)     { $BackupTag     = $Config.Tags.BackupTag }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step5-map-network$(if ($Tag) { "-$Tag" })-$(Get-Date -Format 'yyyyMMdd').log" }
 
-Set-Alias -Name Get-VMWareVM -Value VMware.VimAutomation.Core\Get-VM
 
 Write-Log "Démarrage step5 - mapping réseau VMware → Hyper-V" -LogFile $LogFile
 Assert-FileExists -Path $CsvFile -Label "CSV lotissement" -LogFile $LogFile
@@ -47,7 +46,7 @@ Write-Log "VMs à traiter : $($VMNames -join ', ')" -LogFile $LogFile
 # Récupération des VMs sur VMware avec leur VLAN
 $VMs = @()
 foreach ($VMName in $VMNames) {
-    $VMObject = Get-VMWareVM -Name $VMName -ErrorAction SilentlyContinue
+    $VMObject = VMware.VimAutomation.Core\Get-VM -Name $VMName -ErrorAction SilentlyContinue
     if ($VMObject) {
         $NetworkAdapter = Get-NetworkAdapter -VM $VMObject -ErrorAction SilentlyContinue
         if ($NetworkAdapter) {

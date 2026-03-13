@@ -23,8 +23,6 @@ if (-not $LogFile)                { $LogFile                = "$($Config.Paths.L
 Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 
-Set-Alias -Name Get-VMWareVM  -Value VMware.VimAutomation.Core\Get-VM
-Set-Alias -Name Stop-VMwareVM -Value VMware.VimAutomation.Core\Stop-VM
 
 $JobName = "Backup-$Tag"
 
@@ -36,7 +34,7 @@ $vmList = Import-Csv -Path $CsvFile -Delimiter ";"
 
 foreach ($vm in $vmList) {
     Write-Log "Arrêt propre de la VM : $($vm.VMName)" -LogFile $LogFile
-    $vmObj = Get-VMWareVM -Name $vm.VMName -ErrorAction SilentlyContinue
+    $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vm.VMName -ErrorAction SilentlyContinue
     if (-not $vmObj) {
         Write-Log "VM introuvable : $($vm.VMName)" -Level WARNING -LogFile $LogFile
         continue
@@ -48,12 +46,12 @@ foreach ($vm in $vmList) {
         do {
             Start-Sleep -Seconds 10
             $elapsed += 10
-            $vmObj = Get-VMWareVM -Name $vm.VMName
+            $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vm.VMName
         } while ($vmObj.PowerState -ne "PoweredOff" -and $elapsed -lt $timeout)
 
         if ($vmObj.PowerState -ne "PoweredOff") {
             Write-Log "VM $($vm.VMName) non éteinte après ${timeout}s — power-off forcé." -Level WARNING -LogFile $LogFile
-            Stop-VMwareVM -VM $vm.VMName -Confirm:$false -ErrorAction SilentlyContinue
+            VMware.VimAutomation.Core\Stop-VM -VM $vm.VMName -Confirm:$false -ErrorAction SilentlyContinue
         }
     }
     Write-Log "VM $($vm.VMName) éteinte." -Level SUCCESS -LogFile $LogFile

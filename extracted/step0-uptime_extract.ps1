@@ -15,12 +15,11 @@ if (-not $OutputCsvPath) { $OutputCsvPath = $Config.Paths.OutputCsv }
 if (-not $LogFile)       { $LogFile = "$($Config.Paths.LogDir)\step0-uptime$(if ($Tag) { "-$Tag" })-$(Get-Date -Format 'yyyyMMdd').log" }
 
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
-Set-Alias -Name Get-VMWareVM -Value VMware.VimAutomation.Core\Get-VM
 
 Write-Log "Démarrage step0 - extraction uptime" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
-$VMs = Get-VMWareVM | Where-Object { $_.PowerState -eq "PoweredOn" }
+$VMs = VMware.VimAutomation.Core\Get-VM | Where-Object { $_.PowerState -eq "PoweredOn" }
 Write-Log "VMs allumées : $($VMs.Count)" -LogFile $LogFile
 
 $Results = @()

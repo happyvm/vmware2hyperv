@@ -23,7 +23,6 @@ if (-not $MailTo) {
 }
 
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
-Set-Alias -Name Get-VMWareVM -Value VMware.VimAutomation.Core\Get-VM
 
 Write-Log "Démarrage step0 - uptime mail" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
