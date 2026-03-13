@@ -8,6 +8,9 @@ param (
     [string]$SCVMMServer,
     [string]$HyperVHost,
     [string]$TargetPath,
+    [string]$VMName,
+    [int]$WaitingTimeoutSeconds = 1800,
+    [int]$WaitingPollIntervalSeconds = 15,
     [string]$LogFile
 )
 
@@ -36,6 +39,14 @@ if (!$RestorePoints) {
     Write-Log "Aucune VM trouvée dans les points de restauration pour le job $BackupJobName." -Level ERROR -LogFile $LogFile
     exit 1
 }
+if ($VMName) {
+    $RestorePoints = $RestorePoints | Where-Object { $_.Name -eq $VMName }
+    if (!$RestorePoints) {
+        Write-Log "Aucun point de restauration trouvé pour la VM '$VMName' dans le job $BackupJobName." -Level ERROR -LogFile $LogFile
+        exit 1
+    }
+}
+
 Write-Log "Nombre de VM à restaurer : $($RestorePoints.Count)" -LogFile $LogFile
 
 $RestorePoints | ForEach-Object {
@@ -45,8 +56,28 @@ $RestorePoints | ForEach-Object {
     try {
         Start-VBRHvInstantRecovery -RestorePoint $_ -Server $HyperVHost -Path "$TargetPath\$VMName" -PowerUp $false -NICsEnabled $true -PreserveMACs $true -PreserveVmID $true
         Write-Log "Instant Recovery lancé pour $VMName." -Level SUCCESS -LogFile $LogFile
+
+        $elapsed = 0
+        do {
+            $waitingVmNames = Get-VBRInstantRecovery |
+                Where-Object { $_.State -eq "WaitingForUserAction" } |
+                Select-Object -ExpandProperty VMName
+
+            if ($waitingVmNames -contains $VMName) {
+                Write-Log "Instant Recovery en attente de validation utilisateur pour $VMName (State=WaitingForUserAction)." -Level SUCCESS -LogFile $LogFile
+                break
+            }
+
+            Start-Sleep -Seconds $WaitingPollIntervalSeconds
+            $elapsed += $WaitingPollIntervalSeconds
+        } while ($elapsed -lt $WaitingTimeoutSeconds)
+
+        if ($elapsed -ge $WaitingTimeoutSeconds) {
+            throw "Timeout de $WaitingTimeoutSeconds secondes atteint en attente de WaitingForUserAction pour $VMName."
+        }
     } catch {
         Write-Log "Erreur lors de la restauration de $VMName : $_" -Level ERROR -LogFile $LogFile
+        throw
     }
 }
 
