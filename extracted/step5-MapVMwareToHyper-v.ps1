@@ -26,6 +26,18 @@ if (-not $ClusterStorage){ $ClusterStorage = $Config.HyperV.ClusterStorage }
 if (-not $BackupTag)     { $BackupTag     = $Config.Tags.BackupTag }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step5-map-network$(if ($Tag) { "-$Tag" })-$(Get-Date -Format 'yyyyMMdd').log" }
 
+$requiredConfigPaths = @(
+    @{ Path = "SCVMM.Network.PortClassificationName"; Value = $Config.SCVMM.Network.PortClassificationName },
+    @{ Path = "SCVMM.Network.LogicalSwitchName";      Value = $Config.SCVMM.Network.LogicalSwitchName }
+)
+
+foreach ($requiredConfig in $requiredConfigPaths) {
+    if ([string]::IsNullOrWhiteSpace([string]$requiredConfig.Value)) {
+        $errorMessage = "Configuration invalide : la clé '$($requiredConfig.Path)' est absente ou vide dans config.psd1."
+        Write-Log $errorMessage -Level ERROR -LogFile $LogFile
+        throw $errorMessage
+    }
+}
 
 Write-Log "Démarrage step5 - mapping réseau VMware → Hyper-V" -LogFile $LogFile
 Assert-FileExists -Path $CsvFile -Label "CSV lotissement" -LogFile $LogFile
@@ -77,7 +89,7 @@ Disconnect-VCenter -LogFile $LogFile
 Write-Log "Récupération des VMNetworks et VMSubnets..." -LogFile $LogFile
 $VMNetworks        = Get-SCVMNetwork -VMMServer $VMMServer
 $VMSubnets         = Get-SCVMSubnet -VMMServer $VMMServer
-$PortClassification = Get-SCPortClassification -VMMServer $VMMServer | Where-Object { $_.Name -eq "PC_VMNetwork" }
+$PortClassification = Get-SCPortClassification -VMMServer $VMMServer | Where-Object { $_.Name -eq $Config.SCVMM.Network.PortClassificationName }
 
 Write-Log "VMNetworks : $($VMNetworks.Count) | VMSubnets : $($VMSubnets.Count)" -LogFile $LogFile
 
@@ -96,7 +108,7 @@ foreach ($VM in $VMs) {
             if ($TargetVM) {
                 # Configuration réseau
                 $NetworkAdapter = Get-SCVirtualNetworkAdapter -VM $TargetVM
-                Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $NetworkAdapter -VMNetwork $MatchingVMNetwork -VMSubnet $MatchingVMSubnet -VLanEnabled $true -VLanID $VLANID -VirtualNetwork "LS_SET_VMNetwork" -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $PortClassification | Out-Null
+                Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $NetworkAdapter -VMNetwork $MatchingVMNetwork -VMSubnet $MatchingVMSubnet -VLanEnabled $true -VLanID $VLANID -VirtualNetwork $Config.SCVMM.Network.LogicalSwitchName -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $PortClassification | Out-Null
                 Write-Log "Réseau configuré sur $VMName (VLAN $VLANID, VMNetwork $($MatchingVMNetwork.Name))." -Level SUCCESS -LogFile $LogFile
 
                 # Integration Services
