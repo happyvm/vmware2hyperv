@@ -13,7 +13,7 @@ param (
     [string]$Tag,
 
     # Étape à partir de laquelle démarrer (utile en cas de reprise)
-    [ValidateSet("step1", "step2", "step3", "step4", "step5")]
+    [ValidateSet("step1", "step2", "step3")]
     [string]$StartFrom = "step1",
 
     # Groupe de destinataires pour le mail de pré-migration
@@ -35,7 +35,7 @@ Write-Log "Démarrage migration pour le lot : $Tag" -LogFile $LogFile
 Write-Log "Étape de départ : $StartFrom" -LogFile $LogFile
 Write-Log "======================================================" -LogFile $LogFile
 
-$steps = @("step1", "step2", "step3", "step4", "step5")
+$steps = @("step1", "step2", "step3")
 $startIndex = [array]::IndexOf($steps, $StartFrom)
 
 function Invoke-OrchestratorStep {
@@ -76,71 +76,86 @@ if ($startIndex -le 1) {
     Write-Log "Validation manuelle confirmée — lancement step3." -LogFile $LogFile
 }
 
-if ($startIndex -ge 2) {
-    $csvFile = $Config.Paths.CsvFile
-    Assert-FileExists -Path $csvFile -Label "CSV lotissement" -LogFile $LogFile
+# ── Récupération des VLANs VMware (une seule connexion, avant le parallèle) ──
 
-    $vmNames = (Import-Csv -Path $csvFile -Delimiter ";" | Select-Object -ExpandProperty VMName | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
-    if (-not $vmNames) {
-        Write-Log "Aucune VM trouvée dans le CSV pour exécuter les étapes 3 à 5." -Level ERROR -LogFile $LogFile
-        exit 1
-    }
+$csvFile = $Config.Paths.CsvFile
+Assert-FileExists -Path $csvFile -Label "CSV lotissement" -LogFile $LogFile
 
-    $runStep3 = $startIndex -le 2
-    $runStep4 = $startIndex -le 3
-    $runStep5 = $startIndex -le 4
+$vmNames = (Import-Csv -Path $csvFile -Delimiter ";" |
+    Select-Object -ExpandProperty VMName |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Sort-Object -Unique)
 
-    Write-Log "Exécution parallèle par VM pour les étapes $(($steps[$startIndex..4]) -join ', ')" -LogFile $LogFile
-    Write-Log "VMs ciblées : $($vmNames -join ', ')" -LogFile $LogFile
-
-    $jobs = foreach ($vmName in $vmNames) {
-        $vmLogFile = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
-
-        Start-Job -Name "migration-$vmName" -ScriptBlock {
-            param(
-                [string]$ScriptsRoot,
-                [string]$Tag,
-                [string]$VmName,
-                [string]$VmLogFile,
-                [bool]$RunStep3,
-                [bool]$RunStep4,
-                [bool]$RunStep5
-            )
-
-            $ErrorActionPreference = "Stop"
-
-            if ($RunStep3) {
-                & "$ScriptsRoot\step3-InstantRestoreStartVeeam.ps1" -BackupJobName "Backup-$Tag" -VMName $VmName -LogFile $VmLogFile
-            }
-            if ($RunStep4) {
-                & "$ScriptsRoot\step4-InstantRestoreFinishVeeam.ps1" -Tag $Tag -VMName $VmName -LogFile $VmLogFile
-            }
-            if ($RunStep5) {
-                & "$ScriptsRoot\step5-MapVMwareToHyper-v.ps1" -Tag $Tag -VMName $VmName -LogFile $VmLogFile
-            }
-        } -ArgumentList $PSScriptRoot, $Tag, $vmName, $vmLogFile, $runStep3, $runStep4, $runStep5
-    }
-
-    Wait-Job -Job $jobs | Out-Null
-
-    foreach ($job in $jobs) {
-        $jobOutput = Receive-Job -Job $job
-        if ($jobOutput) {
-            $jobOutput | ForEach-Object { Write-Log "[$($job.Name)] $_" -LogFile $LogFile }
-        }
-    }
-
-    $failedJobs = $jobs | Where-Object { $_.State -ne "Completed" }
-    if ($failedJobs) {
-        $failedNames = $failedJobs.Name -join ", "
-        Write-Log "Exécution parallèle incomplète. Jobs en échec: $failedNames" -Level ERROR -LogFile $LogFile
-        Remove-Job -Job $jobs -Force
-        exit 1
-    }
-
-    Remove-Job -Job $jobs -Force
-    Write-Log "Étapes parallélisées terminées avec succès pour toutes les VMs." -Level SUCCESS -LogFile $LogFile
+if (-not $vmNames) {
+    Write-Log "Aucune VM trouvée dans le CSV." -Level ERROR -LogFile $LogFile
+    exit 1
 }
+
+Write-Log "Récupération des VLANs VMware pour $($vmNames.Count) VMs..." -LogFile $LogFile
+Import-RequiredModule -Name "VMware.VimAutomation.Core" -LogFile $LogFile -UseWindowsPowerShellFallback
+Connect-VCenter -Server $Config.VCenter.Server -LogFile $LogFile
+
+$vmVlans = @{}
+foreach ($vmName in $vmNames) {
+    $VMObject = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    if ($VMObject) {
+        $NetworkAdapter = Get-NetworkAdapter -VM $VMObject -ErrorAction SilentlyContinue
+        if ($NetworkAdapter -and $NetworkAdapter.NetworkName) {
+            $DVPortGroup = Get-VDPortgroup -Name $NetworkAdapter.NetworkName -ErrorAction SilentlyContinue
+            $vlanId = if ($DVPortGroup -and $DVPortGroup.VlanConfiguration -match "\d+") { $matches[0] } else { "PortGroup non trouvé" }
+        } else {
+            $vlanId = if ($NetworkAdapter) { "Non attaché à un réseau" } else { "Pas d'adaptateur réseau" }
+        }
+    } else {
+        $vlanId = "VM introuvable"
+    }
+    Write-Log "VLAN $vmName : $vlanId" -LogFile $LogFile
+    $vmVlans[$vmName] = $vlanId
+}
+
+Disconnect-VCenter -LogFile $LogFile
+
+# ── Exécution parallèle par VM ────────────────────────────────────────────────
+
+Write-Log "Exécution parallèle par VM (step3)..." -LogFile $LogFile
+Write-Log "VMs ciblées : $($vmNames -join ', ')" -LogFile $LogFile
+
+$jobs = foreach ($vmName in $vmNames) {
+    $vmLogFile = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $vlanId    = $vmVlans[$vmName]
+
+    Start-Job -Name "migration-$vmName" -ScriptBlock {
+        param(
+            [string]$ScriptsRoot,
+            [string]$Tag,
+            [string]$VmName,
+            [string]$VlanId,
+            [string]$VmLogFile
+        )
+
+        $ErrorActionPreference = "Stop"
+        & "$ScriptsRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$Tag" -VMName $VmName -VlanId $VlanId -Tag $Tag -LogFile $VmLogFile
+    } -ArgumentList $PSScriptRoot, $Tag, $vmName, $vlanId, $vmLogFile
+}
+
+Wait-Job -Job $jobs | Out-Null
+
+foreach ($job in $jobs) {
+    $jobOutput = Receive-Job -Job $job
+    if ($jobOutput) {
+        $jobOutput | ForEach-Object { Write-Log "[$($job.Name)] $_" -LogFile $LogFile }
+    }
+}
+
+$failedJobs = $jobs | Where-Object { $_.State -ne "Completed" }
+if ($failedJobs) {
+    $failedNames = $failedJobs.Name -join ", "
+    Write-Log "Exécution parallèle incomplète. Jobs en échec: $failedNames" -Level ERROR -LogFile $LogFile
+    Remove-Job -Job $jobs -Force
+    exit 1
+}
+
+Remove-Job -Job $jobs -Force
 
 Write-Log "======================================================" -LogFile $LogFile
 Write-Log "Migration du lot $Tag terminée avec succès." -Level SUCCESS -LogFile $LogFile
