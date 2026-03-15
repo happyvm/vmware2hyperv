@@ -28,7 +28,15 @@ Write-Log "Starting step0 - uptime email" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $Subject = "VM uptime - $(Get-Date -Format 'dd/MM/yyyy HH:mm')"
-$VMs     = Get-VMWareVM | Where-Object { $_.PowerState -eq "PoweredOn" }
+try {
+    $VMs = VMware.VimAutomation.Core\Get-VM | Where-Object { $_.PowerState -eq "PoweredOn" }
+    Write-Log "Powered-on VMs: $($VMs.Count)" -LogFile $LogFile
+}
+catch {
+    Write-Log "Failed to retrieve VMs from vCenter '$VCenterServer': $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
+    Disconnect-VCenter -LogFile $LogFile
+    exit 1
+}
 $Results = @()
 
 foreach ($VM in $VMs) {
