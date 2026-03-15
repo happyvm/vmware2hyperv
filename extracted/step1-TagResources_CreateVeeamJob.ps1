@@ -34,9 +34,19 @@ if (-not $category) {
 }
 
 $csvData = Import-Csv -Path $CsvFile -Delimiter ";"
+$csvTags = $csvData |
+    ForEach-Object { $_.Tag } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    ForEach-Object { $_.Trim() } |
+    Sort-Object -Unique
 
 foreach ($entry in $csvData) {
     $vmName  = $entry.VMName
+    if ([string]::IsNullOrWhiteSpace($entry.Tag)) {
+        Write-Log "Missing tag in CSV for VM '$vmName'. Skipping this entry." -Level WARNING -LogFile $LogFile
+        continue
+    }
+
     $tagName = $entry.Tag.Trim()
 
     $existingTag = Get-Tag -Name $tagName -ErrorAction SilentlyContinue
@@ -60,17 +70,23 @@ foreach ($entry in $csvData) {
     }
 }
 
-# Creating Veeam jobs by tag
+# Creating Veeam jobs by tag from CSV (configurable and deterministic)
 $backupRepo = Get-VBRBackupRepository -Name $BackupRepoName
-$vmwareTags = Find-VBRViEntity -Tags -Server $VCenterServer | Where-Object { $_.Name -like "HypMig-lot-*" }
+$availableVeeamTags = Find-VBRViEntity -Tags -Server $VCenterServer
 
-foreach ($vmwareTag in $vmwareTags) {
-    $jobName = "Backup-$($vmwareTag.Name)"
+foreach ($tagName in $csvTags) {
+    $vmwareTag = $availableVeeamTags | Where-Object { $_.Name -eq $tagName } | Select-Object -First 1
+    if (-not $vmwareTag) {
+        Write-Log "Tag '$tagName' not found in VMware/Veeam inventory. Skipping job creation for this tag." -Level WARNING -LogFile $LogFile
+        continue
+    }
+
+    $jobName = "Backup-$tagName"
     $job     = Get-VBRJob -Name $jobName -ErrorAction SilentlyContinue
 
     if (-not $job) {
         Write-Log "Creating backup job: $jobName" -LogFile $LogFile
-        Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $($vmwareTag.Name)" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
+        Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
     } else {
         Write-Log "The job $jobName already exists." -LogFile $LogFile
     }
