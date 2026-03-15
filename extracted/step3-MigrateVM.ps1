@@ -36,25 +36,25 @@ if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step3-migra
 Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
 
-# ── Instant Recovery : démarrage ─────────────────────────────────────────────
+# ── Instant Recovery: start ─────────────────────────────────────────────
 
-Write-Log "[$VMName] Vérification SCVMM dans Veeam..." -LogFile $LogFile
+Write-Log "[$VMName] Checking SCVMM in Veeam..." -LogFile $LogFile
 $VBRSCVMM = Get-VBRServer | Where-Object { $_.Name -eq $SCVMMServer -and $_.Type -eq "Scvmm" }
 if (!$VBRSCVMM) {
-    Write-Log "[$VMName] SCVMM $SCVMMServer n'est pas enregistré dans Veeam." -Level ERROR -LogFile $LogFile
+    Write-Log "[$VMName] SCVMM $SCVMMServer is not registered in Veeam." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
 $RestorePoint = Get-VBRRestorePoint | Where-Object { $_.GetBackup().Name -eq $BackupJobName -and $_.Name -eq $VMName }
 if (!$RestorePoint) {
-    Write-Log "[$VMName] Aucun point de restauration trouvé dans le job $BackupJobName." -Level ERROR -LogFile $LogFile
+    Write-Log "[$VMName] No restore point found in job $BackupJobName." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
-Write-Log "[$VMName] Démarrage Instant Recovery..." -LogFile $LogFile
+Write-Log "[$VMName] Starting Instant Recovery..." -LogFile $LogFile
 try {
     Start-VBRHvInstantRecovery -RestorePoint $RestorePoint -Server $HyperVHost -Path "$ClusterStorage\$VMName" -PowerUp $false -NICsEnabled $true -PreserveMACs $true -PreserveVmID $true
-    Write-Log "[$VMName] Instant Recovery lancé." -Level SUCCESS -LogFile $LogFile
+    Write-Log "[$VMName] Instant Recovery started." -Level SUCCESS -LogFile $LogFile
 
     $elapsed = 0
     do {
@@ -63,7 +63,7 @@ try {
             Select-Object -ExpandProperty VMName
 
         if ($waitingVmNames -contains $VMName) {
-            Write-Log "[$VMName] State=WaitingForUserAction atteint." -Level SUCCESS -LogFile $LogFile
+            Write-Log "[$VMName] State=WaitingForUserAction reached." -Level SUCCESS -LogFile $LogFile
             break
         }
 
@@ -72,44 +72,44 @@ try {
     } while ($elapsed -lt $WaitingTimeoutSeconds)
 
     if ($elapsed -ge $WaitingTimeoutSeconds) {
-        throw "Timeout de $WaitingTimeoutSeconds secondes atteint en attente de WaitingForUserAction."
+        throw "Timeout of $WaitingTimeoutSeconds seconds reached while waiting for WaitingForUserAction."
     }
 } catch {
-    Write-Log "[$VMName] Erreur Instant Recovery : $_" -Level ERROR -LogFile $LogFile
+    Write-Log "[$VMName] Instant Recovery error: $_" -Level ERROR -LogFile $LogFile
     throw
 }
 
-# ── Instant Recovery : finalisation ─────────────────────────────────────────
+# ── Instant Recovery: finalization ─────────────────────────────────────────
 
 $VMMServer = Get-SCVMMServer -ComputerName $SCVMMServer
 
 $IRSession = Get-VBRInstantRecovery | Where-Object { $_.VMName -eq $VMName }
 if (!$IRSession) {
-    Write-Log "[$VMName] Aucune session Instant Recovery active." -Level ERROR -LogFile $LogFile
+    Write-Log "[$VMName] No active Instant Recovery session." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
 $vmInScvmm = Get-SCVirtualMachine -Name $VMName -VMMServer $VMMServer
 if (!$vmInScvmm) {
-    Write-Log "[$VMName] VM absente de SCVMM, finalisation impossible." -Level ERROR -LogFile $LogFile
+    Write-Log "[$VMName] VM missing from SCVMM, finalization impossible." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
-Write-Log "[$VMName] Finalisation Instant Recovery..." -LogFile $LogFile
+Write-Log "[$VMName] Finalizing Instant Recovery..." -LogFile $LogFile
 try {
     Start-VBRHvInstantRecoveryMigration -InstantRecovery $IRSession
-    Write-Log "[$VMName] Finalisation complète." -Level SUCCESS -LogFile $LogFile
+    Write-Log "[$VMName] Finalization completed." -Level SUCCESS -LogFile $LogFile
 } catch {
-    Write-Log "[$VMName] Erreur finalisation : $_" -Level ERROR -LogFile $LogFile
+    Write-Log "[$VMName] Finalization error: $_" -Level ERROR -LogFile $LogFile
     throw
 }
 
-# ── Mapping réseau ────────────────────────────────────────────────────────────
+# ── Network mapping ────────────────────────────────────────────────────────────
 
-Write-Log "[$VMName] Configuration réseau (VLAN $VlanId)..." -LogFile $LogFile
+Write-Log "[$VMName] Network configuration (VLAN $VlanId)..." -LogFile $LogFile
 
 if ($VlanId -notmatch "^\d+$") {
-    Write-Log "[$VMName] VLAN ID invalide : '$VlanId' — mapping réseau ignoré." -Level WARNING -LogFile $LogFile
+    Write-Log "[$VMName] Invalid VLAN ID: '$VlanId' — network mapping skipped." -Level WARNING -LogFile $LogFile
 } else {
     $requiredConfigPaths = @(
         @{ Path = "SCVMM.Network.PortClassificationName"; Value = $Config.SCVMM.Network.PortClassificationName },
@@ -117,7 +117,7 @@ if ($VlanId -notmatch "^\d+$") {
     )
     foreach ($requiredConfig in $requiredConfigPaths) {
         if ([string]::IsNullOrWhiteSpace([string]$requiredConfig.Value)) {
-            throw "Configuration invalide : la clé '$($requiredConfig.Path)' est absente ou vide dans config.psd1."
+            throw "Invalid configuration: key '$($requiredConfig.Path)' is missing or empty in config.psd1."
         }
     }
 
@@ -129,37 +129,37 @@ if ($VlanId -notmatch "^\d+$") {
     $MatchingVMSubnet  = $VMSubnets  | Where-Object { $_.Name -like "*$VlanId*" -or $_.Description -like "*$VlanId*" }
 
     if (!$MatchingVMNetwork -or !$MatchingVMSubnet) {
-        Write-Log "[$VMName] Aucun VMNetwork/VMSubnet trouvé pour VLAN $VlanId." -Level WARNING -LogFile $LogFile
+        Write-Log "[$VMName] No VMNetwork/VMSubnet found for VLAN $VlanId." -Level WARNING -LogFile $LogFile
     } else {
         $TargetVM = Get-SCVirtualMachine -Name $VMName -VMMServer $VMMServer | Where-Object { $_.VirtualizationPlatform -eq "HyperV" }
         if (!$TargetVM) {
-            Write-Log "[$VMName] VM non trouvée dans SCVMM." -Level WARNING -LogFile $LogFile
+            Write-Log "[$VMName] VM not found in SCVMM." -Level WARNING -LogFile $LogFile
         } else {
             $NetworkAdapter = Get-SCVirtualNetworkAdapter -VM $TargetVM
             Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $NetworkAdapter -VMNetwork $MatchingVMNetwork -VMSubnet $MatchingVMSubnet -VLanEnabled $true -VLanID $VlanId -VirtualNetwork $Config.SCVMM.Network.LogicalSwitchName -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $PortClassification | Out-Null
-            Write-Log "[$VMName] Réseau configuré (VLAN $VlanId, VMNetwork $($MatchingVMNetwork.Name))." -Level SUCCESS -LogFile $LogFile
+            Write-Log "[$VMName] Network configured (VLAN $VlanId, VMNetwork $($MatchingVMNetwork.Name))." -Level SUCCESS -LogFile $LogFile
 
             Set-SCVirtualMachine -VM $TargetVM -EnableOperatingSystemShutdown $true -EnableTimeSynchronization $false -EnableDataExchange $true -EnableHeartbeat $true -EnableBackup $true -EnableGuestServicesInterface $true | Out-Null
-            Write-Log "[$VMName] Integration Services configurés." -LogFile $LogFile
+            Write-Log "[$VMName] Integration Services configured." -LogFile $LogFile
 
             try {
                 Add-ClusterVirtualMachineRole -Cluster $HyperVCluster -VirtualMachine $TargetVM.Name
-                Write-Log "[$VMName] VM intégrée au cluster $HyperVCluster." -Level SUCCESS -LogFile $LogFile
+                Write-Log "[$VMName] VM added to cluster $HyperVCluster." -Level SUCCESS -LogFile $LogFile
             } catch {
-                Write-Log "[$VMName] Erreur cluster : $_" -Level ERROR -LogFile $LogFile
+                Write-Log "[$VMName] Cluster error: $_" -Level ERROR -LogFile $LogFile
             }
 
             try {
                 Move-VM -Name $TargetVM.Name -DestinationHost $HyperVHost2
-                Write-Log "[$VMName] LiveMigration vers $HyperVHost2 effectuée." -Level SUCCESS -LogFile $LogFile
+                Write-Log "[$VMName] LiveMigration to $HyperVHost2 performed." -Level SUCCESS -LogFile $LogFile
             } catch {
-                Write-Log "[$VMName] Erreur LiveMigration : $_" -Level ERROR -LogFile $LogFile
+                Write-Log "[$VMName] LiveMigration error: $_" -Level ERROR -LogFile $LogFile
             }
 
             Set-SCVirtualMachine -VM $TargetVM -Tag $BackupTag | Out-Null
-            Write-Log "[$VMName] Tag backup '$BackupTag' appliqué." -LogFile $LogFile
+            Write-Log "[$VMName] Backup tag '$BackupTag' applied." -LogFile $LogFile
         }
     }
 }
 
-Write-Log "[$VMName] Migration complète." -Level SUCCESS -LogFile $LogFile
+Write-Log "[$VMName] Migration completed." -Level SUCCESS -LogFile $LogFile

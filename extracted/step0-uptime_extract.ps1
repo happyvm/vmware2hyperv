@@ -3,7 +3,7 @@
 param (
     [string]$VCenterServer,
     [string]$OutputCsvPath,
-    [string]$Tag,      # Optionnel - pour contextualiser le log
+    [string]$Tag,      # Optional - to add context to the log
     [string]$LogFile
 )
 
@@ -16,11 +16,11 @@ if (-not $LogFile)       { $LogFile = "$($Config.Paths.LogDir)\step0-uptime$(if 
 
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 
-Write-Log "Démarrage step0 - extraction uptime" -LogFile $LogFile
+Write-Log "Starting step0 - uptime extraction" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $VMs = VMware.VimAutomation.Core\Get-VM | Where-Object { $_.PowerState -eq "PoweredOn" }
-Write-Log "VMs allumées : $($VMs.Count)" -LogFile $LogFile
+Write-Log "Powered-on VMs: $($VMs.Count)" -LogFile $LogFile
 
 $Results = @()
 
@@ -37,9 +37,9 @@ foreach ($VM in $VMs) {
 
     if ($BootTime) {
         $UptimeSpan = (Get-Date) - $BootTime
-        $Uptime = "{0} jours, {1} heures, {2} minutes" -f $UptimeSpan.Days, $UptimeSpan.Hours, $UptimeSpan.Minutes
+        $Uptime = "{0} days, {1} hours, {2} minutes" -f $UptimeSpan.Days, $UptimeSpan.Hours, $UptimeSpan.Minutes
     } else {
-        $Uptime = "Indisponible"
+        $Uptime = "Unavailable"
     }
 
     $Results += [PSCustomObject]@{
@@ -53,5 +53,5 @@ foreach ($VM in $VMs) {
 $Results | Format-Table -AutoSize
 $Results | Export-Csv -Path $OutputCsvPath -NoTypeInformation -Encoding UTF8
 
-Write-Log "Résultats exportés vers : $OutputCsvPath" -Level SUCCESS -LogFile $LogFile
+Write-Log "Results exported to: $OutputCsvPath" -Level SUCCESS -LogFile $LogFile
 Disconnect-VCenter -LogFile $LogFile

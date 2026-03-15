@@ -5,7 +5,7 @@ param (
     [string]$CsvFile,
     [string]$TagCategory,
     [string]$BackupRepoName,
-    [string]$Tag,      # Optionnel - pour contextualiser le log
+    [string]$Tag,      # Optional - to add context to the log
     [string]$LogFile
 )
 
@@ -22,14 +22,14 @@ Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
 
 
-Write-Log "Démarrage step1 - tagging et création jobs Veeam" -LogFile $LogFile
-Assert-FileExists -Path $CsvFile -Label "CSV lotissement" -LogFile $LogFile
+Write-Log "Starting step1 - tagging and creating Veeam jobs" -LogFile $LogFile
+Assert-FileExists -Path $CsvFile -Label "batch CSV" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
-# Vérifier / créer la catégorie de tag
+# Check / create the tag category
 $category = Get-TagCategory -Name $TagCategory -ErrorAction SilentlyContinue
 if (-not $category) {
-    Write-Log "Création de la catégorie de tag : $TagCategory" -LogFile $LogFile
+    Write-Log "Creating tag category: $TagCategory" -LogFile $LogFile
     New-TagCategory -Name $TagCategory -Cardinality Single -EntityType VirtualMachine
 }
 
@@ -41,26 +41,26 @@ foreach ($entry in $csvData) {
 
     $existingTag = Get-Tag -Name $tagName -ErrorAction SilentlyContinue
     if (-not $existingTag) {
-        Write-Log "Création du tag : $tagName" -LogFile $LogFile
+        Write-Log "Creating tag: $tagName" -LogFile $LogFile
         New-Tag -Name $tagName -Category $TagCategory
     }
 
     $existingTags = Get-TagAssignment -Entity (VMware.VimAutomation.Core\Get-VM -Name $vmName) | Where-Object { $_.Tag.Category -eq $TagCategory }
     foreach ($existingTag in $existingTags) {
-        Write-Log "Suppression du tag existant $($existingTag.Tag.Name) sur $vmName" -Level WARNING -LogFile $LogFile
+        Write-Log "Removing existing tag $($existingTag.Tag.Name) from $vmName" -Level WARNING -LogFile $LogFile
         Remove-TagAssignment -TagAssignment $existingTag -Confirm:$false
     }
 
     $vm = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if ($vm) {
-        Write-Log "Ajout du tag $tagName à $vmName" -LogFile $LogFile
+        Write-Log "Adding tag $tagName to $vmName" -LogFile $LogFile
         New-TagAssignment -Tag $tagName -Entity $vm
     } else {
-        Write-Log "VM non trouvée : $vmName" -Level WARNING -LogFile $LogFile
+        Write-Log "VM not found: $vmName" -Level WARNING -LogFile $LogFile
     }
 }
 
-# Création des jobs Veeam par tag
+# Creating Veeam jobs by tag
 $backupRepo = Get-VBRBackupRepository -Name $BackupRepoName
 $vmwareTags = Find-VBRViEntity -Tags -Server $VCenterServer | Where-Object { $_.Name -like "HypMig-lot-*" }
 
@@ -69,12 +69,12 @@ foreach ($vmwareTag in $vmwareTags) {
     $job     = Get-VBRJob -Name $jobName -ErrorAction SilentlyContinue
 
     if (-not $job) {
-        Write-Log "Création du job de sauvegarde : $jobName" -LogFile $LogFile
-        Add-VBRViBackupJob -Name $jobName -Description "Sauvegarde pour le tag $($vmwareTag.Name)" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
+        Write-Log "Creating backup job: $jobName" -LogFile $LogFile
+        Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $($vmwareTag.Name)" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
     } else {
-        Write-Log "Le job $jobName existe déjà." -LogFile $LogFile
+        Write-Log "The job $jobName already exists." -LogFile $LogFile
     }
 }
 
 Disconnect-VCenter -LogFile $LogFile
-Write-Log "step1 terminé." -Level SUCCESS -LogFile $LogFile
+Write-Log "step1 completed." -Level SUCCESS -LogFile $LogFile

@@ -2,12 +2,12 @@
 
 param (
     [Parameter(Mandatory = $true)]
-    [string]$tagName,             # Tag du lot (ex: HypMig-lot-118)
+    [string]$tagName,             # Batch tag (e.g. HypMig-lot-118)
 
     [Parameter(Mandatory = $true)]
-    [string]$recipientGroup,      # Groupe de destinataires (internal, infogerant)
+    [string]$recipientGroup,      # Recipient group (internal, provider)
 
-    [switch]$SkipVCenterLogin,    # Bypasse la connexion à vCenter si déjà connecté
+    [switch]$SkipVCenterLogin,    # Bypasses vCenter connection if already connected
 
     [string]$vCenterServer,
     [string]$smtpServer,
@@ -25,14 +25,14 @@ if ($smtpPort -eq 0)     { $smtpPort      = $Config.Smtp.Port }
 if (-not $mailFrom)      { $mailFrom      = $Config.Smtp.From }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\stepx-premigration-mail-$tagName-$(Get-Date -Format 'yyyyMMdd').log" }
 
-# Les destinataires sont définis dans config.psd1
+# Recipients are defined in config.psd1
 $recipients = $Config.Recipients
 
-Write-Log "Démarrage stepx - mail pré-migration pour le tag '$tagName'" -LogFile $LogFile
+Write-Log "Starting stepx - pre-migration email for tag '$tagName'" -LogFile $LogFile
 Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -Confirm:$false | Out-Null
 
 if (-not $recipients.ContainsKey($recipientGroup)) {
-    Write-Log "Groupe de destinataires invalide : '$recipientGroup'. Valeurs : $($recipients.Keys -join ', ')." -Level ERROR -LogFile $LogFile
+    Write-Log "Invalid recipient group: '$recipientGroup'. Values: $($recipients.Keys -join ', ')." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
@@ -46,34 +46,34 @@ if (-not (Get-Module -Name VMware.PowerCLI)) {
 if (-not $SkipVCenterLogin) {
     Connect-VCenter -Server $vCenterServer -LogFile $LogFile
 } else {
-    Write-Log "Bypass de la connexion à vCenter (-SkipVCenterLogin activé)." -Level WARNING -LogFile $LogFile
+    Write-Log "Bypassing vCenter connection (-SkipVCenterLogin enabled)." -Level WARNING -LogFile $LogFile
 }
 
-Write-Log "Recherche des VMs avec le tag '$tagName'..." -LogFile $LogFile
+Write-Log "Searching VMs with tag '$tagName'..." -LogFile $LogFile
 try {
     $tag = Get-Tag -Name $tagName -ErrorAction Stop
 } catch {
-    Write-Log "Impossible de récupérer le tag '$tagName' : $_" -Level ERROR -LogFile $LogFile
+    Write-Log "Unable to retrieve tag '$tagName' : $_" -Level ERROR -LogFile $LogFile
     if (-not $SkipVCenterLogin) { Disconnect-VCenter -LogFile $LogFile }
     exit 1
 }
 
 if ($null -eq $tag) {
-    Write-Log "Le tag '$tagName' n'existe pas." -Level ERROR -LogFile $LogFile
+    Write-Log "Tag '$tagName' does not exist." -Level ERROR -LogFile $LogFile
     if (-not $SkipVCenterLogin) { Disconnect-VCenter -LogFile $LogFile }
     exit 1
 }
 
 $vms = VMware.VimAutomation.Core\Get-VM | Where-Object { Get-TagAssignment -Entity $_ | Where-Object { $_.Tag -eq $tag } }
-Write-Log "VMs trouvées avec le tag '$tagName' : $($vms.Count)" -LogFile $LogFile
+Write-Log "VMs found with tag '$tagName' : $($vms.Count)" -LogFile $LogFile
 
 if ($vms.Count -eq 0) {
-    Write-Log "Aucune VM avec le tag '$tagName'." -Level WARNING -LogFile $LogFile
+    Write-Log "No VM with tag '$tagName'." -Level WARNING -LogFile $LogFile
     if (-not $SkipVCenterLogin) { Disconnect-VCenter -LogFile $LogFile }
     exit 0
 }
 
-# Génération du tableau HTML
+# Generating HTML table
 $htmlBody = @"
 <html>
 <head>
@@ -100,5 +100,5 @@ $htmlBody += "</table></body></html>"
 Send-HtmlMail -From $mailFrom -To $mailTo -Subject $mailSubject -HtmlBody $htmlBody -SmtpServer $smtpServer -Port $smtpPort -LogFile $LogFile
 
 if (-not $SkipVCenterLogin) { Disconnect-VCenter -LogFile $LogFile }
-Write-Log "stepx terminé avec succès." -Level SUCCESS -LogFile $LogFile
+Write-Log "stepx completed successfully." -Level SUCCESS -LogFile $LogFile
 exit 0

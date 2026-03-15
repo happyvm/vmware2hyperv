@@ -1,10 +1,10 @@
 #requires -Version 7.0
 
-# lib.ps1 — Fonctions communes aux scripts de migration VMware → Hyper-V
-# Chargement : . "$PSScriptRoot\lib.ps1"
+# lib.ps1 — Common functions for VMware → Hyper-V migration scripts
+# Load: . "$PSScriptRoot\lib.ps1"
 
 # ---------------------------------------------------------------------------
-# Write-Log : logging horodaté vers console + fichier
+# Write-Log : timestamped logging to console + file
 # ---------------------------------------------------------------------------
 function Write-Log {
     param(
@@ -38,27 +38,27 @@ function Write-Log {
 }
 
 # ---------------------------------------------------------------------------
-# Assert-FileExists : arrête le script si un fichier est manquant
+# Assert-FileExists : stops the script if a file is missing
 # ---------------------------------------------------------------------------
 function Assert-FileExists {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path,
 
-        [string]$Label = "Fichier",
+        [string]$Label = "File",
 
         [string]$LogFile
     )
 
     if (-not (Test-Path $Path)) {
-        $message = "$Label introuvable : $Path"
+        $message = "$Label not found: $Path"
         Write-Log $message -Level ERROR -LogFile $LogFile
         throw $message
     }
 }
 
 # ---------------------------------------------------------------------------
-# Connect-VCenter : connexion vCenter avec mode Multiple
+# Connect-VCenter : vCenter connection using Multiple mode
 # ---------------------------------------------------------------------------
 function Connect-VCenter {
     param(
@@ -76,26 +76,26 @@ function Connect-VCenter {
 
     try {
         Connect-VIServer -Server $Server | Out-Null
-        Write-Log "Connecté à vCenter : $Server" -Level SUCCESS -LogFile $LogFile
+        Write-Log "Connected to vCenter: $Server" -Level SUCCESS -LogFile $LogFile
     } catch {
-        $message = "Échec de la connexion à vCenter $Server : $_"
+        $message = "Failed to connect to vCenter $Server : $_"
         Write-Log $message -Level ERROR -LogFile $LogFile
         throw $message
     }
 }
 
 # ---------------------------------------------------------------------------
-# Disconnect-VCenter : déconnexion silencieuse de vCenter
+# Disconnect-VCenter : silent disconnection from vCenter
 # ---------------------------------------------------------------------------
 function Disconnect-VCenter {
     param([string]$LogFile)
 
     Disconnect-VIServer -Confirm:$false -ErrorAction SilentlyContinue
-    Write-Log "Déconnecté de vCenter." -Level INFO -LogFile $LogFile
+    Write-Log "Disconnected from vCenter." -Level INFO -LogFile $LogFile
 }
 
 # ---------------------------------------------------------------------------
-# Import-RequiredModule : import de module compatible PowerShell 7
+# Import-RequiredModule : PowerShell 7-compatible module import
 # ---------------------------------------------------------------------------
 function Import-RequiredModule {
     param(
@@ -109,29 +109,29 @@ function Import-RequiredModule {
 
     try {
         Import-Module -Name $Name -ErrorAction Stop
-        Write-Log "Module importé : $Name" -LogFile $LogFile
+        Write-Log "Module imported: $Name" -LogFile $LogFile
         return
     } catch {
         if ($PSVersionTable.PSEdition -eq "Core" -and $UseWindowsPowerShellFallback) {
             try {
                 Import-Module -Name $Name -UseWindowsPowerShell -SkipEditionCheck -ErrorAction Stop
-                Write-Log "Module importé via compatibilité Windows PowerShell : $Name" -Level WARNING -LogFile $LogFile
+                Write-Log "Module imported via Windows PowerShell compatibility mode: $Name" -Level WARNING -LogFile $LogFile
                 return
             } catch {
-                $message = "Impossible d'importer le module $Name (import standard et mode compatibilité échoués) : $_"
+                $message = "Unable to import module $Name (standard import and compatibility mode both failed) : $_"
                 Write-Log $message -Level ERROR -LogFile $LogFile
                 throw $message
             }
         }
 
-        $message = "Impossible d'importer le module $Name : $_"
+        $message = "Unable to import module $Name : $_"
         Write-Log $message -Level ERROR -LogFile $LogFile
         throw $message
     }
 }
 
 # ---------------------------------------------------------------------------
-# Send-HtmlMail : envoi d'un email au format HTML
+# Send-HtmlMail : send an email in HTML format
 # ---------------------------------------------------------------------------
 function Send-HtmlMail {
     param(
@@ -171,8 +171,8 @@ function Send-HtmlMail {
         $mailMessage.Dispose()
         $smtpClient.Dispose()
 
-        Write-Log "Email envoyé à : $($To -join ', ')" -Level SUCCESS -LogFile $LogFile
+        Write-Log "Email sent to: $($To -join ', ')" -Level SUCCESS -LogFile $LogFile
     } catch {
-        Write-Log "Échec de l'envoi du mail : $_" -Level ERROR -LogFile $LogFile
+        Write-Log "Failed to send email : $_" -Level ERROR -LogFile $LogFile
     }
 }
