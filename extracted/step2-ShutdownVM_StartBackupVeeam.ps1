@@ -1,7 +1,7 @@
 #requires -Version 7.0
 
 param (
-    # Nom du lot/tag à migrer (ex: HypMig-lot-118) — obligatoire
+    # Name of the batch/tag to migrate (e.g. HypMig-lot-118) — required
     [Parameter(Mandatory = $true)]
     [string]$Tag,
 
@@ -26,17 +26,17 @@ Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 
 $JobName = "Backup-$Tag"
 
-Write-Log "Démarrage step2 - arrêt VMs et backup Veeam pour le tag $Tag" -LogFile $LogFile
-Assert-FileExists -Path $CsvFile -Label "CSV lotissement" -LogFile $LogFile
+Write-Log "Starting step2 - VM shutdown and Veeam backup for tag $Tag" -LogFile $LogFile
+Assert-FileExists -Path $CsvFile -Label "batch CSV" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $vmList = Import-Csv -Path $CsvFile -Delimiter ";"
 
 foreach ($vmEntry in $vmList) {
-    Write-Log "Arrêt propre de la VM : $($vmEntry.VMName)" -LogFile $LogFile
+    Write-Log "Graceful shutdown of VM: $($vmEntry.VMName)" -LogFile $LogFile
     $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vmEntry.VMName -ErrorAction SilentlyContinue
     if (-not $vmObj) {
-        Write-Log "VM introuvable : $($vmEntry.VMName)" -Level WARNING -LogFile $LogFile
+        Write-Log "VM not found: $($vmEntry.VMName)" -Level WARNING -LogFile $LogFile
         continue
     }
     if ($vmObj.PowerState -ne "PoweredOff") {
@@ -50,23 +50,23 @@ foreach ($vmEntry in $vmList) {
         } while ($vmObj.PowerState -ne "PoweredOff" -and $elapsed -lt $timeout)
 
         if ($vmObj.PowerState -ne "PoweredOff") {
-            Write-Log "VM $($vmEntry.VMName) non éteinte après ${timeout}s — power-off forcé." -Level WARNING -LogFile $LogFile
+            Write-Log "VM $($vmEntry.VMName) not powered off after ${timeout}s — forced power-off." -Level WARNING -LogFile $LogFile
             VMware.VimAutomation.Core\Stop-VM -VM $vmEntry.VMName -Confirm:$false -ErrorAction SilentlyContinue
         }
     }
-    Write-Log "VM $($vmEntry.VMName) éteinte." -Level SUCCESS -LogFile $LogFile
+    Write-Log "VM $($vmEntry.VMName) powered off." -Level SUCCESS -LogFile $LogFile
 }
 
 Disconnect-VCenter -LogFile $LogFile
 
-Write-Log "Envoi du mail de pré-migration" -LogFile $LogFile
+Write-Log "Sending pre-migration email" -LogFile $LogFile
 & $PreMigrationMailScript -tagName $Tag -recipientGroup $RecipientGroup -vCenterServer $VCenterServer -SkipVCenterLogin
 
 $Job = Get-VBRJob -Name $JobName
 if ($Job) {
     Start-VBRJob -Job $Job
-    Write-Log "Job Veeam '$JobName' démarré avec succès." -Level SUCCESS -LogFile $LogFile
+    Write-Log "Job Veeam '$JobName' started successfully." -Level SUCCESS -LogFile $LogFile
 } else {
-    Write-Log "Job '$JobName' introuvable dans Veeam." -Level ERROR -LogFile $LogFile
+    Write-Log "Job '$JobName' not found in Veeam." -Level ERROR -LogFile $LogFile
     exit 1
 }
