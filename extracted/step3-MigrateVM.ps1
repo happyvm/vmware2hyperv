@@ -206,9 +206,14 @@ try {
 # ── Instant Recovery: finalization ─────────────────────────────────────────
 
 try {
-    $VMMServer = Invoke-SCVMMCommand -ScriptBlock {
+    $VMMServerName = Invoke-SCVMMCommand -ScriptBlock {
         param($ServerName)
-        Get-SCVMMServer -ComputerName $ServerName
+        $server = Get-SCVMMServer -ComputerName $ServerName
+        if (-not $server) {
+            throw "SCVMM server '$ServerName' not found."
+        }
+
+        return $server.Name
     } -ArgumentList @($SCVMMServer)
 } catch {
     if ([string]$_ -match "IndigoLayer") {
@@ -230,9 +235,10 @@ if (!$IRSession) {
 }
 
 $vmInScvmm = Invoke-SCVMMCommand -ScriptBlock {
-    param($Name, $Server)
-    Get-SCVirtualMachine -Name $Name -VMMServer $Server
-} -ArgumentList @($VMName, $VMMServer)
+    param($Name, $ServerName)
+    $server = Get-SCVMMServer -ComputerName $ServerName
+    Get-SCVirtualMachine -Name $Name -VMMServer $server
+} -ArgumentList @($VMName, $VMMServerName)
 if (!$vmInScvmm) {
     Write-Log "[$VMName] VM missing from SCVMM, finalization impossible." -Level ERROR -LogFile $LogFile
     exit 1
@@ -273,19 +279,22 @@ if ($VlanId -notmatch "^\d+$") {
     }
 
     $VMNetworks = Invoke-SCVMMCommand -ScriptBlock {
-        param($Server)
-        Get-SCVMNetwork -VMMServer $Server
-    } -ArgumentList @($VMMServer)
+        param($ServerName)
+        $server = Get-SCVMMServer -ComputerName $ServerName
+        Get-SCVMNetwork -VMMServer $server
+    } -ArgumentList @($VMMServerName)
 
     $VMSubnets = Invoke-SCVMMCommand -ScriptBlock {
-        param($Server)
-        Get-SCVMSubnet -VMMServer $Server
-    } -ArgumentList @($VMMServer)
+        param($ServerName)
+        $server = Get-SCVMMServer -ComputerName $ServerName
+        Get-SCVMSubnet -VMMServer $server
+    } -ArgumentList @($VMMServerName)
 
     $PortClassification = Invoke-SCVMMCommand -ScriptBlock {
-        param($Server, $PortClassificationName)
-        Get-SCPortClassification -VMMServer $Server | Where-Object { $_.Name -eq $PortClassificationName }
-    } -ArgumentList @($VMMServer, $Config.SCVMM.Network.PortClassificationName)
+        param($ServerName, $PortClassificationName)
+        $server = Get-SCVMMServer -ComputerName $ServerName
+        Get-SCPortClassification -VMMServer $server | Where-Object { $_.Name -eq $PortClassificationName }
+    } -ArgumentList @($VMMServerName, $Config.SCVMM.Network.PortClassificationName)
 
     $MatchingVMNetwork = $VMNetworks | Where-Object { $_.Name -like "*$VlanId*" -or $_.Description -like "*$VlanId*" }
     $MatchingVMSubnet  = $VMSubnets  | Where-Object { $_.Name -like "*$VlanId*" -or $_.Description -like "*$VlanId*" }
@@ -294,24 +303,25 @@ if ($VlanId -notmatch "^\d+$") {
         Write-Log "[$VMName] No VMNetwork/VMSubnet found for VLAN $VlanId." -Level WARNING -LogFile $LogFile
     } else {
         $TargetVM = Invoke-SCVMMCommand -ScriptBlock {
-            param($Name, $Server)
-            Get-SCVirtualMachine -Name $Name -VMMServer $Server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" }
-        } -ArgumentList @($VMName, $VMMServer)
+            param($Name, $ServerName)
+            $server = Get-SCVMMServer -ComputerName $ServerName
+            Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" }
+        } -ArgumentList @($VMName, $VMMServerName)
         if (!$TargetVM) {
             Write-Log "[$VMName] VM not found in SCVMM." -Level WARNING -LogFile $LogFile
         } else {
             Invoke-SCVMMCommand -ScriptBlock {
                 param(
                     $Name,
-                    $Server,
+                    $ServerName,
                     $VMNetwork,
                     $VMSubnet,
                     $Vlan,
                     $LogicalSwitch,
                     $PortClass
                 )
-
-                $vm = Get-SCVirtualMachine -Name $Name -VMMServer $Server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
+                $server = Get-SCVMMServer -ComputerName $ServerName
+                $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
                 if (-not $vm) {
                     throw "VM '$Name' not found in SCVMM while applying network configuration."
                 }
@@ -321,7 +331,7 @@ if ($VlanId -notmatch "^\d+$") {
                 Set-SCVirtualMachine -VM $vm -EnableOperatingSystemShutdown $true -EnableTimeSynchronization $false -EnableDataExchange $true -EnableHeartbeat $true -EnableBackup $true -EnableGuestServicesInterface $true | Out-Null
             } -ArgumentList @(
                 $VMName,
-                $VMMServer,
+                $VMMServerName,
                 ($MatchingVMNetwork | Select-Object -First 1),
                 ($MatchingVMSubnet | Select-Object -First 1),
                 $VlanId,
@@ -347,14 +357,15 @@ if ($VlanId -notmatch "^\d+$") {
             }
 
             Invoke-SCVMMCommand -ScriptBlock {
-                param($Name, $Server, $TagName)
-                $vm = Get-SCVirtualMachine -Name $Name -VMMServer $Server | Select-Object -First 1
+                param($Name, $ServerName, $TagName)
+                $server = Get-SCVMMServer -ComputerName $ServerName
+                $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Select-Object -First 1
                 if (-not $vm) {
                     throw "VM '$Name' not found in SCVMM while setting tag."
                 }
 
                 Set-SCVirtualMachine -VM $vm -Tag $TagName | Out-Null
-            } -ArgumentList @($VMName, $VMMServer, $BackupTag)
+            } -ArgumentList @($VMName, $VMMServerName, $BackupTag)
 
             Write-Log "[$VMName] Backup tag '$BackupTag' applied." -LogFile $LogFile
         }
