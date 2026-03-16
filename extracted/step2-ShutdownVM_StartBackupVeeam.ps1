@@ -68,7 +68,7 @@ if ($PSVersionTable.PSEdition -eq "Core") {
     $startJobScript = @'
 $JobName = $env:VMW2HV_JOB_NAME
 
-Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
+Import-Module Veeam.Backup.PowerShell -DisableNameChecking -ErrorAction Stop
 $job = Get-VBRJob -Name $JobName -ErrorAction SilentlyContinue
 if (-not $job) {
     Write-Output "[ERROR] Job '$JobName' not found in Veeam."

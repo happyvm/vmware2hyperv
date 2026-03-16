@@ -80,7 +80,7 @@ $BackupRepoName = $env:VMW2HV_BACKUP_REPO_NAME
 $VCenterServer = $env:VMW2HV_VCENTER_SERVER
 $TagsJson = $env:VMW2HV_TAGS_JSON
 
-Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
+Import-Module Veeam.Backup.PowerShell -DisableNameChecking -ErrorAction Stop
 $backupRepo = Get-VBRBackupRepository -Name $BackupRepoName -ErrorAction Stop
 $availableVeeamTags = Find-VBRViEntity -Tags -Server $VCenterServer
 $tags = @()
