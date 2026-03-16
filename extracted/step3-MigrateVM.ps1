@@ -172,7 +172,6 @@ try {
             break
         }
 
-        Write-Log "[$VMName] Current Instant Recovery state: '$($sessionState.State)' (elapsed: ${elapsed}s)." -LogFile $LogFile
 
         Start-Sleep -Seconds $WaitingPollIntervalSeconds
         $elapsed += $WaitingPollIntervalSeconds
@@ -188,7 +187,12 @@ try {
 
 # ── Instant Recovery: finalization ─────────────────────────────────────────
 
-$VMMServer = Get-SCVMMServer -ComputerName $SCVMMServer
+try {
+    $VMMServer = Get-SCVMMServer -ComputerName $SCVMMServer
+} catch {
+    Write-Log "[$VMName] Failed to connect to SCVMM server '$SCVMMServer': $_" -Level ERROR -LogFile $LogFile
+    throw
+}
 
 $IRSession = Invoke-VeeamCommand -ScriptBlock {
     param($Vm)
