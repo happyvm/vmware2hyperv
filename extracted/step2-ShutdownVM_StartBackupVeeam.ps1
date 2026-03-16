@@ -62,11 +62,57 @@ Disconnect-VCenter -LogFile $LogFile
 Write-Log "Sending pre-migration email" -LogFile $LogFile
 & $PreMigrationMailScript -tagName $Tag -recipientGroup $RecipientGroup -vCenterServer $VCenterServer -SkipVCenterLogin
 
-$Job = Get-VBRJob -Name $JobName
-if ($Job) {
-    Start-VBRJob -Job $Job
-    Write-Log "Job Veeam '$JobName' started successfully." -Level SUCCESS -LogFile $LogFile
-} else {
-    Write-Log "Job '$JobName' not found in Veeam." -Level ERROR -LogFile $LogFile
+if ($PSVersionTable.PSEdition -eq "Core") {
+    Write-Log "PowerShell 7 detected: starting the Veeam job in Windows PowerShell to avoid deserialized objects." -Level WARNING -LogFile $LogFile
+
+    $startJobScript = @'
+$JobName = $env:VMW2HV_JOB_NAME
+
+Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
+$job = Get-VBRJob -Name $JobName -ErrorAction SilentlyContinue
+if (-not $job) {
+    Write-Output "[ERROR] Job '$JobName' not found in Veeam."
     exit 1
+}
+
+Start-VBRJob -Job $job | Out-Null
+Write-Output "[SUCCESS] Job Veeam '$JobName' started successfully."
+'@
+
+    $encodedScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($startJobScript))
+    $previousJobName = $env:VMW2HV_JOB_NAME
+    $env:VMW2HV_JOB_NAME = $JobName
+
+    try {
+        $winPsOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedScript 2>&1
+        $winPsExitCode = $LASTEXITCODE
+    }
+    finally {
+        $env:VMW2HV_JOB_NAME = $previousJobName
+    }
+
+    foreach ($line in $winPsOutput) {
+        if ($line -match '^\[ERROR\]\s+(.*)$') {
+            Write-Log $Matches[1] -Level ERROR -LogFile $LogFile
+        } elseif ($line -match '^\[SUCCESS\]\s+(.*)$') {
+            Write-Log $Matches[1] -Level SUCCESS -LogFile $LogFile
+        } elseif (-not [string]::IsNullOrWhiteSpace($line)) {
+            Write-Log "Windows PowerShell: $line" -Level INFO -LogFile $LogFile
+        }
+    }
+
+    if ($winPsExitCode -ne 0) {
+        $message = "Failed to start Veeam job '$JobName' in Windows PowerShell (exit code $winPsExitCode)."
+        Write-Log $message -Level ERROR -LogFile $LogFile
+        exit 1
+    }
+} else {
+    $Job = Get-VBRJob -Name $JobName
+    if ($Job) {
+        Start-VBRJob -Job $Job
+        Write-Log "Job Veeam '$JobName' started successfully." -Level SUCCESS -LogFile $LogFile
+    } else {
+        Write-Log "Job '$JobName' not found in Veeam." -Level ERROR -LogFile $LogFile
+        exit 1
+    }
 }
