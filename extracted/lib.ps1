@@ -107,26 +107,30 @@ function Import-RequiredModule {
         [switch]$UseWindowsPowerShellFallback
     )
 
+    if ($PSVersionTable.PSEdition -eq "Core" -and $UseWindowsPowerShellFallback) {
+        try {
+            Import-Module -Name $Name -UseWindowsPowerShell -ErrorAction Stop
+            Write-Log "Module imported via Windows PowerShell compatibility mode: $Name" -Level WARNING -LogFile $LogFile
+            return
+        } catch {
+            Write-Log "Windows PowerShell compatibility mode import failed for $Name, trying standard import." -Level WARNING -LogFile $LogFile
+        }
+    }
+
     try {
         Import-Module -Name $Name -ErrorAction Stop
         Write-Log "Module imported: $Name" -LogFile $LogFile
         return
     } catch {
-        if ($PSVersionTable.PSEdition -eq "Core" -and $UseWindowsPowerShellFallback) {
+        if ($PSVersionTable.PSEdition -eq "Core") {
             try {
-                Import-Module -Name $Name -UseWindowsPowerShell -ErrorAction Stop
-                Write-Log "Module imported via Windows PowerShell compatibility mode: $Name" -Level WARNING -LogFile $LogFile
+                Import-Module -Name $Name -SkipEditionCheck -ErrorAction Stop
+                Write-Log "Module imported via SkipEditionCheck fallback: $Name" -Level WARNING -LogFile $LogFile
                 return
             } catch {
-                try {
-                    Import-Module -Name $Name -SkipEditionCheck -ErrorAction Stop
-                    Write-Log "Module imported via SkipEditionCheck fallback: $Name" -Level WARNING -LogFile $LogFile
-                    return
-                } catch {
-                    $message = "Unable to import module $Name (standard import and compatibility mode both failed) : $_"
-                    Write-Log $message -Level ERROR -LogFile $LogFile
-                    throw $message
-                }
+                $message = "Unable to import module $Name (standard import and fallbacks failed): $_"
+                Write-Log $message -Level ERROR -LogFile $LogFile
+                throw $message
             }
         }
 
