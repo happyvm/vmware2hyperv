@@ -45,9 +45,19 @@ if (!$VBRSCVMM) {
     exit 1
 }
 
-$RestorePoint = Get-VBRRestorePoint | Where-Object { $_.GetBackup().Name -eq $BackupJobName -and $_.Name -eq $VMName }
+$Backup = Get-VBRBackup | Where-Object { $_.Name -eq $BackupJobName }
+if (!$Backup) {
+    Write-Log "[$VMName] Backup job '$BackupJobName' not found in Veeam." -Level ERROR -LogFile $LogFile
+    exit 1
+}
+
+$RestorePoint = Get-VBRRestorePoint -Backup $Backup |
+    Where-Object { $_.Name -eq $VMName } |
+    Sort-Object -Property CreationTime -Descending |
+    Select-Object -First 1
+
 if (!$RestorePoint) {
-    Write-Log "[$VMName] No restore point found in job $BackupJobName." -Level ERROR -LogFile $LogFile
+    Write-Log "[$VMName] No restore point found for VM '$VMName' in job '$BackupJobName'." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
