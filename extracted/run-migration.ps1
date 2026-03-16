@@ -134,6 +134,12 @@ $jobs = foreach ($vmName in $vmNames) {
         )
 
         $ErrorActionPreference = "Stop"
+
+        # Avoid interactive security prompts in background jobs when scripts carry a Mark-of-the-Web.
+        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
+        Get-ChildItem -Path $ScriptsRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
+            Unblock-File -ErrorAction SilentlyContinue
+
         & "$ScriptsRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$Tag" -VMName $VmName -VlanId $VlanId -Tag $Tag -LogFile $VmLogFile
     } -ArgumentList $PSScriptRoot, $Tag, $vmName, $vlanId, $vmLogFile
 }
