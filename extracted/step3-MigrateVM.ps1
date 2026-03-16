@@ -409,7 +409,14 @@ if ($VlanId -notmatch "^\d+$") {
             }
 
             try {
-                Move-VM -Name $TargetVM.Name -DestinationHost $HyperVHost2
+                $hyperVMoveCommand = Get-Command -Name "Move-VM" -Module "Hyper-V" -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+
+                if (-not $hyperVMoveCommand) {
+                    throw "Hyper-V Move-VM cmdlet not found. Ensure the Hyper-V module is installed on the runner."
+                }
+
+                & $hyperVMoveCommand -Name $TargetVM.Name -DestinationHost $HyperVHost2 -ErrorAction Stop
                 Write-Log "[$VMName] LiveMigration to $HyperVHost2 performed." -Level SUCCESS -LogFile $LogFile
             } catch {
                 Write-Log "[$VMName] LiveMigration error: $_" -Level ERROR -LogFile $LogFile
