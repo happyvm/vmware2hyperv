@@ -76,11 +76,9 @@ if ($PSVersionTable.PSEdition -eq "Core") {
 
     $tagsJson = $csvTags | ConvertTo-Json -Compress
     $jobCreationScript = @'
-param(
-    [string]$BackupRepoName,
-    [string]$VCenterServer,
-    [string]$TagsJson
-)
+$BackupRepoName = $env:VMW2HV_BACKUP_REPO_NAME
+$VCenterServer = $env:VMW2HV_VCENTER_SERVER
+$TagsJson = $env:VMW2HV_TAGS_JSON
 
 Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
 $backupRepo = Get-VBRBackupRepository -Name $BackupRepoName -ErrorAction Stop
@@ -114,8 +112,23 @@ foreach ($tagName in $tags) {
 '@
 
     $encodedScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($jobCreationScript))
-    $winPsOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedScript -BackupRepoName $BackupRepoName -VCenterServer $VCenterServer -TagsJson $tagsJson 2>&1
-    $winPsExitCode = $LASTEXITCODE
+    $previousBackupRepoName = $env:VMW2HV_BACKUP_REPO_NAME
+    $previousVCenterServer = $env:VMW2HV_VCENTER_SERVER
+    $previousTagsJson = $env:VMW2HV_TAGS_JSON
+
+    $env:VMW2HV_BACKUP_REPO_NAME = $BackupRepoName
+    $env:VMW2HV_VCENTER_SERVER = $VCenterServer
+    $env:VMW2HV_TAGS_JSON = $tagsJson
+
+    try {
+        $winPsOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedScript 2>&1
+        $winPsExitCode = $LASTEXITCODE
+    }
+    finally {
+        $env:VMW2HV_BACKUP_REPO_NAME = $previousBackupRepoName
+        $env:VMW2HV_VCENTER_SERVER = $previousVCenterServer
+        $env:VMW2HV_TAGS_JSON = $previousTagsJson
+    }
 
     foreach ($line in $winPsOutput) {
         if ($line -match '^\[WARNING\]\s+(.*)$') {
