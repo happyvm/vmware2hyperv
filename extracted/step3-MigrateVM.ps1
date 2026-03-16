@@ -256,6 +256,56 @@ try {
     } -ArgumentList @($VMName)
 
     Write-Log "[$VMName] Finalization completed." -Level SUCCESS -LogFile $LogFile
+
+    $finalizationElapsed = 0
+    do {
+        $finalizationCheck = Invoke-VeeamCommand -ScriptBlock {
+            param($Vm)
+
+            $restoreSession = Get-VBRRestoreSession |
+                Where-Object { $_.Name -eq $Vm -or $_.Name -eq "$Vm-migrationhyp" -or $_.Name -like "$Vm*" } |
+                Sort-Object -Property CreationTime -Descending |
+                Select-Object -First 1
+
+            if (-not $restoreSession) {
+                return [PSCustomObject]@{
+                    Found  = $false
+                    Name   = $null
+                    State  = $null
+                    Result = $null
+                }
+            }
+
+            [PSCustomObject]@{
+                Found  = $true
+                Name   = [string]$restoreSession.Name
+                State  = [string]$restoreSession.State
+                Result = [string]$restoreSession.Result
+            }
+        } -ArgumentList @($VMName)
+
+        if (-not $finalizationCheck.Found) {
+            Write-Log "[$VMName] Restore session not yet visible after finalization start (elapsed: ${finalizationElapsed}s)." -Level WARNING -LogFile $LogFile
+        } else {
+            Write-Log "[$VMName] Restore session '$($finalizationCheck.Name)' status: State='$($finalizationCheck.State)', Result='$($finalizationCheck.Result)' (elapsed: ${finalizationElapsed}s)." -LogFile $LogFile
+
+            if ($finalizationCheck.Result -eq "Success") {
+                Write-Log "[$VMName] VM restored permanently; network reconfiguration can start." -Level SUCCESS -LogFile $LogFile
+                break
+            }
+
+            if ($finalizationCheck.Result -eq "Failed" -or $finalizationCheck.Result -eq "Warning") {
+                throw "Restore session '$($finalizationCheck.Name)' ended with result '$($finalizationCheck.Result)'."
+            }
+        }
+
+        Start-Sleep -Seconds $WaitingPollIntervalSeconds
+        $finalizationElapsed += $WaitingPollIntervalSeconds
+    } while ($finalizationElapsed -lt $WaitingTimeoutSeconds)
+
+    if ($finalizationElapsed -ge $WaitingTimeoutSeconds) {
+        throw "Timeout of $WaitingTimeoutSeconds seconds reached while waiting for restore session success before network reconfiguration."
+    }
 } catch {
     Write-Log "[$VMName] Finalization error: $_" -Level ERROR -LogFile $LogFile
     throw
