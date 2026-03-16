@@ -116,14 +116,47 @@ try {
 
     $elapsed = 0
     do {
-        $waitingVmNames = Invoke-VeeamCommand -ScriptBlock {
-            Get-VBRInstantRecovery |
-                Where-Object { $_.State -eq "WaitingForUserAction" } |
-                Select-Object -ExpandProperty VMName
-        }
+        $isWaitingForUserAction = Invoke-VeeamCommand -ScriptBlock {
+            param($Vm)
 
-        if ($waitingVmNames -contains $VMName) {
-            Write-Log "[$VMName] State=WaitingForUserAction reached." -Level SUCCESS -LogFile $LogFile
+            $instantRecoverySession = Get-VBRInstantRecovery |
+                Where-Object { $_.VMName -eq $Vm } |
+                Select-Object -First 1
+
+            if (-not $instantRecoverySession) {
+                return $false
+            }
+
+            if ($instantRecoverySession.State -eq "WaitingForUserAction") {
+                return $true
+            }
+
+            $sessionNameCandidates = @(
+                "$Vm-migrationhyp",
+                "$Vm*"
+            )
+
+            foreach ($sessionName in $sessionNameCandidates) {
+                $restoreSession = Get-VBRRestoreSession |
+                    Where-Object { $_.Name -like $sessionName } |
+                    Sort-Object -Property CreationTime -Descending |
+                    Select-Object -First 1
+
+                if (-not $restoreSession) {
+                    continue
+                }
+
+                $updatedTitles = $restoreSession.Logger.GetLog().UpdatedRecords.Title
+                if ($updatedTitles -match "Waiting for user action") {
+                    return $true
+                }
+            }
+
+            return $false
+        } -ArgumentList @($VMName)
+
+        if ($isWaitingForUserAction) {
+            Write-Log "[$VMName] Instant Recovery in waiting mode (detected via state or restore session log)." -Level SUCCESS -LogFile $LogFile
             break
         }
 
