@@ -124,6 +124,7 @@ try {
                 Select-Object -First 1
 
             $currentState = if ($instantRecoverySession) { [string]$instantRecoverySession.State } else { "<none>" }
+            $restoreSessionState = "<none>"
             $waitingDetected = $false
             $detectionSource = $null
 
@@ -134,13 +135,22 @@ try {
 
             if (-not $waitingDetected) {
                 $restoreSession = Get-VBRRestoreSession |
-                    Where-Object { $_.Name -eq $Vm -or $_.Name -like "$Vm*" } |
+                    Where-Object { $_.Name -eq $Vm -or $_.Name -eq "$Vm-migrationhyp" -or $_.Name -like "$Vm*" } |
                     Sort-Object -Property CreationTime -Descending |
                     Select-Object -First 1
 
                 if ($restoreSession) {
-                    $updatedTitles = $restoreSession.Logger.GetLog().UpdatedRecords.Title
-                    if ($updatedTitles -match "Waiting for user action") {
+                    $restoreSessionState = [string]$restoreSession.State
+                    $sessionLog = $restoreSession.Logger.GetLog()
+                    $logRecords = @()
+                    if ($sessionLog.UpdatedRecords) { $logRecords += $sessionLog.UpdatedRecords }
+                    if ($sessionLog.Records)        { $logRecords += $sessionLog.Records }
+
+                    $logText = ($logRecords | ForEach-Object {
+                        @($_.Title, $_.Description, $_.Message, $_.Text)
+                    } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join "`n"
+
+                    if ($logText -match "Waiting for user action") {
                         $waitingDetected = $true
                         $detectionSource = "restore-session-log"
                     }
@@ -148,13 +158,14 @@ try {
             }
 
             [PSCustomObject]@{
-                WaitingDetected = $waitingDetected
-                CurrentState    = $currentState
-                DetectionSource = $detectionSource
+                WaitingDetected     = $waitingDetected
+                CurrentState        = $currentState
+                RestoreSessionState = $restoreSessionState
+                DetectionSource     = $detectionSource
             }
         } -ArgumentList @($VMName)
 
-        Write-Log "[$VMName] Current Instant Recovery state: '$($waitCheck.CurrentState)' (elapsed: ${elapsed}s)." -LogFile $LogFile
+        Write-Log "[$VMName] Current states: InstantRecovery='$($waitCheck.CurrentState)', RestoreSession='$($waitCheck.RestoreSessionState)' (elapsed: ${elapsed}s)." -LogFile $LogFile
 
         if ($waitCheck.WaitingDetected) {
             Write-Log "[$VMName] Instant Recovery in waiting mode (source=$($waitCheck.DetectionSource))." -Level SUCCESS -LogFile $LogFile
