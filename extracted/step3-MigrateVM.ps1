@@ -328,28 +328,25 @@ if ($VlanId -notmatch "^\d+$") {
         }
     }
 
-    $VMNetworks = Invoke-SCVMMCommand -ScriptBlock {
-        param($ServerName)
+    $NetworkMapping = Invoke-SCVMMCommand -ScriptBlock {
+        param($ServerName, $Vlan)
         $server = Get-SCVMMServer -ComputerName $ServerName
-        Get-SCVMNetwork -VMMServer $server
-    } -ArgumentList @($VMMServerName)
 
-    $VMSubnets = Invoke-SCVMMCommand -ScriptBlock {
-        param($ServerName)
-        $server = Get-SCVMMServer -ComputerName $ServerName
-        Get-SCVMSubnet -VMMServer $server
-    } -ArgumentList @($VMMServerName)
+        $matchingVMNetwork = Get-SCVMNetwork -VMMServer $server |
+            Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" } |
+            Select-Object -First 1
 
-    $PortClassification = Invoke-SCVMMCommand -ScriptBlock {
-        param($ServerName, $PortClassificationName)
-        $server = Get-SCVMMServer -ComputerName $ServerName
-        Get-SCPortClassification -VMMServer $server | Where-Object { $_.Name -eq $PortClassificationName }
-    } -ArgumentList @($VMMServerName, $Config.SCVMM.Network.PortClassificationName)
+        $matchingVMSubnet = Get-SCVMSubnet -VMMServer $server |
+            Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" } |
+            Select-Object -First 1
 
-    $MatchingVMNetwork = $VMNetworks | Where-Object { $_.Name -like "*$VlanId*" -or $_.Description -like "*$VlanId*" }
-    $MatchingVMSubnet  = $VMSubnets  | Where-Object { $_.Name -like "*$VlanId*" -or $_.Description -like "*$VlanId*" }
+        [pscustomobject]@{
+            VMNetworkName = $matchingVMNetwork.Name
+            VMSubnetName  = $matchingVMSubnet.Name
+        }
+    } -ArgumentList @($VMMServerName, $VlanId)
 
-    if (!$MatchingVMNetwork -or !$MatchingVMSubnet) {
+    if ([string]::IsNullOrWhiteSpace($NetworkMapping.VMNetworkName) -or [string]::IsNullOrWhiteSpace($NetworkMapping.VMSubnetName)) {
         Write-Log "[$VMName] No VMNetwork/VMSubnet found for VLAN $VlanId." -Level WARNING -LogFile $LogFile
     } else {
         $TargetVM = Invoke-SCVMMCommand -ScriptBlock {
@@ -364,11 +361,11 @@ if ($VlanId -notmatch "^\d+$") {
                 param(
                     $Name,
                     $ServerName,
-                    $VMNetwork,
-                    $VMSubnet,
+                    $VMNetworkName,
+                    $VMSubnetName,
                     $Vlan,
                     $LogicalSwitch,
-                    $PortClass
+                    $PortClassificationName
                 )
                 $server = Get-SCVMMServer -ComputerName $ServerName
                 $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
@@ -376,20 +373,32 @@ if ($VlanId -notmatch "^\d+$") {
                     throw "VM '$Name' not found in SCVMM while applying network configuration."
                 }
 
+                $vmNetwork = Get-SCVMNetwork -VMMServer $server | Where-Object { $_.Name -eq $VMNetworkName } | Select-Object -First 1
+                $vmSubnet = Get-SCVMSubnet -VMMServer $server | Where-Object { $_.Name -eq $VMSubnetName } | Select-Object -First 1
+                $portClass = Get-SCPortClassification -VMMServer $server | Where-Object { $_.Name -eq $PortClassificationName } | Select-Object -First 1
+
+                if (-not $vmNetwork -or -not $vmSubnet) {
+                    throw "Unable to resolve VMNetwork/VMSubnet in SCVMM for VLAN '$Vlan'."
+                }
+
+                if (-not $portClass) {
+                    throw "Port classification '$PortClassificationName' not found in SCVMM."
+                }
+
                 $networkAdapter = Get-SCVirtualNetworkAdapter -VM $vm
-                Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $VMNetwork -VMSubnet $VMSubnet -VLanEnabled $true -VLanID $Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $PortClass | Out-Null
+                Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $vmNetwork -VMSubnet $vmSubnet -VLanEnabled $true -VLanID $Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
                 Set-SCVirtualMachine -VM $vm -EnableOperatingSystemShutdown $true -EnableTimeSynchronization $false -EnableDataExchange $true -EnableHeartbeat $true -EnableBackup $true -EnableGuestServicesInterface $true | Out-Null
             } -ArgumentList @(
                 $VMName,
                 $VMMServerName,
-                ($MatchingVMNetwork | Select-Object -First 1),
-                ($MatchingVMSubnet | Select-Object -First 1),
+                $NetworkMapping.VMNetworkName,
+                $NetworkMapping.VMSubnetName,
                 $VlanId,
                 $Config.SCVMM.Network.LogicalSwitchName,
-                $PortClassification
+                $Config.SCVMM.Network.PortClassificationName
             )
 
-            Write-Log "[$VMName] Network configured (VLAN $VlanId, VMNetwork $($MatchingVMNetwork.Name))." -Level SUCCESS -LogFile $LogFile
+            Write-Log "[$VMName] Network configured (VLAN $VlanId, VMNetwork $($NetworkMapping.VMNetworkName))." -Level SUCCESS -LogFile $LogFile
             Write-Log "[$VMName] Integration Services configured." -LogFile $LogFile
 
             try {
