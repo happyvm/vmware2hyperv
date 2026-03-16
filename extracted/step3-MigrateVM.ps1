@@ -72,6 +72,38 @@ function Invoke-SCVMMCommand {
     return & $ScriptBlock @ArgumentList
 }
 
+function Start-SCVMMHostMigration {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ServerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationHost
+    )
+
+    Invoke-SCVMMCommand -ScriptBlock {
+        param($VmName, $VmmServerName, $TargetHostName)
+
+        $server = Get-SCVMMServer -ComputerName $VmmServerName
+        $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server | Select-Object -First 1
+        if (-not $vm) {
+            throw "VM '$VmName' not found in SCVMM while starting migration."
+        }
+
+        $targetHost = Get-SCVMHost -VMMServer $server |
+            Where-Object { $_.ComputerName -eq $TargetHostName -or $_.Name -eq $TargetHostName } |
+            Select-Object -First 1
+        if (-not $targetHost) {
+            throw "Destination host '$TargetHostName' not found in SCVMM."
+        }
+
+        Move-SCVirtualMachine -VM $vm -VMHost $targetHost -UseLAN -RunAsynchronously | Out-Null
+    } -ArgumentList @($Name, $ServerName, $DestinationHost)
+}
+
 # ── Instant Recovery: start ─────────────────────────────────────────────
 
 Write-Log "[$VMName] Checking SCVMM in Veeam..." -LogFile $LogFile
@@ -413,26 +445,21 @@ if ($VlanId -notmatch "^\d+$") {
                     Select-Object -First 1
 
                 if ($hyperVMoveCommand) {
-                    & $hyperVMoveCommand -Name $TargetVM.Name -DestinationHost $HyperVHost2 -ErrorAction Stop
-                    Write-Log "[$VMName] LiveMigration to $HyperVHost2 performed via Hyper-V module." -Level SUCCESS -LogFile $LogFile
+                    try {
+                        & $hyperVMoveCommand -Name $TargetVM.Name -DestinationHost $HyperVHost2 -ErrorAction Stop
+                        Write-Log "[$VMName] LiveMigration to $HyperVHost2 performed via Hyper-V module." -Level SUCCESS -LogFile $LogFile
+                    } catch {
+                        if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {
+                            Write-Log "[$VMName] Hyper-V Move-VM failed due to local platform limits; retrying migration via SCVMM." -Level WARNING -LogFile $LogFile
+                            Start-SCVMMHostMigration -Name $VMName -ServerName $VMMServerName -DestinationHost $HyperVHost2
+                            Write-Log "[$VMName] LiveMigration to $HyperVHost2 requested via SCVMM after Hyper-V failure." -Level SUCCESS -LogFile $LogFile
+                        } else {
+                            throw
+                        }
+                    }
                 } else {
                     Write-Log "[$VMName] Hyper-V Move-VM cmdlet unavailable on runner, trying SCVMM move." -Level WARNING -LogFile $LogFile
-                    Invoke-SCVMMCommand -ScriptBlock {
-                        param($Name, $ServerName, $DestinationHost)
-
-                        $server = Get-SCVMMServer -ComputerName $ServerName
-                        $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Select-Object -First 1
-                        if (-not $vm) {
-                            throw "VM '$Name' not found in SCVMM while starting migration."
-                        }
-
-                        $targetHost = Get-SCVMHost -VMMServer $server | Where-Object { $_.ComputerName -eq $DestinationHost -or $_.Name -eq $DestinationHost } | Select-Object -First 1
-                        if (-not $targetHost) {
-                            throw "Destination host '$DestinationHost' not found in SCVMM."
-                        }
-
-                        Move-SCVirtualMachine -VM $vm -VMHost $targetHost -UseLAN -RunAsynchronously | Out-Null
-                    } -ArgumentList @($VMName, $VMMServerName, $HyperVHost2)
+                    Start-SCVMMHostMigration -Name $VMName -ServerName $VMMServerName -DestinationHost $HyperVHost2
 
                     Write-Log "[$VMName] LiveMigration to $HyperVHost2 requested via SCVMM." -Level SUCCESS -LogFile $LogFile
                 }
