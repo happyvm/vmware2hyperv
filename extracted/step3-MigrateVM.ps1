@@ -116,16 +116,40 @@ try {
 
     $elapsed = 0
     do {
-        $waitingVmNames = Invoke-VeeamCommand -ScriptBlock {
-            Get-VBRInstantRecovery |
-                Where-Object { $_.State -eq "WaitingForUserAction" } |
-                Select-Object -ExpandProperty VMName
+        $sessionState = Invoke-VeeamCommand -ScriptBlock {
+            param($Vm)
+
+            $session = Get-VBRInstantRecovery |
+                Where-Object {
+                    $_.VMName -eq $Vm -or
+                    $_.Name -eq $Vm -or
+                    $_.OriginalVmName -eq $Vm
+                } |
+                Select-Object -First 1
+
+            if (-not $session) {
+                return [pscustomobject]@{
+                    Found = $false
+                    State = $null
+                }
+            }
+
+            return [pscustomobject]@{
+                Found = $true
+                State = [string]$session.State
+            }
+        } -ArgumentList @($VMName)
+
+        if (-not $sessionState.Found) {
+            throw "No active Instant Recovery session found for VM '$VMName' while waiting for WaitingForUserAction."
         }
 
-        if ($waitingVmNames -contains $VMName) {
+        if ($sessionState.State -eq "WaitingForUserAction") {
             Write-Log "[$VMName] State=WaitingForUserAction reached." -Level SUCCESS -LogFile $LogFile
             break
         }
+
+        Write-Log "[$VMName] Current Instant Recovery state: '$($sessionState.State)' (elapsed: ${elapsed}s)." -LogFile $LogFile
 
         Start-Sleep -Seconds $WaitingPollIntervalSeconds
         $elapsed += $WaitingPollIntervalSeconds
