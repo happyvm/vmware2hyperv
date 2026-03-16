@@ -51,10 +51,27 @@ if (!$Backup) {
     exit 1
 }
 
-$RestorePoint = Get-VBRRestorePoint -Backup $Backup |
-    Where-Object { $_.Name -eq $VMName } |
-    Sort-Object -Property CreationTime -Descending |
-    Select-Object -First 1
+$RestorePoint = $null
+
+try {
+    $RestorePoint = Get-VBRRestorePoint -Backup $Backup |
+        Where-Object { $_.Name -eq $VMName } |
+        Sort-Object -Property CreationTime -Descending |
+        Select-Object -First 1
+} catch {
+    Write-Log "[$VMName] Get-VBRRestorePoint -Backup failed, retrying with compatibility filter: $_" -Level WARNING -LogFile $LogFile
+
+    $allRestorePoints = Get-VBRRestorePoint -Name $VMName -ErrorAction SilentlyContinue
+    $matchingRestorePoints = $allRestorePoints | Where-Object {
+        ($_.PSObject.Properties["BackupName"] -and $_.BackupName -eq $BackupJobName) -or
+        ($_.PSObject.Properties["JobName"] -and $_.JobName -eq $BackupJobName) -or
+        ($_.PSObject.Properties["Backup"] -and $_.Backup -and $_.Backup.Name -eq $BackupJobName)
+    }
+
+    $RestorePoint = $matchingRestorePoints |
+        Sort-Object -Property CreationTime -Descending |
+        Select-Object -First 1
+}
 
 if (!$RestorePoint) {
     Write-Log "[$VMName] No restore point found for VM '$VMName' in job '$BackupJobName'." -Level ERROR -LogFile $LogFile
