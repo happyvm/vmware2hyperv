@@ -71,24 +71,89 @@ foreach ($entry in $csvData) {
 }
 
 # Creating Veeam jobs by tag from CSV (configurable and deterministic)
-$backupRepo = Get-VBRBackupRepository -Name $BackupRepoName
-$availableVeeamTags = Find-VBRViEntity -Tags -Server $VCenterServer
+if ($PSVersionTable.PSEdition -eq "Core") {
+    Write-Log "PowerShell 7 detected: creating Veeam jobs in Windows PowerShell to avoid deserialized repository objects." -Level WARNING -LogFile $LogFile
 
-foreach ($tagName in $csvTags) {
+    $tagsJson = $csvTags | ConvertTo-Json -Compress
+    $jobCreationScript = @'
+param(
+    [string]$BackupRepoName,
+    [string]$VCenterServer,
+    [string]$TagsJson
+)
+
+Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
+$backupRepo = Get-VBRBackupRepository -Name $BackupRepoName -ErrorAction Stop
+$availableVeeamTags = Find-VBRViEntity -Tags -Server $VCenterServer
+$tags = @()
+if (-not [string]::IsNullOrWhiteSpace($TagsJson)) {
+    $tags = ConvertFrom-Json -InputObject $TagsJson
+}
+
+if ($tags -isnot [System.Array]) {
+    $tags = @($tags)
+}
+
+foreach ($tagName in $tags) {
     $vmwareTag = $availableVeeamTags | Where-Object { $_.Name -eq $tagName } | Select-Object -First 1
     if (-not $vmwareTag) {
-        Write-Log "Tag '$tagName' not found in VMware/Veeam inventory. Skipping job creation for this tag." -Level WARNING -LogFile $LogFile
+        Write-Output "[WARNING] Tag '$tagName' not found in VMware/Veeam inventory. Skipping job creation for this tag."
         continue
     }
 
     $jobName = "Backup-$tagName"
-    $job     = Get-VBRJob -Name $jobName -ErrorAction SilentlyContinue
+    $job = Get-VBRJob -Name $jobName -ErrorAction SilentlyContinue
 
     if (-not $job) {
-        Write-Log "Creating backup job: $jobName" -LogFile $LogFile
         Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
+        Write-Output "[SUCCESS] Created backup job: $jobName"
     } else {
-        Write-Log "The job $jobName already exists." -LogFile $LogFile
+        Write-Output "[INFO] The job $jobName already exists."
+    }
+}
+'@
+
+    $encodedScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($jobCreationScript))
+    $winPsOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedScript -BackupRepoName $BackupRepoName -VCenterServer $VCenterServer -TagsJson $tagsJson 2>&1
+    $winPsExitCode = $LASTEXITCODE
+
+    foreach ($line in $winPsOutput) {
+        if ($line -match '^\[WARNING\]\s+(.*)$') {
+            Write-Log $Matches[1] -Level WARNING -LogFile $LogFile
+        } elseif ($line -match '^\[SUCCESS\]\s+(.*)$') {
+            Write-Log $Matches[1] -Level SUCCESS -LogFile $LogFile
+        } elseif ($line -match '^\[INFO\]\s+(.*)$') {
+            Write-Log $Matches[1] -Level INFO -LogFile $LogFile
+        } elseif (-not [string]::IsNullOrWhiteSpace($line)) {
+            Write-Log "Windows PowerShell: $line" -Level INFO -LogFile $LogFile
+        }
+    }
+
+    if ($winPsExitCode -ne 0) {
+        $message = "Veeam job creation failed in Windows PowerShell (exit code $winPsExitCode)."
+        Write-Log $message -Level ERROR -LogFile $LogFile
+        throw $message
+    }
+} else {
+    $backupRepo = Get-VBRBackupRepository -Name $BackupRepoName
+    $availableVeeamTags = Find-VBRViEntity -Tags -Server $VCenterServer
+
+    foreach ($tagName in $csvTags) {
+        $vmwareTag = $availableVeeamTags | Where-Object { $_.Name -eq $tagName } | Select-Object -First 1
+        if (-not $vmwareTag) {
+            Write-Log "Tag '$tagName' not found in VMware/Veeam inventory. Skipping job creation for this tag." -Level WARNING -LogFile $LogFile
+            continue
+        }
+
+        $jobName = "Backup-$tagName"
+        $job     = Get-VBRJob -Name $jobName -ErrorAction SilentlyContinue
+
+        if (-not $job) {
+            Write-Log "Creating backup job: $jobName" -LogFile $LogFile
+            Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
+        } else {
+            Write-Log "The job $jobName already exists." -LogFile $LogFile
+        }
     }
 }
 
