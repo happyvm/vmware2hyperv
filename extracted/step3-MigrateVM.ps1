@@ -36,116 +36,91 @@ if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step3-migra
 Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
 
+function Invoke-VeeamCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+
+        [object[]]$ArgumentList = @()
+    )
+
+    $compatSession = Get-PSSession -Name 'WinPSCompatSession' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
+    if ($compatSession) {
+        return Invoke-Command -Session $compatSession -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+    }
+
+    return & $ScriptBlock @ArgumentList
+}
+
 # ── Instant Recovery: start ─────────────────────────────────────────────
 
 Write-Log "[$VMName] Checking SCVMM in Veeam..." -LogFile $LogFile
-$VBRSCVMM = Get-VBRServer | Where-Object { $_.Name -eq $SCVMMServer -and $_.Type -eq "Scvmm" }
+$VBRSCVMM = Invoke-VeeamCommand -ScriptBlock {
+    param($ScvmmServerName)
+    Get-VBRServer | Where-Object { $_.Name -eq $ScvmmServerName -and $_.Type -eq "Scvmm" } |
+        Select-Object -First 1 -Property Name, Type
+} -ArgumentList @($SCVMMServer)
+
 if (!$VBRSCVMM) {
     Write-Log "[$VMName] SCVMM $SCVMMServer is not registered in Veeam." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
-$Backup = Get-VBRBackup | Where-Object { $_.Name -eq $BackupJobName }
+$Backup = Invoke-VeeamCommand -ScriptBlock {
+    param($JobName)
+    Get-VBRBackup | Where-Object { $_.Name -eq $JobName } |
+        Select-Object -First 1 -Property Name, Id
+} -ArgumentList @($BackupJobName)
+
 if (!$Backup) {
     Write-Log "[$VMName] Backup job '$BackupJobName' not found in Veeam." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
-$RestorePoint = $null
-
-function Test-RestorePointMatchesBackup {
-    param(
-        [Parameter(Mandatory = $true)]
-        $RestorePoint,
-        [Parameter(Mandatory = $true)]
-        $Backup,
-        [Parameter(Mandatory = $true)]
-        [string]$BackupJobName
-    )
-
-    $backupIdCandidates = @($Backup.Id, $Backup.BackupId, $Backup.JobId) |
-        Where-Object { $_ } |
-        ForEach-Object { $_.ToString() }
-
-    $restorePointIdCandidates = @(
-        $RestorePoint.BackupId,
-        $RestorePoint.JobId,
-        $RestorePoint.BackupObjId,
-        $RestorePoint.BackupJobId,
-        $RestorePoint.ParentBackupId
-    ) |
-        Where-Object { $_ } |
-        ForEach-Object { $_.ToString() }
-
-    if ($backupIdCandidates.Count -gt 0 -and $restorePointIdCandidates.Count -gt 0) {
-        foreach ($backupId in $backupIdCandidates) {
-            if ($restorePointIdCandidates -contains $backupId) {
-                return $true
-            }
-        }
-    }
-
-    $restorePointNameCandidates = @(
-        $RestorePoint.BackupName,
-        $RestorePoint.JobName,
-        $RestorePoint.BackupDisplayName,
-        $RestorePoint.PolicyName
-    ) |
-        Where-Object { $_ } |
-        ForEach-Object { $_.ToString() }
-
-    if ($RestorePoint.PSObject.Properties['Backup'] -and $RestorePoint.Backup) {
-        if ($RestorePoint.Backup.PSObject.Properties['Name'] -and $RestorePoint.Backup.Name) {
-            $restorePointNameCandidates += $RestorePoint.Backup.Name.ToString()
-        }
-        if ($RestorePoint.Backup.PSObject.Properties['Id'] -and $RestorePoint.Backup.Id) {
-            $restorePointIdCandidates += $RestorePoint.Backup.Id.ToString()
-        }
-    }
-
-    return ($restorePointNameCandidates -contains $BackupJobName)
-}
-
 try {
-    $RestorePoint = Get-VBRRestorePoint -Backup $Backup |
-        Where-Object { $_.Name -eq $VMName } |
-        Sort-Object -Property CreationTime -Descending |
-        Select-Object -First 1
-} catch {
-    Write-Log "[$VMName] Get-VBRRestorePoint -Backup failed, retrying with compatibility filter: $_" -Level WARNING -LogFile $LogFile
+    Invoke-VeeamCommand -ScriptBlock {
+        param(
+            [string]$JobName,
+            [string]$Vm,
+            [string]$DestinationHost,
+            [string]$DestinationPath
+        )
 
-    $allRestorePoints = Get-VBRRestorePoint -Name $VMName -ErrorAction SilentlyContinue
-    $matchingRestorePoints = $allRestorePoints | Where-Object {
-        Test-RestorePointMatchesBackup -RestorePoint $_ -Backup $Backup -BackupJobName $BackupJobName
-    }
-
-    if (-not $matchingRestorePoints) {
-        $matchingRestorePoints = $allRestorePoints
-        if ($matchingRestorePoints) {
-            Write-Log "[$VMName] Compatibility filter could not match backup '$BackupJobName'; using latest restore point found by VM name only." -Level WARNING -LogFile $LogFile
+        $backup = Get-VBRBackup | Where-Object { $_.Name -eq $JobName } | Select-Object -First 1
+        if (-not $backup) {
+            throw "Backup job '$JobName' not found in Veeam."
         }
-    }
 
-    $RestorePoint = $matchingRestorePoints |
-        Sort-Object -Property CreationTime -Descending |
-        Select-Object -First 1
-}
+        $restorePoint = Get-VBRRestorePoint -Backup $backup |
+            Where-Object { $_.Name -eq $Vm } |
+            Sort-Object -Property CreationTime -Descending |
+            Select-Object -First 1
 
-if (!$RestorePoint) {
-    Write-Log "[$VMName] No restore point found for VM '$VMName' in job '$BackupJobName'." -Level ERROR -LogFile $LogFile
-    exit 1
+        if (-not $restorePoint) {
+            throw "No restore point found for VM '$Vm' in job '$JobName'."
+        }
+
+        Start-VBRHvInstantRecovery -RestorePoint $restorePoint -Server $DestinationHost -Path $DestinationPath -PowerUp $false -NICsEnabled $true -PreserveMACs $true -PreserveVmID $true | Out-Null
+        return $true
+    } -ArgumentList @($BackupJobName, $VMName, $HyperVHost, "$ClusterStorage\$VMName")
+} catch {
+    Write-Log "[$VMName] Instant Recovery preparation failed: $_" -Level ERROR -LogFile $LogFile
+    throw
 }
 
 Write-Log "[$VMName] Starting Instant Recovery..." -LogFile $LogFile
 try {
-    Start-VBRHvInstantRecovery -RestorePoint $RestorePoint -Server $HyperVHost -Path "$ClusterStorage\$VMName" -PowerUp $false -NICsEnabled $true -PreserveMACs $true -PreserveVmID $true
     Write-Log "[$VMName] Instant Recovery started." -Level SUCCESS -LogFile $LogFile
 
     $elapsed = 0
     do {
-        $waitingVmNames = Get-VBRInstantRecovery |
-            Where-Object { $_.State -eq "WaitingForUserAction" } |
-            Select-Object -ExpandProperty VMName
+        $waitingVmNames = Invoke-VeeamCommand -ScriptBlock {
+            Get-VBRInstantRecovery |
+                Where-Object { $_.State -eq "WaitingForUserAction" } |
+                Select-Object -ExpandProperty VMName
+        }
 
         if ($waitingVmNames -contains $VMName) {
             Write-Log "[$VMName] State=WaitingForUserAction reached." -Level SUCCESS -LogFile $LogFile
@@ -168,7 +143,12 @@ try {
 
 $VMMServer = Get-SCVMMServer -ComputerName $SCVMMServer
 
-$IRSession = Get-VBRInstantRecovery | Where-Object { $_.VMName -eq $VMName }
+$IRSession = Invoke-VeeamCommand -ScriptBlock {
+    param($Vm)
+    Get-VBRInstantRecovery | Where-Object { $_.VMName -eq $Vm } |
+        Select-Object -First 1 -Property VMName, State
+} -ArgumentList @($VMName)
+
 if (!$IRSession) {
     Write-Log "[$VMName] No active Instant Recovery session." -Level ERROR -LogFile $LogFile
     exit 1
@@ -182,7 +162,15 @@ if (!$vmInScvmm) {
 
 Write-Log "[$VMName] Finalizing Instant Recovery..." -LogFile $LogFile
 try {
-    Start-VBRHvInstantRecoveryMigration -InstantRecovery $IRSession
+    Invoke-VeeamCommand -ScriptBlock {
+        param($Vm)
+        $irSession = Get-VBRInstantRecovery | Where-Object { $_.VMName -eq $Vm } | Select-Object -First 1
+        if (-not $irSession) {
+            throw "No active Instant Recovery session for VM '$Vm'."
+        }
+        Start-VBRHvInstantRecoveryMigration -InstantRecovery $irSession | Out-Null
+    } -ArgumentList @($VMName)
+
     Write-Log "[$VMName] Finalization completed." -Level SUCCESS -LogFile $LogFile
 } catch {
     Write-Log "[$VMName] Finalization error: $_" -Level ERROR -LogFile $LogFile
