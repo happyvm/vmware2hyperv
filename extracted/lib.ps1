@@ -114,13 +114,19 @@ function Import-RequiredModule {
     } catch {
         if ($PSVersionTable.PSEdition -eq "Core" -and $UseWindowsPowerShellFallback) {
             try {
-                Import-Module -Name $Name -UseWindowsPowerShell -SkipEditionCheck -ErrorAction Stop
+                Import-Module -Name $Name -UseWindowsPowerShell -ErrorAction Stop
                 Write-Log "Module imported via Windows PowerShell compatibility mode: $Name" -Level WARNING -LogFile $LogFile
                 return
             } catch {
-                $message = "Unable to import module $Name (standard import and compatibility mode both failed) : $_"
-                Write-Log $message -Level ERROR -LogFile $LogFile
-                throw $message
+                try {
+                    Import-Module -Name $Name -SkipEditionCheck -ErrorAction Stop
+                    Write-Log "Module imported via SkipEditionCheck fallback: $Name" -Level WARNING -LogFile $LogFile
+                    return
+                } catch {
+                    $message = "Unable to import module $Name (standard import and compatibility mode both failed) : $_"
+                    Write-Log $message -Level ERROR -LogFile $LogFile
+                    throw $message
+                }
             }
         }
 
