@@ -53,6 +53,59 @@ if (!$Backup) {
 
 $RestorePoint = $null
 
+function Test-RestorePointMatchesBackup {
+    param(
+        [Parameter(Mandatory = $true)]
+        $RestorePoint,
+        [Parameter(Mandatory = $true)]
+        $Backup,
+        [Parameter(Mandatory = $true)]
+        [string]$BackupJobName
+    )
+
+    $backupIdCandidates = @($Backup.Id, $Backup.BackupId, $Backup.JobId) |
+        Where-Object { $_ } |
+        ForEach-Object { $_.ToString() }
+
+    $restorePointIdCandidates = @(
+        $RestorePoint.BackupId,
+        $RestorePoint.JobId,
+        $RestorePoint.BackupObjId,
+        $RestorePoint.BackupJobId,
+        $RestorePoint.ParentBackupId
+    ) |
+        Where-Object { $_ } |
+        ForEach-Object { $_.ToString() }
+
+    if ($backupIdCandidates.Count -gt 0 -and $restorePointIdCandidates.Count -gt 0) {
+        foreach ($backupId in $backupIdCandidates) {
+            if ($restorePointIdCandidates -contains $backupId) {
+                return $true
+            }
+        }
+    }
+
+    $restorePointNameCandidates = @(
+        $RestorePoint.BackupName,
+        $RestorePoint.JobName,
+        $RestorePoint.BackupDisplayName,
+        $RestorePoint.PolicyName
+    ) |
+        Where-Object { $_ } |
+        ForEach-Object { $_.ToString() }
+
+    if ($RestorePoint.PSObject.Properties['Backup'] -and $RestorePoint.Backup) {
+        if ($RestorePoint.Backup.PSObject.Properties['Name'] -and $RestorePoint.Backup.Name) {
+            $restorePointNameCandidates += $RestorePoint.Backup.Name.ToString()
+        }
+        if ($RestorePoint.Backup.PSObject.Properties['Id'] -and $RestorePoint.Backup.Id) {
+            $restorePointIdCandidates += $RestorePoint.Backup.Id.ToString()
+        }
+    }
+
+    return ($restorePointNameCandidates -contains $BackupJobName)
+}
+
 try {
     $RestorePoint = Get-VBRRestorePoint -Backup $Backup |
         Where-Object { $_.Name -eq $VMName } |
@@ -63,9 +116,14 @@ try {
 
     $allRestorePoints = Get-VBRRestorePoint -Name $VMName -ErrorAction SilentlyContinue
     $matchingRestorePoints = $allRestorePoints | Where-Object {
-        ($_.PSObject.Properties["BackupName"] -and $_.BackupName -eq $BackupJobName) -or
-        ($_.PSObject.Properties["JobName"] -and $_.JobName -eq $BackupJobName) -or
-        ($_.PSObject.Properties["Backup"] -and $_.Backup -and $_.Backup.Name -eq $BackupJobName)
+        Test-RestorePointMatchesBackup -RestorePoint $_ -Backup $Backup -BackupJobName $BackupJobName
+    }
+
+    if (-not $matchingRestorePoints) {
+        $matchingRestorePoints = $allRestorePoints
+        if ($matchingRestorePoints) {
+            Write-Log "[$VMName] Compatibility filter could not match backup '$BackupJobName'; using latest restore point found by VM name only." -Level WARNING -LogFile $LogFile
+        }
     }
 
     $RestorePoint = $matchingRestorePoints |
