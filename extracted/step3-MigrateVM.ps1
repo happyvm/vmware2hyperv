@@ -172,6 +172,8 @@ try {
             break
         }
 
+        Write-Log "[$VMName] Current Instant Recovery state: '$($sessionState.State)' (elapsed: ${elapsed}s)." -LogFile $LogFile
+
         Start-Sleep -Seconds $WaitingPollIntervalSeconds
         $elapsed += $WaitingPollIntervalSeconds
     } while ($elapsed -lt $WaitingTimeoutSeconds)
