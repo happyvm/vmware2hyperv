@@ -81,10 +81,9 @@ if ($startIndex -le 1) {
 $csvFile = $Config.Paths.CsvFile
 Assert-FileExists -Path $csvFile -Label "batch CSV" -LogFile $LogFile
 
-$vmNames = (Import-Csv -Path $csvFile -Delimiter ";" |
-    Select-Object -ExpandProperty VMName |
-    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-    Sort-Object -Unique)
+$csvRows = Import-Csv -Path $csvFile -Delimiter ";"
+$vmRows = @($csvRows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.VMName) })
+$vmNames = @($vmRows | Select-Object -ExpandProperty VMName | Sort-Object -Unique)
 
 if (-not $vmNames) {
     Write-Log "No VM found in CSV." -Level ERROR -LogFile $LogFile
@@ -96,6 +95,13 @@ Import-RequiredModule -Name "VMware.VimAutomation.Core" -LogFile $LogFile -UseWi
 Connect-VCenter -Server $Config.VCenter.Server -LogFile $LogFile
 
 $vmVlans = @{}
+$vmOperatingSystems = @{}
+foreach ($row in $vmRows) {
+    if (-not $vmOperatingSystems.ContainsKey($row.VMName)) {
+        $vmOperatingSystems[$row.VMName] = $row.OperatingSystem
+    }
+}
+
 foreach ($vmName in $vmNames) {
     $VMObject = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if ($VMObject) {
@@ -121,8 +127,9 @@ Write-Log "Parallel execution per VM (step3)..." -LogFile $LogFile
 Write-Log "Targeted VMs: $($vmNames -join ', ')" -LogFile $LogFile
 
 $jobs = foreach ($vmName in $vmNames) {
-    $vmLogFile = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
-    $vlanId    = $vmVlans[$vmName]
+    $vmLogFile       = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $vlanId          = $vmVlans[$vmName]
+    $operatingSystem = $vmOperatingSystems[$vmName]
 
     Start-Job -Name "migration-$vmName" -ScriptBlock {
         param(
@@ -130,6 +137,7 @@ $jobs = foreach ($vmName in $vmNames) {
             [string]$Tag,
             [string]$VmName,
             [string]$VlanId,
+            [string]$OperatingSystem,
             [string]$VmLogFile
         )
 
@@ -140,8 +148,8 @@ $jobs = foreach ($vmName in $vmNames) {
         Get-ChildItem -Path $ScriptsRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
             Unblock-File -ErrorAction SilentlyContinue
 
-        & "$ScriptsRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$Tag" -VMName $VmName -VlanId $VlanId -Tag $Tag -LogFile $VmLogFile
-    } -ArgumentList $PSScriptRoot, $Tag, $vmName, $vlanId, $vmLogFile
+        & "$ScriptsRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$Tag" -VMName $VmName -VlanId $VlanId -OperatingSystem $OperatingSystem -Tag $Tag -LogFile $VmLogFile
+    } -ArgumentList $PSScriptRoot, $Tag, $vmName, $vlanId, $operatingSystem, $vmLogFile
 }
 
 Wait-Job -Job $jobs | Out-Null
