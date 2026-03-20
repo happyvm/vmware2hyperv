@@ -186,3 +186,49 @@ function Send-HtmlMail {
         Write-Log "Failed to send email : $_" -Level ERROR -LogFile $LogFile
     }
 }
+
+
+# ---------------------------------------------------------------------------
+# Normalize-OS : normalize OS labels before mapping to SCVMM operating systems
+# ---------------------------------------------------------------------------
+function Normalize-OS {
+    param(
+        [AllowNull()]
+        [string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return $null
+    }
+
+    $normalized = $Name.Trim().ToLowerInvariant()
+    $normalized = $normalized -replace '[\/_-]+', ' '
+    $normalized = $normalized -replace '\s+', ' '
+    return $normalized.Trim()
+}
+
+# ---------------------------------------------------------------------------
+# Resolve-OperatingSystemMapping : resolve a source OS value to an SCVMM OS name
+# ---------------------------------------------------------------------------
+function Resolve-OperatingSystemMapping {
+    param(
+        [AllowNull()]
+        [string]$OperatingSystem,
+
+        $OperatingSystemMap
+    )
+
+    $normalized = Normalize-OS -Name $OperatingSystem
+    if ([string]::IsNullOrWhiteSpace($normalized) -or -not $OperatingSystemMap) {
+        return $null
+    }
+
+    foreach ($entry in $OperatingSystemMap.GetEnumerator()) {
+        $entryKey = Normalize-OS -Name ([string]$entry.Key)
+        if ($entryKey -eq $normalized) {
+            return [string]$entry.Value
+        }
+    }
+
+    return $null
+}

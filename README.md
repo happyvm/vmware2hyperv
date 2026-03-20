@@ -5,6 +5,7 @@ This repository contains PowerShell 7 scripts to orchestrate a **VMware → Hype
 All scripts are in the `extracted/` folder, with the main entry point:
 
 - `extracted/run-migration.ps1`
+- `extracted/step3-MigrateVM.ps1` now also maps a source `OperatingSystem` value to the matching SCVMM operating system when the CSV and config provide it.
 
 ## Project workflow
 
@@ -40,8 +41,38 @@ Update at least:
 - Tag names (`Tags`)
 - SMTP and recipients (`Smtp`, `Recipients`)
 - Paths (`Paths`), especially:
-  - `CsvFile`: input CSV with `VMName` and `Tag` columns
+  - `CsvFile`: input CSV with `VMName`, `Tag`, and optional `OperatingSystem` columns
   - `LogDir`: logs output directory
+
+
+### Configure SCVMM operating systems
+
+If your CSV (or CMDB export) contains an `OperatingSystem` column, `step3-MigrateVM.ps1` can normalize that value, map it through `SCVMM.OperatingSystemMap`, and apply the matching SCVMM operating system with `Set-SCVirtualMachine`.
+
+Example configuration in `extracted/config.psd1`, aligned with the mapping currently used in SCVMM:
+
+```powershell
+SCVMM = @{
+    Server = "scvmm.domain.local"
+    Network = @{
+        PortClassificationName = "PC_VMNetwork"
+        LogicalSwitchName      = "LS_SET_VMNetwork"
+    }
+    OperatingSystemMap = @{
+        "Windows Server 2025 Datacenter"                = "Windows Server 2025 Datacenter"
+        "Windows Server 2022 Datacenter Azure Edition"  = "Windows Server 2022 Datacenter"
+        "Windows Server 2012 Standard"                  = "64-bit edition of Windows Server 2012 Standard"
+        "Windows Server 2008 R2 Enterprise"             = "64-bit edition of Windows Server 2008 R2 Enterprise"
+        "Windows Server 2003 R2 Enterprise x64 Edition" = "Windows Server 2003 Enterprise x64 Edition"
+        "Red Hat Enterprise Linux ES 7.9"               = "Red Hat Enterprise Linux 7 (64 bit)"
+        "Red Hat Enterprise Linux 8.10"                 = "Red Hat Enterprise Linux 8 (64 bit)"
+        "Red Hat Enterprise Linux 9.4"                  = "Red Hat Enterprise Linux 9 (64 bit)"
+        "CentOS Linux 7"                                = "CentOS Linux 7 (64 bit)"
+    }
+}
+```
+
+The source labels are normalized before lookup (case-insensitive, separators collapsed), so values such as `Windows_Server_2019` and `windows server 2019` resolve to the same mapping key.
 
 ## Command usage
 

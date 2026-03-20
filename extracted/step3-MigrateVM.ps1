@@ -10,6 +10,7 @@ param (
     [Parameter(Mandatory = $true)]
     [string]$VlanId,
 
+    [string]$OperatingSystem,
     [string]$SCVMMServer,
     [string]$HyperVHost,
     [string]$HyperVHost2,
@@ -102,6 +103,56 @@ function Start-SCVMMHostMigration {
 
         Move-SCVirtualMachine -VM $vm -VMHost $targetHost -UseLAN -RunAsynchronously | Out-Null
     } -ArgumentList @($Name, $ServerName, $DestinationHost)
+}
+
+function Set-SCVMMOperatingSystem {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ServerName,
+
+        [AllowNull()]
+        [string]$SourceOperatingSystem,
+
+        $OperatingSystemMap,
+
+        [string]$LogFile
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SourceOperatingSystem)) {
+        Write-Log "[$Name] No source operating system provided; SCVMM OS update skipped." -Level WARNING -LogFile $LogFile
+        return
+    }
+
+    $targetOperatingSystem = Resolve-OperatingSystemMapping -OperatingSystem $SourceOperatingSystem -OperatingSystemMap $OperatingSystemMap
+    if ([string]::IsNullOrWhiteSpace($targetOperatingSystem)) {
+        $normalizedOperatingSystem = Normalize-OS -Name $SourceOperatingSystem
+        Write-Log "[$Name] No SCVMM OS mapping found for '$normalizedOperatingSystem'." -Level WARNING -LogFile $LogFile
+        return
+    }
+
+    $mappingResult = Invoke-SCVMMCommand -ScriptBlock {
+        param($VmName, $VmmServerName, $TargetOperatingSystemName)
+
+        $server = Get-SCVMMServer -ComputerName $VmmServerName
+        $scvmmOperatingSystems = Get-SCOperatingSystem -VMMServer $server
+        $scvmmOperatingSystem = $scvmmOperatingSystems | Where-Object { $_.Name -eq $TargetOperatingSystemName } | Select-Object -First 1
+        if (-not $scvmmOperatingSystem) {
+            throw "Operating system '$TargetOperatingSystemName' not found in SCVMM."
+        }
+
+        $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq 'HyperV' } | Select-Object -First 1
+        if (-not $vm) {
+            throw "VM '$VmName' not found in SCVMM while setting the operating system."
+        }
+
+        Set-SCVirtualMachine -VM $vm -OperatingSystem $scvmmOperatingSystem | Out-Null
+        return $scvmmOperatingSystem.Name
+    } -ArgumentList @($Name, $ServerName, $targetOperatingSystem)
+
+    Write-Log "[$Name] SCVMM operating system set to '$mappingResult' from source '$SourceOperatingSystem'." -Level SUCCESS -LogFile $LogFile
 }
 
 # ── Instant Recovery: start ─────────────────────────────────────────────
@@ -432,6 +483,7 @@ if ($VlanId -notmatch "^\d+$") {
 
             Write-Log "[$VMName] Network configured (VLAN $VlanId, VMNetwork $($NetworkMapping.VMNetworkName))." -Level SUCCESS -LogFile $LogFile
             Write-Log "[$VMName] Integration Services configured." -LogFile $LogFile
+            Set-SCVMMOperatingSystem -Name $VMName -ServerName $VMMServerName -SourceOperatingSystem $OperatingSystem -OperatingSystemMap $Config.SCVMM.OperatingSystemMap -LogFile $LogFile
 
             try {
                 Add-ClusterVirtualMachineRole -Cluster $HyperVCluster -VirtualMachine $TargetVM.Name

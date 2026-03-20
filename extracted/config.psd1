@@ -11,6 +11,53 @@
             PortClassificationName = "PC_VMNetwork"
             LogicalSwitchName      = "LS_SET_VMNetwork"
         }
+
+        # Source OS labels (for example from the batch CSV / CMDB) mapped to exact SCVMM OS names
+        OperatingSystemMap = @{
+            # Windows récents
+            "Windows Server 2025 Datacenter"                   = "Windows Server 2025 Datacenter"
+            "Windows Server 2025 Standard"                     = "Windows Server 2025 Standard"
+            "Windows Server 2022 Datacenter"                   = "Windows Server 2022 Datacenter"
+            "Windows Server 2022 Standard"                     = "Windows Server 2022 Standard"
+            "Windows Server 2022 Datacenter Azure Edition"     = "Windows Server 2022 Datacenter"
+            "Windows Server 2019 Datacenter"                   = "Windows Server 2019 Datacenter"
+            "Windows Server 2019 Standard"                     = "Windows Server 2019 Standard"
+            "Windows Server 2016 Datacenter"                   = "Windows Server 2016 Datacenter"
+            "Windows Server 2016 Standard"                     = "Windows Server 2016 Standard"
+            "Windows Server 2012 R2 Datacenter"                = "Windows Server 2012 R2 Datacenter"
+            "Windows Server 2012 R2 Standard"                  = "Windows Server 2012 R2 Standard"
+            "Windows Server 2012 Datacenter"                   = "64-bit edition of Windows Server 2012 Datacenter"
+            "Windows Server 2012 Standard"                     = "64-bit edition of Windows Server 2012 Standard"
+
+            # 2008
+            "Windows Server 2008 R2 Standard"                  = "64-bit edition of Windows Server 2008 R2 Standard"
+            "Windows Server 2008 R2 Enterprise"                = "64-bit edition of Windows Server 2008 R2 Enterprise"
+            "Windows Server 2008 R2 Datacenter"                = "64-bit edition of Windows Server 2008 R2 Datacenter"
+            "Windows Server 2008 Standard"                     = "Windows Server 2008 Standard 32-Bit"
+            "Windows Server 2008 Enterprise"                   = "Windows Server 2008 Enterprise 32-Bit"
+
+            # 2003
+            "Windows Server 2003 Standard Edition"             = "Windows Server 2003 Standard Edition (32-bit x86)"
+            "Windows Server 2003 Enterprise Edition"           = "Windows Server 2003 Enterprise Edition (32-bit x86)"
+            "Windows Server 2003 R2 Standard Edition"          = "Windows Server 2003 Standard Edition (32-bit x86)"
+            "Windows Server 2003 R2 Enterprise Edition"        = "Windows Server 2003 Enterprise Edition (32-bit x86)"
+            "Windows Server 2003 R2 Enterprise x64 Edition"    = "Windows Server 2003 Enterprise x64 Edition"
+
+            # Linux
+            "Red Hat Enterprise Linux ES 7.9"                  = "Red Hat Enterprise Linux 7 (64 bit)"
+            "Red Hat Enterprise Linux ES 7.7"                  = "Red Hat Enterprise Linux 7 (64 bit)"
+            "Red Hat Enterprise Linux ES 7.3"                  = "Red Hat Enterprise Linux 7.3 (64 bit)"
+            "Red Hat Enterprise Linux 8.10"                    = "Red Hat Enterprise Linux 8 (64 bit)"
+            "Red Hat Enterprise Linux 8.9"                     = "Red Hat Enterprise Linux 8 (64 bit)"
+            "Red Hat Enterprise Linux 8.8"                     = "Red Hat Enterprise Linux 8 (64 bit)"
+            "Red Hat Enterprise Linux 8.7"                     = "Red Hat Enterprise Linux 8 (64 bit)"
+            "Red Hat Enterprise Linux 8.3"                     = "Red Hat Enterprise Linux 8 (64 bit)"
+            "Red Hat Enterprise Linux 8.0"                     = "Red Hat Enterprise Linux 8 (64 bit)"
+            "Red Hat Enterprise Linux 9.4"                     = "Red Hat Enterprise Linux 9 (64 bit)"
+            "Red Hat Enterprise Linux ES 6.10"                 = "Red Hat Enterprise Linux 6 (64 bit)"
+            "Red Hat Enterprise Linux ES 6.6"                  = "Red Hat Enterprise Linux 6 (64 bit)"
+            "CentOS Linux 7"                                   = "CentOS Linux 7 (64 bit)"
+        }
     }
 
     HyperV = @{
@@ -43,7 +90,7 @@
 
     Paths = @{
         Scripts   = "D:\Scripts"
-        CsvFile   = "D:\Scripts\lotissement.csv"  # CSV of VMs per batch (columns: VMName, Tag)
+        CsvFile   = "D:\Scripts\lotissement.csv"  # CSV of VMs per batch (columns: VMName, Tag, OperatingSystem optional)
         OutputCsv = "D:\Scripts\uptime_vm.csv"
         LogDir    = "D:\Scripts\Logs"
     }
