@@ -25,6 +25,50 @@ param (
 )
 
 . "$PSScriptRoot\lib.ps1"
+
+if (-not (Get-Command -Name Normalize-OS -ErrorAction SilentlyContinue)) {
+    function Normalize-OS {
+        param(
+            [AllowNull()]
+            [string]$Name
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Name)) {
+            return $null
+        }
+
+        $normalized = $Name.Trim().ToLowerInvariant()
+        $normalized = $normalized -replace '[\/_-]+', ' '
+        $normalized = $normalized -replace '\s+', ' '
+        return $normalized.Trim()
+    }
+}
+
+if (-not (Get-Command -Name Resolve-OperatingSystemMapping -ErrorAction SilentlyContinue)) {
+    function Resolve-OperatingSystemMapping {
+        param(
+            [AllowNull()]
+            [string]$OperatingSystem,
+
+            $OperatingSystemMap
+        )
+
+        $normalized = Normalize-OS -Name $OperatingSystem
+        if ([string]::IsNullOrWhiteSpace($normalized) -or -not $OperatingSystemMap) {
+            return $null
+        }
+
+        foreach ($entry in $OperatingSystemMap.GetEnumerator()) {
+            $entryKey = Normalize-OS -Name ([string]$entry.Key)
+            if ($entryKey -eq $normalized) {
+                return [string]$entry.Value
+            }
+        }
+
+        return $null
+    }
+}
+
 $Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
 
 if (-not $SCVMMServer)   { $SCVMMServer   = $Config.SCVMM.Server }
