@@ -16,6 +16,7 @@ The migration is split into 3 steps:
 3. **step3**: perform VM migration to Hyper-V (parallel execution per VM).
 
 The orchestrator can start from any step (`step1`, `step2`, `step3`) to resume after interruption.
+If `step3` already restored the VM but failed during SCVMM network/OS/post-configuration, you can replay only that tail of `step3` with `-ForceNetworkConfigOnly`.
 
 ## Prerequisites
 
@@ -89,6 +90,7 @@ pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118
 ```powershell
 pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step2
 pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step3
+pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step3 -ForceNetworkConfigOnly
 ```
 
 ### Override recipient group for pre-migration mail
