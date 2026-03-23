@@ -85,6 +85,25 @@ if ($startIndex -le 1) {
 $csvFile = $Config.Paths.CsvFile
 Assert-FileExists -Path $csvFile -Label "batch CSV" -LogFile $LogFile
 
+function Get-FirstPropertyValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        $InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$PropertyNames
+    )
+
+    foreach ($propertyName in $PropertyNames) {
+        $property = $InputObject.PSObject.Properties[$propertyName]
+        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+
+    return $null
+}
+
 $csvRows = Import-Csv -Path $csvFile -Delimiter ";"
 $vmRows = @($csvRows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.VMName) })
 $vmNames = @($vmRows | Select-Object -ExpandProperty VMName | Sort-Object -Unique)
@@ -100,9 +119,35 @@ Connect-VCenter -Server $Config.VCenter.Server -LogFile $LogFile
 
 $vmVlans = @{}
 $vmOperatingSystems = @{}
+
+$cmdbPath = $Config.Paths.CmdbExtractCsv
+$cmdbOperatingSystems = @{}
+if (-not [string]::IsNullOrWhiteSpace($cmdbPath) -and (Test-Path $cmdbPath)) {
+    $cmdbRows = Import-Csv -Path $cmdbPath -Delimiter ";"
+    foreach ($cmdbRow in $cmdbRows) {
+        $cmdbVmName = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames @("VMName", "Name")
+        if ([string]::IsNullOrWhiteSpace($cmdbVmName) -or $cmdbOperatingSystems.ContainsKey($cmdbVmName)) {
+            continue
+        }
+
+        $cmdbOperatingSystem = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames @("OperatingSystem", "Operating system")
+        if (-not [string]::IsNullOrWhiteSpace($cmdbOperatingSystem)) {
+            $cmdbOperatingSystems[$cmdbVmName] = $cmdbOperatingSystem
+        }
+    }
+
+    Write-Log "Loaded $($cmdbOperatingSystems.Count) operating system entries from CMDB extract '$cmdbPath'." -LogFile $LogFile
+} elseif (-not [string]::IsNullOrWhiteSpace($cmdbPath)) {
+    Write-Log "CMDB extract not found at '$cmdbPath'; falling back to OperatingSystem values from the batch CSV only." -Level WARNING -LogFile $LogFile
+}
+
 foreach ($row in $vmRows) {
     if (-not $vmOperatingSystems.ContainsKey($row.VMName)) {
-        $vmOperatingSystems[$row.VMName] = $row.OperatingSystem
+        $vmOperatingSystems[$row.VMName] = if ($cmdbOperatingSystems.ContainsKey($row.VMName)) {
+            $cmdbOperatingSystems[$row.VMName]
+        } else {
+            $row.OperatingSystem
+        }
     }
 }
 
