@@ -43,6 +43,7 @@ Update at least:
 - SMTP and recipients (`Smtp`, `Recipients`)
 - Paths (`Paths`), especially:
   - `CsvFile`: input CSV with `VMName`, `Tag`, and optional `OperatingSystem` columns
+  - `CmdbExtractCsv`: optional raw CMDB extract CSV path kept in configuration for reference or preprocessing
   - `LogDir`: logs output directory
 
 

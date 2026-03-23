@@ -90,8 +90,9 @@
 
     Paths = @{
         Scripts   = "D:\Scripts"
-        CsvFile   = "D:\Scripts\lotissement.csv"  # CSV of VMs per batch (columns: VMName, Tag, OperatingSystem optional)
-        OutputCsv = "D:\Scripts\uptime_vm.csv"
+        CsvFile        = "D:\Scripts\lotissement.csv"   # CSV of VMs per batch (columns: VMName, Tag, OperatingSystem optional)
+        CmdbExtractCsv = "D:\Scripts\cmdb_extract.csv"  # Raw CMDB extract CSV input (optional reference/source file)
+        OutputCsv      = "D:\Scripts\uptime_vm.csv"
         LogDir    = "D:\Scripts\Logs"
     }
 }
