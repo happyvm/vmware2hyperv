@@ -468,7 +468,27 @@ if ($VlanId -notmatch "^\d+$") {
                     throw "Port classification '$PortClassificationName' not found in SCVMM."
                 }
 
-                $networkAdapter = Get-SCVirtualNetworkAdapter -VM $vm
+                $networkAdapter = $null
+                $adapterRetryCount = 12
+                $adapterRetryDelaySeconds = 10
+
+                for ($attempt = 1; $attempt -le $adapterRetryCount; $attempt++) {
+                    $networkAdapter = Get-SCVirtualNetworkAdapter -VM $vm | Select-Object -First 1
+                    if ($networkAdapter) {
+                        break
+                    }
+
+                    Start-Sleep -Seconds $adapterRetryDelaySeconds
+                    $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
+                    if (-not $vm) {
+                        throw "VM '$Name' no longer available in SCVMM while waiting for the virtual network adapter."
+                    }
+                }
+
+                if (-not $networkAdapter) {
+                    throw "No SCVMM virtual network adapter found for VM '$Name' after waiting $($adapterRetryCount * $adapterRetryDelaySeconds) seconds."
+                }
+
                 Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $vmNetwork -VMSubnet $vmSubnet -VLanEnabled $true -VLanID $Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
                 Set-SCVirtualMachine -VM $vm -EnableOperatingSystemShutdown $true -EnableTimeSynchronization $false -EnableDataExchange $true -EnableHeartbeat $true -EnableBackup $true -EnableGuestServicesInterface $true | Out-Null
             } -ArgumentList @(
