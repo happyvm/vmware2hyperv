@@ -469,24 +469,64 @@ if ($VlanId -notmatch "^\d+$") {
                 }
 
                 $networkAdapter = $null
-                $adapterRetryCount = 12
+                $adapterRetryCount = 18
                 $adapterRetryDelaySeconds = 10
+                $refreshVirtualMachineCommand = Get-Command -Name 'Read-SCVirtualMachine' -ErrorAction SilentlyContinue | Select-Object -First 1
 
-                for ($attempt = 1; $attempt -le $adapterRetryCount; $attempt++) {
-                    $networkAdapter = Get-SCVirtualNetworkAdapter -VM $vm | Select-Object -First 1
-                    if ($networkAdapter) {
-                        break
+                function Get-ScvmmNetworkAdapter {
+                    param(
+                        $CurrentVm,
+                        $CurrentServer,
+                        [string]$CurrentVmName
+                    )
+
+                    $adapter = Get-SCVirtualNetworkAdapter -VM $CurrentVm | Select-Object -First 1
+                    if ($adapter) {
+                        return $adapter
                     }
 
-                    Start-Sleep -Seconds $adapterRetryDelaySeconds
+                    $allAdapters = @(Get-SCVirtualNetworkAdapter -VMMServer $CurrentServer)
+                    if (-not $allAdapters) {
+                        return $null
+                    }
+
+                    $matchingAdapter = $allAdapters |
+                        Where-Object {
+                            ($_.VM -and $_.VM.ID -eq $CurrentVm.ID) -or
+                            ($_.VMId -and $_.VMId -eq $CurrentVm.ID) -or
+                            ($_.VMName -and $_.VMName -eq $CurrentVmName) -or
+                            ($_.VM -and $_.VM.Name -eq $CurrentVmName)
+                        } |
+                        Select-Object -First 1
+
+                    return $matchingAdapter
+                }
+
+                for ($attempt = 1; $attempt -le $adapterRetryCount; $attempt++) {
                     $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
                     if (-not $vm) {
                         throw "VM '$Name' no longer available in SCVMM while waiting for the virtual network adapter."
                     }
+
+                    $networkAdapter = Get-ScvmmNetworkAdapter -CurrentVm $vm -CurrentServer $server -CurrentVmName $Name
+                    if ($networkAdapter) {
+                        break
+                    }
+
+                    $vmStatusText = @(
+                        [string]$vm.Status,
+                        [string]$vm.StatusString,
+                        [string]$vm.MostRecentTaskUIState
+                    ) -join ' '
+                    if ($refreshVirtualMachineCommand -and $vmStatusText -match 'incomplete|creating|update|refresh') {
+                        & $refreshVirtualMachineCommand -VM $vm | Out-Null
+                    }
+
+                    Start-Sleep -Seconds $adapterRetryDelaySeconds
                 }
 
                 if (-not $networkAdapter) {
-                    throw "No SCVMM virtual network adapter found for VM '$Name' after waiting $($adapterRetryCount * $adapterRetryDelaySeconds) seconds."
+                    throw "No SCVMM virtual network adapter found for VM '$Name' after waiting $($adapterRetryCount * $adapterRetryDelaySeconds) seconds. SCVMM may still show the VM in an incomplete configuration state; refresh the VM in SCVMM and retry."
                 }
 
                 Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $vmNetwork -VMSubnet $vmSubnet -VLanEnabled $true -VLanID $Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
