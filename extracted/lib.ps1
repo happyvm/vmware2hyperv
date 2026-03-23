@@ -204,6 +204,7 @@ function Normalize-OS {
     $normalized = $Name.Trim().ToLowerInvariant()
     $normalized = $normalized -replace '[\/_-]+', ' '
     $normalized = $normalized -replace '\s+', ' '
+    $normalized = $normalized -replace '^microsoft\s+', ''
     return $normalized.Trim()
 }
 

@@ -5,7 +5,7 @@ This repository contains PowerShell 7 scripts to orchestrate a **VMware → Hype
 All scripts are in the `extracted/` folder, with the main entry point:
 
 - `extracted/run-migration.ps1`
-- `extracted/step3-MigrateVM.ps1` now also maps a source `OperatingSystem` value to the matching SCVMM operating system when the CSV and config provide it.
+- `extracted/step3-MigrateVM.ps1` now also maps a source `OperatingSystem` value to the matching SCVMM operating system when the batch CSV or CMDB extract provides it.
 
 ## Project workflow
 
@@ -42,14 +42,14 @@ Update at least:
 - Tag names (`Tags`)
 - SMTP and recipients (`Smtp`, `Recipients`)
 - Paths (`Paths`), especially:
-  - `CsvFile`: input CSV with `VMName`, `Tag`, and optional `OperatingSystem` columns
-  - `CmdbExtractCsv`: optional raw CMDB extract CSV path kept in configuration for reference or preprocessing
+  - `CsvFile`: input CSV with `VMName` and `Tag` columns, plus optional `OperatingSystem`
+  - `CmdbExtractCsv`: optional CMDB extract CSV path used to enrich VMs with `OperatingSystem` values by matching `VMName`/`Name`
   - `LogDir`: logs output directory
 
 
 ### Configure SCVMM operating systems
 
-If your CSV (or CMDB export) contains an `OperatingSystem` column, `step3-MigrateVM.ps1` can normalize that value, map it through `SCVMM.OperatingSystemMap`, and apply the matching SCVMM operating system with `Set-SCVirtualMachine`.
+If your batch CSV contains an `OperatingSystem` column, or your CMDB extract contains `OperatingSystem` / `Operating system` alongside `VMName` / `Name`, `step3-MigrateVM.ps1` can normalize that value, map it through `SCVMM.OperatingSystemMap`, and apply the matching SCVMM operating system with `Set-SCVirtualMachine`.
 
 Example configuration in `extracted/config.psd1`, aligned with the mapping currently used in SCVMM:
 
@@ -74,7 +74,7 @@ SCVMM = @{
 }
 ```
 
-The source labels are normalized before lookup (case-insensitive, separators collapsed), so values such as `Windows_Server_2019` and `windows server 2019` resolve to the same mapping key.
+The source labels are normalized before lookup (case-insensitive, separators collapsed, and a leading `Microsoft` vendor prefix removed), so values such as `Windows_Server_2019`, `windows server 2019`, and `Microsoft Windows Server 2019` resolve to the same mapping key.
 
 ## Command usage
 
