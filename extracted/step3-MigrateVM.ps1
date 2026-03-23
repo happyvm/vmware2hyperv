@@ -20,6 +20,7 @@ param (
     [string]$Tag,
     [int]$WaitingTimeoutSeconds = 1800,
     [int]$WaitingPollIntervalSeconds = 15,
+    [switch]$ForceNetworkConfigOnly,
     [string]$LogFile
 )
 
@@ -105,6 +106,232 @@ function Start-SCVMMHostMigration {
     } -ArgumentList @($Name, $ServerName, $DestinationHost)
 }
 
+function Invoke-SCVMMNetworkAndPostConfig {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ServerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Vlan,
+
+        [string]$SourceOperatingSystem,
+        $Config,
+        [string]$BackupTagName,
+        [string]$ClusterName,
+        [string]$DestinationHost,
+        [string]$LogFile
+    )
+
+    Write-Log "[$Name] Network configuration (VLAN $Vlan)..." -LogFile $LogFile
+
+    if ($Vlan -notmatch "^\d+$") {
+        Write-Log "[$Name] Invalid VLAN ID: '$Vlan' — network mapping skipped." -Level WARNING -LogFile $LogFile
+        return
+    }
+
+    $requiredConfigPaths = @(
+        @{ Path = "SCVMM.Network.PortClassificationName"; Value = $Config.SCVMM.Network.PortClassificationName },
+        @{ Path = "SCVMM.Network.LogicalSwitchName";      Value = $Config.SCVMM.Network.LogicalSwitchName }
+    )
+    foreach ($requiredConfig in $requiredConfigPaths) {
+        if ([string]::IsNullOrWhiteSpace([string]$requiredConfig.Value)) {
+            throw "Invalid configuration: key '$($requiredConfig.Path)' is missing or empty in config.psd1."
+        }
+    }
+
+    $NetworkMapping = Invoke-SCVMMCommand -ScriptBlock {
+        param($ServerName, $Vlan)
+        $server = Get-SCVMMServer -ComputerName $ServerName
+
+        $matchingVMNetwork = Get-SCVMNetwork -VMMServer $server |
+            Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" } |
+            Select-Object -First 1
+
+        $matchingVMSubnet = Get-SCVMSubnet -VMMServer $server |
+            Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" } |
+            Select-Object -First 1
+
+        [pscustomobject]@{
+            VMNetworkName = $matchingVMNetwork.Name
+            VMSubnetName  = $matchingVMSubnet.Name
+        }
+    } -ArgumentList @($ServerName, $Vlan)
+
+    if ([string]::IsNullOrWhiteSpace($NetworkMapping.VMNetworkName) -or [string]::IsNullOrWhiteSpace($NetworkMapping.VMSubnetName)) {
+        Write-Log "[$Name] No VMNetwork/VMSubnet found for VLAN $Vlan." -Level WARNING -LogFile $LogFile
+        return
+    }
+
+    $TargetVM = Invoke-SCVMMCommand -ScriptBlock {
+        param($Name, $ServerName)
+        $server = Get-SCVMMServer -ComputerName $ServerName
+        Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" }
+    } -ArgumentList @($Name, $ServerName)
+    if (!$TargetVM) {
+        Write-Log "[$Name] VM not found in SCVMM." -Level WARNING -LogFile $LogFile
+        return
+    }
+
+    Invoke-SCVMMCommand -ScriptBlock {
+        param(
+            $Name,
+            $ServerName,
+            $VMNetworkName,
+            $VMSubnetName,
+            $Vlan,
+            $LogicalSwitch,
+            $PortClassificationName
+        )
+        $server = Get-SCVMMServer -ComputerName $ServerName
+        $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
+        if (-not $vm) {
+            throw "VM '$Name' not found in SCVMM while applying network configuration."
+        }
+
+        $vmNetwork = Get-SCVMNetwork -VMMServer $server | Where-Object { $_.Name -eq $VMNetworkName } | Select-Object -First 1
+        $vmSubnet = Get-SCVMSubnet -VMMServer $server | Where-Object { $_.Name -eq $VMSubnetName } | Select-Object -First 1
+        $portClass = Get-SCPortClassification -VMMServer $server | Where-Object { $_.Name -eq $PortClassificationName } | Select-Object -First 1
+
+        if (-not $vmNetwork -or -not $vmSubnet) {
+            throw "Unable to resolve VMNetwork/VMSubnet in SCVMM for VLAN '$Vlan'."
+        }
+
+        if (-not $portClass) {
+            throw "Port classification '$PortClassificationName' not found in SCVMM."
+        }
+
+        $networkAdapter = $null
+        $adapterRetryCount = 18
+        $adapterRetryDelaySeconds = 10
+        $refreshVirtualMachineCommand = Get-Command -Name 'Read-SCVirtualMachine' -ErrorAction SilentlyContinue | Select-Object -First 1
+
+        function Get-ScvmmNetworkAdapter {
+            param(
+                $CurrentVm,
+                $CurrentServer,
+                [string]$CurrentVmName
+            )
+
+            $adapter = Get-SCVirtualNetworkAdapter -VM $CurrentVm | Select-Object -First 1
+            if ($adapter) {
+                return $adapter
+            }
+
+            $allAdapters = @(Get-SCVirtualNetworkAdapter -VMMServer $CurrentServer)
+            if (-not $allAdapters) {
+                return $null
+            }
+
+            $matchingAdapter = $allAdapters |
+                Where-Object {
+                    ($_.VM -and $_.VM.ID -eq $CurrentVm.ID) -or
+                    ($_.VMId -and $_.VMId -eq $CurrentVm.ID) -or
+                    ($_.VMName -and $_.VMName -eq $CurrentVmName) -or
+                    ($_.VM -and $_.VM.Name -eq $CurrentVmName)
+                } |
+                Select-Object -First 1
+
+            return $matchingAdapter
+        }
+
+        for ($attempt = 1; $attempt -le $adapterRetryCount; $attempt++) {
+            $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
+            if (-not $vm) {
+                throw "VM '$Name' no longer available in SCVMM while waiting for the virtual network adapter."
+            }
+
+            $networkAdapter = Get-ScvmmNetworkAdapter -CurrentVm $vm -CurrentServer $server -CurrentVmName $Name
+            if ($networkAdapter) {
+                break
+            }
+
+            $vmStatusText = @(
+                [string]$vm.Status,
+                [string]$vm.StatusString,
+                [string]$vm.MostRecentTaskUIState
+            ) -join ' '
+            if ($refreshVirtualMachineCommand -and $vmStatusText -match 'incomplete|creating|update|refresh') {
+                & $refreshVirtualMachineCommand -VM $vm | Out-Null
+            }
+
+            Start-Sleep -Seconds $adapterRetryDelaySeconds
+        }
+
+        if (-not $networkAdapter) {
+            throw "No SCVMM virtual network adapter found for VM '$Name' after waiting $($adapterRetryCount * $adapterRetryDelaySeconds) seconds. SCVMM may still show the VM in an incomplete configuration state; refresh the VM in SCVMM and retry."
+        }
+
+        Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $vmNetwork -VMSubnet $vmSubnet -VLanEnabled $true -VLanID $Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
+        Set-SCVirtualMachine -VM $vm -EnableOperatingSystemShutdown $true -EnableTimeSynchronization $false -EnableDataExchange $true -EnableHeartbeat $true -EnableBackup $true -EnableGuestServicesInterface $true | Out-Null
+    } -ArgumentList @(
+        $Name,
+        $ServerName,
+        $NetworkMapping.VMNetworkName,
+        $NetworkMapping.VMSubnetName,
+        $Vlan,
+        $Config.SCVMM.Network.LogicalSwitchName,
+        $Config.SCVMM.Network.PortClassificationName
+    )
+
+    Write-Log "[$Name] Network configured (VLAN $Vlan, VMNetwork $($NetworkMapping.VMNetworkName))." -Level SUCCESS -LogFile $LogFile
+    Write-Log "[$Name] Integration Services configured." -LogFile $LogFile
+    Set-SCVMMOperatingSystem -Name $Name -ServerName $ServerName -SourceOperatingSystem $SourceOperatingSystem -OperatingSystemMap $Config.SCVMM.OperatingSystemMap -LogFile $LogFile
+
+    try {
+        Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $TargetVM.Name
+        Write-Log "[$Name] VM added to cluster $ClusterName." -Level SUCCESS -LogFile $LogFile
+    } catch {
+        Write-Log "[$Name] Cluster error: $_" -Level ERROR -LogFile $LogFile
+    }
+
+    try {
+        $hyperVMoveCommand = Get-Command -Name "Move-VM" -Module "Hyper-V" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+        if ($hyperVMoveCommand) {
+            try {
+                & $hyperVMoveCommand -Name $TargetVM.Name -DestinationHost $DestinationHost -ErrorAction Stop
+                Write-Log "[$Name] LiveMigration to $DestinationHost performed via Hyper-V module." -Level SUCCESS -LogFile $LogFile
+            } catch {
+                if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {
+                    Write-Log "[$Name] Hyper-V Move-VM failed due to local platform limits; retrying migration via SCVMM." -Level WARNING -LogFile $LogFile
+                    Start-SCVMMHostMigration -Name $Name -ServerName $ServerName -DestinationHost $DestinationHost
+                    Write-Log "[$Name] LiveMigration to $DestinationHost requested via SCVMM after Hyper-V failure." -Level SUCCESS -LogFile $LogFile
+                } else {
+                    throw
+                }
+            }
+        } else {
+            Write-Log "[$Name] Hyper-V Move-VM cmdlet unavailable on runner, trying SCVMM move." -Level WARNING -LogFile $LogFile
+            Start-SCVMMHostMigration -Name $Name -ServerName $ServerName -DestinationHost $DestinationHost
+
+            Write-Log "[$Name] LiveMigration to $DestinationHost requested via SCVMM." -Level SUCCESS -LogFile $LogFile
+        }
+    } catch {
+        if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {
+            Write-Log "[$Name] LiveMigration unavailable on this runner (missing local Hyper-V platform). Migration already completed; run host-to-host move from a Hyper-V capable node or via SCVMM." -Level WARNING -LogFile $LogFile
+        } else {
+            Write-Log "[$Name] LiveMigration error: $_" -Level ERROR -LogFile $LogFile
+        }
+    }
+
+    Invoke-SCVMMCommand -ScriptBlock {
+        param($Name, $ServerName, $TagName)
+        $server = Get-SCVMMServer -ComputerName $ServerName
+        $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Select-Object -First 1
+        if (-not $vm) {
+            throw "VM '$Name' not found in SCVMM while setting tag."
+        }
+
+        Set-SCVirtualMachine -VM $vm -Tag $TagName | Out-Null
+    } -ArgumentList @($Name, $ServerName, $BackupTagName)
+
+    Write-Log "[$Name] Backup tag '$BackupTagName' applied." -LogFile $LogFile
+}
+
 function Set-SCVMMOperatingSystem {
     param(
         [Parameter(Mandatory = $true)]
@@ -155,7 +382,29 @@ function Set-SCVMMOperatingSystem {
     Write-Log "[$Name] SCVMM operating system set to '$mappingResult' from source '$SourceOperatingSystem'." -Level SUCCESS -LogFile $LogFile
 }
 
+# ── SCVMM connection ────────────────────────────────────────────────────────
+
+try {
+    $VMMServerName = Invoke-SCVMMCommand -ScriptBlock {
+        param($ServerName)
+        $server = Get-SCVMMServer -ComputerName $ServerName
+        if (-not $server) {
+            throw "SCVMM server '$ServerName' not found."
+        }
+
+        return $server.Name
+    } -ArgumentList @($SCVMMServer)
+} catch {
+    if ([string]$_ -match "IndigoLayer") {
+        Write-Log "[$VMName] SCVMM module error hints at a VMM console/runtime mismatch on the runner. Validate that Virtual Machine Manager Console matching the SCVMM server version is installed and restart the shell." -Level ERROR -LogFile $LogFile
+    }
+    Write-Log "[$VMName] Failed to connect to SCVMM server '$SCVMMServer': $_" -Level ERROR -LogFile $LogFile
+    throw
+}
+
 # ── Instant Recovery: start ─────────────────────────────────────────────
+
+if (-not $ForceNetworkConfigOnly) {
 
 Write-Log "[$VMName] Checking SCVMM in Veeam..." -LogFile $LogFile
 $VBRSCVMM = Invoke-VeeamCommand -ScriptBlock {
@@ -288,24 +537,6 @@ try {
 
 # ── Instant Recovery: finalization ─────────────────────────────────────────
 
-try {
-    $VMMServerName = Invoke-SCVMMCommand -ScriptBlock {
-        param($ServerName)
-        $server = Get-SCVMMServer -ComputerName $ServerName
-        if (-not $server) {
-            throw "SCVMM server '$ServerName' not found."
-        }
-
-        return $server.Name
-    } -ArgumentList @($SCVMMServer)
-} catch {
-    if ([string]$_ -match "IndigoLayer") {
-        Write-Log "[$VMName] SCVMM module error hints at a VMM console/runtime mismatch on the runner. Validate that Virtual Machine Manager Console matching the SCVMM server version is installed and restart the shell." -Level ERROR -LogFile $LogFile
-    }
-    Write-Log "[$VMName] Failed to connect to SCVMM server '$SCVMMServer': $_" -Level ERROR -LogFile $LogFile
-    throw
-}
-
 $IRSession = Invoke-VeeamCommand -ScriptBlock {
     param($Vm)
     Get-VBRInstantRecovery | Where-Object { $_.VMName -eq $Vm } |
@@ -393,210 +624,23 @@ try {
     Write-Log "[$VMName] Finalization error: $_" -Level ERROR -LogFile $LogFile
     throw
 }
+}
 
 # ── Network mapping ────────────────────────────────────────────────────────────
 
-Write-Log "[$VMName] Network configuration (VLAN $VlanId)..." -LogFile $LogFile
-
-if ($VlanId -notmatch "^\d+$") {
-    Write-Log "[$VMName] Invalid VLAN ID: '$VlanId' — network mapping skipped." -Level WARNING -LogFile $LogFile
-} else {
-    $requiredConfigPaths = @(
-        @{ Path = "SCVMM.Network.PortClassificationName"; Value = $Config.SCVMM.Network.PortClassificationName },
-        @{ Path = "SCVMM.Network.LogicalSwitchName";      Value = $Config.SCVMM.Network.LogicalSwitchName }
-    )
-    foreach ($requiredConfig in $requiredConfigPaths) {
-        if ([string]::IsNullOrWhiteSpace([string]$requiredConfig.Value)) {
-            throw "Invalid configuration: key '$($requiredConfig.Path)' is missing or empty in config.psd1."
-        }
-    }
-
-    $NetworkMapping = Invoke-SCVMMCommand -ScriptBlock {
-        param($ServerName, $Vlan)
-        $server = Get-SCVMMServer -ComputerName $ServerName
-
-        $matchingVMNetwork = Get-SCVMNetwork -VMMServer $server |
-            Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" } |
-            Select-Object -First 1
-
-        $matchingVMSubnet = Get-SCVMSubnet -VMMServer $server |
-            Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" } |
-            Select-Object -First 1
-
-        [pscustomobject]@{
-            VMNetworkName = $matchingVMNetwork.Name
-            VMSubnetName  = $matchingVMSubnet.Name
-        }
-    } -ArgumentList @($VMMServerName, $VlanId)
-
-    if ([string]::IsNullOrWhiteSpace($NetworkMapping.VMNetworkName) -or [string]::IsNullOrWhiteSpace($NetworkMapping.VMSubnetName)) {
-        Write-Log "[$VMName] No VMNetwork/VMSubnet found for VLAN $VlanId." -Level WARNING -LogFile $LogFile
-    } else {
-        $TargetVM = Invoke-SCVMMCommand -ScriptBlock {
-            param($Name, $ServerName)
-            $server = Get-SCVMMServer -ComputerName $ServerName
-            Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" }
-        } -ArgumentList @($VMName, $VMMServerName)
-        if (!$TargetVM) {
-            Write-Log "[$VMName] VM not found in SCVMM." -Level WARNING -LogFile $LogFile
-        } else {
-            Invoke-SCVMMCommand -ScriptBlock {
-                param(
-                    $Name,
-                    $ServerName,
-                    $VMNetworkName,
-                    $VMSubnetName,
-                    $Vlan,
-                    $LogicalSwitch,
-                    $PortClassificationName
-                )
-                $server = Get-SCVMMServer -ComputerName $ServerName
-                $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
-                if (-not $vm) {
-                    throw "VM '$Name' not found in SCVMM while applying network configuration."
-                }
-
-                $vmNetwork = Get-SCVMNetwork -VMMServer $server | Where-Object { $_.Name -eq $VMNetworkName } | Select-Object -First 1
-                $vmSubnet = Get-SCVMSubnet -VMMServer $server | Where-Object { $_.Name -eq $VMSubnetName } | Select-Object -First 1
-                $portClass = Get-SCPortClassification -VMMServer $server | Where-Object { $_.Name -eq $PortClassificationName } | Select-Object -First 1
-
-                if (-not $vmNetwork -or -not $vmSubnet) {
-                    throw "Unable to resolve VMNetwork/VMSubnet in SCVMM for VLAN '$Vlan'."
-                }
-
-                if (-not $portClass) {
-                    throw "Port classification '$PortClassificationName' not found in SCVMM."
-                }
-
-                $networkAdapter = $null
-                $adapterRetryCount = 18
-                $adapterRetryDelaySeconds = 10
-                $refreshVirtualMachineCommand = Get-Command -Name 'Read-SCVirtualMachine' -ErrorAction SilentlyContinue | Select-Object -First 1
-
-                function Get-ScvmmNetworkAdapter {
-                    param(
-                        $CurrentVm,
-                        $CurrentServer,
-                        [string]$CurrentVmName
-                    )
-
-                    $adapter = Get-SCVirtualNetworkAdapter -VM $CurrentVm | Select-Object -First 1
-                    if ($adapter) {
-                        return $adapter
-                    }
-
-                    $allAdapters = @(Get-SCVirtualNetworkAdapter -VMMServer $CurrentServer)
-                    if (-not $allAdapters) {
-                        return $null
-                    }
-
-                    $matchingAdapter = $allAdapters |
-                        Where-Object {
-                            ($_.VM -and $_.VM.ID -eq $CurrentVm.ID) -or
-                            ($_.VMId -and $_.VMId -eq $CurrentVm.ID) -or
-                            ($_.VMName -and $_.VMName -eq $CurrentVmName) -or
-                            ($_.VM -and $_.VM.Name -eq $CurrentVmName)
-                        } |
-                        Select-Object -First 1
-
-                    return $matchingAdapter
-                }
-
-                for ($attempt = 1; $attempt -le $adapterRetryCount; $attempt++) {
-                    $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
-                    if (-not $vm) {
-                        throw "VM '$Name' no longer available in SCVMM while waiting for the virtual network adapter."
-                    }
-
-                    $networkAdapter = Get-ScvmmNetworkAdapter -CurrentVm $vm -CurrentServer $server -CurrentVmName $Name
-                    if ($networkAdapter) {
-                        break
-                    }
-
-                    $vmStatusText = @(
-                        [string]$vm.Status,
-                        [string]$vm.StatusString,
-                        [string]$vm.MostRecentTaskUIState
-                    ) -join ' '
-                    if ($refreshVirtualMachineCommand -and $vmStatusText -match 'incomplete|creating|update|refresh') {
-                        & $refreshVirtualMachineCommand -VM $vm | Out-Null
-                    }
-
-                    Start-Sleep -Seconds $adapterRetryDelaySeconds
-                }
-
-                if (-not $networkAdapter) {
-                    throw "No SCVMM virtual network adapter found for VM '$Name' after waiting $($adapterRetryCount * $adapterRetryDelaySeconds) seconds. SCVMM may still show the VM in an incomplete configuration state; refresh the VM in SCVMM and retry."
-                }
-
-                Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $vmNetwork -VMSubnet $vmSubnet -VLanEnabled $true -VLanID $Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
-                Set-SCVirtualMachine -VM $vm -EnableOperatingSystemShutdown $true -EnableTimeSynchronization $false -EnableDataExchange $true -EnableHeartbeat $true -EnableBackup $true -EnableGuestServicesInterface $true | Out-Null
-            } -ArgumentList @(
-                $VMName,
-                $VMMServerName,
-                $NetworkMapping.VMNetworkName,
-                $NetworkMapping.VMSubnetName,
-                $VlanId,
-                $Config.SCVMM.Network.LogicalSwitchName,
-                $Config.SCVMM.Network.PortClassificationName
-            )
-
-            Write-Log "[$VMName] Network configured (VLAN $VlanId, VMNetwork $($NetworkMapping.VMNetworkName))." -Level SUCCESS -LogFile $LogFile
-            Write-Log "[$VMName] Integration Services configured." -LogFile $LogFile
-            Set-SCVMMOperatingSystem -Name $VMName -ServerName $VMMServerName -SourceOperatingSystem $OperatingSystem -OperatingSystemMap $Config.SCVMM.OperatingSystemMap -LogFile $LogFile
-
-            try {
-                Add-ClusterVirtualMachineRole -Cluster $HyperVCluster -VirtualMachine $TargetVM.Name
-                Write-Log "[$VMName] VM added to cluster $HyperVCluster." -Level SUCCESS -LogFile $LogFile
-            } catch {
-                Write-Log "[$VMName] Cluster error: $_" -Level ERROR -LogFile $LogFile
-            }
-
-            try {
-                $hyperVMoveCommand = Get-Command -Name "Move-VM" -Module "Hyper-V" -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-
-                if ($hyperVMoveCommand) {
-                    try {
-                        & $hyperVMoveCommand -Name $TargetVM.Name -DestinationHost $HyperVHost2 -ErrorAction Stop
-                        Write-Log "[$VMName] LiveMigration to $HyperVHost2 performed via Hyper-V module." -Level SUCCESS -LogFile $LogFile
-                    } catch {
-                        if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {
-                            Write-Log "[$VMName] Hyper-V Move-VM failed due to local platform limits; retrying migration via SCVMM." -Level WARNING -LogFile $LogFile
-                            Start-SCVMMHostMigration -Name $VMName -ServerName $VMMServerName -DestinationHost $HyperVHost2
-                            Write-Log "[$VMName] LiveMigration to $HyperVHost2 requested via SCVMM after Hyper-V failure." -Level SUCCESS -LogFile $LogFile
-                        } else {
-                            throw
-                        }
-                    }
-                } else {
-                    Write-Log "[$VMName] Hyper-V Move-VM cmdlet unavailable on runner, trying SCVMM move." -Level WARNING -LogFile $LogFile
-                    Start-SCVMMHostMigration -Name $VMName -ServerName $VMMServerName -DestinationHost $HyperVHost2
-
-                    Write-Log "[$VMName] LiveMigration to $HyperVHost2 requested via SCVMM." -Level SUCCESS -LogFile $LogFile
-                }
-            } catch {
-                if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {
-                    Write-Log "[$VMName] LiveMigration unavailable on this runner (missing local Hyper-V platform). Migration already completed; run host-to-host move from a Hyper-V capable node or via SCVMM." -Level WARNING -LogFile $LogFile
-                } else {
-                    Write-Log "[$VMName] LiveMigration error: $_" -Level ERROR -LogFile $LogFile
-                }
-            }
-
-            Invoke-SCVMMCommand -ScriptBlock {
-                param($Name, $ServerName, $TagName)
-                $server = Get-SCVMMServer -ComputerName $ServerName
-                $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Select-Object -First 1
-                if (-not $vm) {
-                    throw "VM '$Name' not found in SCVMM while setting tag."
-                }
-
-                Set-SCVirtualMachine -VM $vm -Tag $TagName | Out-Null
-            } -ArgumentList @($VMName, $VMMServerName, $BackupTag)
-
-            Write-Log "[$VMName] Backup tag '$BackupTag' applied." -LogFile $LogFile
-        }
-    }
+if ($ForceNetworkConfigOnly) {
+    Write-Log "[$VMName] ForceNetworkConfigOnly enabled: skipping Instant Recovery/finalization and replaying only network/OS/post-configuration actions." -Level WARNING -LogFile $LogFile
 }
+
+Invoke-SCVMMNetworkAndPostConfig `
+    -Name $VMName `
+    -ServerName $VMMServerName `
+    -Vlan $VlanId `
+    -SourceOperatingSystem $OperatingSystem `
+    -Config $Config `
+    -BackupTagName $BackupTag `
+    -ClusterName $HyperVCluster `
+    -DestinationHost $HyperVHost2 `
+    -LogFile $LogFile
 
 Write-Log "[$VMName] Migration completed." -Level SUCCESS -LogFile $LogFile

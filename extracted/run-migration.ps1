@@ -20,7 +20,10 @@ param (
     [string]$RecipientGroup = "infogerant",
 
     # Optional config file override
-    [string]$ConfigFile
+    [string]$ConfigFile,
+
+    # Re-run only the network/OS/post-configuration part of step3
+    [switch]$ForceNetworkConfigOnly
 )
 
 . "$PSScriptRoot\lib.ps1"
@@ -33,6 +36,7 @@ $LogFile = "$($Config.Paths.LogDir)\run-migration-$Tag-$(Get-Date -Format 'yyyyM
 Write-Log "======================================================" -LogFile $LogFile
 Write-Log "Starting migration for batch: $Tag" -LogFile $LogFile
 Write-Log "Starting step: $StartFrom" -LogFile $LogFile
+Write-Log "Force network-only replay: $ForceNetworkConfigOnly" -LogFile $LogFile
 Write-Log "======================================================" -LogFile $LogFile
 
 $steps = @("step1", "step2", "step3")
@@ -138,6 +142,7 @@ $jobs = foreach ($vmName in $vmNames) {
             [string]$VmName,
             [string]$VlanId,
             [string]$OperatingSystem,
+            [bool]$ForceNetworkConfigOnly,
             [string]$VmLogFile
         )
 
@@ -148,8 +153,8 @@ $jobs = foreach ($vmName in $vmNames) {
         Get-ChildItem -Path $ScriptsRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
             Unblock-File -ErrorAction SilentlyContinue
 
-        & "$ScriptsRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$Tag" -VMName $VmName -VlanId $VlanId -OperatingSystem $OperatingSystem -Tag $Tag -LogFile $VmLogFile
-    } -ArgumentList $PSScriptRoot, $Tag, $vmName, $vlanId, $operatingSystem, $vmLogFile
+        & "$ScriptsRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$Tag" -VMName $VmName -VlanId $VlanId -OperatingSystem $OperatingSystem -Tag $Tag -ForceNetworkConfigOnly:$ForceNetworkConfigOnly -LogFile $VmLogFile
+    } -ArgumentList $PSScriptRoot, $Tag, $vmName, $vlanId, $operatingSystem, $ForceNetworkConfigOnly.IsPresent, $vmLogFile
 }
 
 Wait-Job -Job $jobs | Out-Null
