@@ -74,7 +74,7 @@ SCVMM = @{
 }
 ```
 
-The source labels are normalized before lookup (case-insensitive, separators collapsed), so values such as `Windows_Server_2019` and `windows server 2019` resolve to the same mapping key.
+The source labels are normalized before lookup (case-insensitive, separators collapsed, and a leading `Microsoft` vendor prefix removed), so values such as `Windows_Server_2019`, `windows server 2019`, and `Microsoft Windows Server 2019` resolve to the same mapping key.
 
 ## Command usage
 
