@@ -15,6 +15,7 @@ set "AUTO_REBOOT=1"
 set "VMWARE_TOOLS_STATUS=ABSENT"
 set "LOG_FILE=C:\temp\vmware2hyperv-postmigration.log"
 set "ENABLE_GENERIC_VMWARE_SERVICE_SWEEP=0"
+set "ENABLE_HIDDEN_DEVICE_CLEANUP=1"
 
 if /i "%~1"=="/noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="-noreboot" set "AUTO_REBOOT=0"
@@ -58,6 +59,10 @@ if /i "!VMWARE_TOOLS_STATUS!"=="ERROR" (
 if /i "!VMWARE_TOOLS_STATUS!"=="CLEANUP_ONLY" (
     call :Log "ATTENTION : cleanup force applique (etat partiel)."
     set "SCRIPT_EXIT_CODE=2"
+)
+
+if /i "!ENABLE_HIDDEN_DEVICE_CLEANUP!"=="1" (
+    call :CleanupHiddenVmwareDevices
 )
 
 call :IsIntegrationServicesEligible
@@ -327,6 +332,32 @@ set "HAS_NORESTART_SWITCH=0"
 echo !CHECK_CMD! | findstr /i " /norestart" >nul
 if not errorlevel 1 set "HAS_NORESTART_SWITCH=1"
 exit /b 0
+
+:CleanupHiddenVmwareDevices
+set "HIDDEN_VMWARE_CLEANUP_FOUND=0"
+set "HIDDEN_VMWARE_CLEANUP_REMOVED=0"
+
+call :Log "Demarrage cleanup des devices caches VMware (post v2v)."
+
+where powershell.exe >nul 2>&1
+if errorlevel 1 (
+    call :Log "ATTENTION : powershell.exe indisponible, cleanup devices caches ignore."
+    goto :EOF
+)
+
+for /f "usebackq delims=" %%L in (`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $found=0; $removed=0; $devices=Get-WmiObject Win32_PnPEntity ^| Where-Object { $_.ConfigManagerErrorCode -eq 24 -and (($_.Name -like '*VMware*') -or ($_.Manufacturer -like '*VMware*') -or ($_.PNPDeviceID -like '*VMWARE*')) }; foreach($d in $devices){ $found++; $id=$d.PNPDeviceID; if([string]::IsNullOrWhiteSpace($id)){ continue }; $null = cmd /c ('pnputil /remove-device ' + $id); if($LASTEXITCODE -eq 0){ $removed++ } }; Write-Output ('FOUND=' + $found); Write-Output ('REMOVED=' + $removed)"`) do (
+    echo %%L | findstr /b /i "FOUND=" >nul
+    if not errorlevel 1 for /f "tokens=2 delims==" %%A in ("%%L") do set "HIDDEN_VMWARE_CLEANUP_FOUND=%%A"
+    echo %%L | findstr /b /i "REMOVED=" >nul
+    if not errorlevel 1 for /f "tokens=2 delims==" %%A in ("%%L") do set "HIDDEN_VMWARE_CLEANUP_REMOVED=%%A"
+)
+
+call :Log "Devices caches VMware detectes: !HIDDEN_VMWARE_CLEANUP_FOUND!"
+call :Log "Devices caches VMware supprimes: !HIDDEN_VMWARE_CLEANUP_REMOVED!"
+if not "!HIDDEN_VMWARE_CLEANUP_REMOVED!"=="0" (
+    set "NEED_REBOOT=1"
+)
+goto :EOF
 
 :RunJasonCleanup
 set "JASON_CLEANUP_RC=0"
