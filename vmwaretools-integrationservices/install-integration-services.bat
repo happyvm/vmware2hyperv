@@ -7,6 +7,10 @@ REM A executer APRES le premier demarrage de la VM sur Hyper-V.
 REM - Si la VM tourne encore sur VMware : aucune action n'est effectuee.
 REM - Installe manuellement les Hyper-V Integration Services uniquement pour
 REM   les OS legacy (Windows <= 6.1, donc 2003/2008/2008 R2).
+REM Exit codes:
+REM   0 = succes
+REM   1 = erreur
+REM   2 = cleanup partiel (fallback force applique)
 REM ============================================================================
 
 set "SCRIPT_EXIT_CODE=0"
@@ -338,6 +342,11 @@ set "HIDDEN_VMWARE_CLEANUP_FOUND=0"
 set "HIDDEN_VMWARE_CLEANUP_REMOVED=0"
 
 call :Log "Demarrage cleanup des devices caches VMware (post v2v)."
+call :IsPnpRemoveDeviceSupported
+if /i not "!PNP_REMOVE_DEVICE_SUPPORTED!"=="1" (
+    call :Log "OS legacy detecte: pnputil /remove-device indisponible. Cleanup devices caches ignore."
+    goto :EOF
+)
 
 where powershell.exe >nul 2>&1
 if errorlevel 1 (
@@ -452,7 +461,19 @@ if "%SERVICE_NAME%"=="" goto :EOF
 sc query "%SERVICE_NAME%" >nul 2>&1
 if errorlevel 1 goto :EOF
 call :Log "Suppression service: %SERVICE_NAME%"
-sc stop "%SERVICE_NAME%" >nul 2>&1
+call :GetServiceState "%SERVICE_NAME%"
+if /i "!SERVICE_STATE!"=="RUNNING" (
+    sc stop "%SERVICE_NAME%" >nul 2>&1
+    for /l %%I in (1,1,5) do (
+        timeout /t 1 /nobreak >nul 2>&1
+        call :GetServiceState "%SERVICE_NAME%"
+    )
+    if /i not "!SERVICE_STATE!"=="STOPPED" (
+        call :Log "ATTENTION : timeout arret service %SERVICE_NAME% (etat !SERVICE_STATE!)."
+    )
+) else (
+    call :Log "Service %SERVICE_NAME% deja dans l'etat !SERVICE_STATE!, pas de stop force."
+)
 sc delete "%SERVICE_NAME%" >nul 2>&1
 if errorlevel 1 (
     call :Log "ATTENTION : echec suppression service: %SERVICE_NAME%"
@@ -502,4 +523,32 @@ if "!IS_ELIGIBLE!"=="1" (
 ) else (
     call :Log "OS non eligible Integration Services (Windows > 6.1)."
 )
+goto :EOF
+
+:IsPnpRemoveDeviceSupported
+set "PNP_REMOVE_DEVICE_SUPPORTED=0"
+set "OS_VERSION="
+set "OS_MAJOR="
+set "OS_MINOR="
+for /f "tokens=2 delims==" %%A in ('wmic os get version /value ^| find "="') do set "OS_VERSION=%%A"
+
+if not defined OS_VERSION goto :EOF
+
+for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
+    set "OS_MAJOR=%%A"
+    set "OS_MINOR=%%B"
+)
+
+if not defined OS_MAJOR goto :EOF
+if not defined OS_MINOR goto :EOF
+
+if !OS_MAJOR! GTR 6 set "PNP_REMOVE_DEVICE_SUPPORTED=1"
+if !OS_MAJOR! EQU 6 if !OS_MINOR! GEQ 2 set "PNP_REMOVE_DEVICE_SUPPORTED=1"
+goto :EOF
+
+:GetServiceState
+set "SERVICE_STATE=UNKNOWN"
+set "SERVICE_NAME=%~1"
+if "%SERVICE_NAME%"=="" goto :EOF
+for /f "tokens=3" %%A in ('sc query "%SERVICE_NAME%" ^| findstr /r /c:"STATE *:"') do set "SERVICE_STATE=%%A"
 goto :EOF
