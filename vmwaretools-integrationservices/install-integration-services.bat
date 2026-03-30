@@ -367,9 +367,10 @@ if not exist "!DEVCON_EXE!" (
     goto :FallbackRegistryCleanup
 )
 
-"!DEVCON_EXE!" remove @*VMWARE* >nul 2>&1
-"!DEVCON_EXE!" remove @*VMware* >nul 2>&1
-"!DEVCON_EXE!" remove @*vmware* >nul 2>&1
+call :Log "Suppression devices VMware via devcon..."
+"!DEVCON_EXE!" remove @*VMWARE* 2>&1 | findstr /v "^$" >>"%LOG_FILE%"
+"!DEVCON_EXE!" remove @*VMware* 2>&1 | findstr /v "^$" >>"%LOG_FILE%"
+"!DEVCON_EXE!" remove @*vmware* 2>&1 | findstr /v "^$" >>"%LOG_FILE%"
 set "NEED_REBOOT=1"
 goto :EOF
 
@@ -554,15 +555,6 @@ if "!IS_ELIGIBLE!"=="1" (
 ) else (
     call :Log "OS non eligible Integration Services (Windows > 6.1)."
 )
-goto :EOF
-
-:IsPnpRemoveDeviceSupported
-set "PNP_REMOVE_DEVICE_SUPPORTED=0"
-if not defined OS_MAJOR goto :EOF
-if not defined OS_MINOR goto :EOF
-
-if !OS_MAJOR! GTR 6 set "PNP_REMOVE_DEVICE_SUPPORTED=1"
-if !OS_MAJOR! EQU 6 if !OS_MINOR! GEQ 2 set "PNP_REMOVE_DEVICE_SUPPORTED=1"
 goto :EOF
 
 :GetOSVersion
