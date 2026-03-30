@@ -15,6 +15,21 @@ if not errorlevel 1 (
 echo %MANU% | find /i "Microsoft" >nul
 if not errorlevel 1 (
     echo Environnement Hyper-V detecte.
+    set "NEED_REBOOT=0"
+
+    call :UninstallVmwareTools
+    if /i "!VMWARE_TOOLS_STATUS!"=="ERROR" (
+        echo ERREUR : la desinstallation de VMware Tools a echoue. Arret du script.
+        goto :EOF
+    )
+
+    if /i "!VMWARE_TOOLS_STATUS!"=="SUCCESS" set "NEED_REBOOT=1"
+
+    call :IsIntegrationServicesEligible
+    if /i not "!IS_ELIGIBLE!"=="1" (
+        echo OS non eligible pour l'installation des Integration Services. Fin sans action.
+        goto :EOF
+    )
 
     REM ===== Vérification du service Integration Services =====
     set "HV_SERVICE=vmicheartbeat"
@@ -38,12 +53,149 @@ if not errorlevel 1 (
         )
 
         start /wait "" "%IS_SETUP_EXE%" /quiet /norestart
-        echo Code retour installeur : %errorlevel%
+        set "IS_INSTALL_RC=!errorlevel!"
+        echo Code retour installeur : !IS_INSTALL_RC!
+        if "!IS_INSTALL_RC!"=="0" set "NEED_REBOOT=1"
     ) else (
         echo Service "%HV_SERVICE%" deja present. Rien a faire.
+    )
+
+    if "!NEED_REBOOT!"=="1" (
+        echo Redemarrage requis (desinstallation VMware Tools et/ou installation Integration Services).
+        shutdown /r /t 60 /c "Redemarrage automatique apres maintenance VMware Tools / Hyper-V Integration Services"
+        if errorlevel 1 (
+            echo ATTENTION : impossible de planifier le redemarrage automatiquement.
+        ) else (
+            echo Redemarrage planifie dans 60 secondes.
+        )
+    ) else (
+        echo Aucun redemarrage requis.
     )
     goto :EOF
 )
 
 echo Hyperviseur inconnu. Aucune action.
+goto :EOF
+
+:UninstallVmwareTools
+set "VMWARE_TOOLS_STATUS=ABSENT"
+set "VMWARE_TOOLS_KEY="
+set "VMWARE_TOOLS_NAME="
+set "UNINSTALL_RAW="
+
+for %%R in (
+    "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    "HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+) do (
+    for /f "delims=" %%K in ('reg query %%~R 2^>nul ^| findstr /r /c:"HKEY_"') do (
+        set "CURRENT_DISPLAY_NAME="
+        for /f "tokens=2,*" %%V in ('reg query "%%K" /v DisplayName 2^>nul ^| findstr /i "DisplayName"') do (
+            set "CURRENT_DISPLAY_NAME=%%W"
+        )
+
+        if defined CURRENT_DISPLAY_NAME (
+            echo !CURRENT_DISPLAY_NAME! | findstr /i "VMware Tools" >nul
+            if not errorlevel 1 if not defined VMWARE_TOOLS_KEY (
+                set "VMWARE_TOOLS_KEY=%%K"
+                set "VMWARE_TOOLS_NAME=!CURRENT_DISPLAY_NAME!"
+            )
+        )
+    )
+)
+
+if not defined VMWARE_TOOLS_KEY (
+    echo VMware Tools non detecte dans les cles uninstall. Rien a desinstaller.
+    goto :EOF
+)
+
+echo VMware Tools detecte: "!VMWARE_TOOLS_NAME!"
+echo Cle uninstall: !VMWARE_TOOLS_KEY!
+
+for /f "tokens=2,*" %%V in ('reg query "!VMWARE_TOOLS_KEY!" /v UninstallString 2^>nul ^| findstr /i "UninstallString"') do (
+    set "UNINSTALL_RAW=%%W"
+)
+
+if not defined UNINSTALL_RAW (
+    echo ERREUR : UninstallString introuvable pour VMware Tools.
+    set "VMWARE_TOOLS_STATUS=ERROR"
+    goto :EOF
+)
+
+set "UNINSTALL_CMD=!UNINSTALL_RAW!"
+
+echo !UNINSTALL_RAW! | findstr /i "msiexec" >nul
+if not errorlevel 1 (
+    set "UNINSTALL_CMD=!UNINSTALL_CMD:/I=/X!"
+    set "UNINSTALL_CMD=!UNINSTALL_CMD:/i=/X!"
+    echo !UNINSTALL_CMD! | findstr /i "/qn" >nul
+    if errorlevel 1 set "UNINSTALL_CMD=!UNINSTALL_CMD! /qn"
+    echo !UNINSTALL_CMD! | findstr /i "/norestart" >nul
+    if errorlevel 1 set "UNINSTALL_CMD=!UNINSTALL_CMD! /norestart"
+) else (
+    echo !UNINSTALL_RAW! | findstr /i ".msi" >nul
+    if not errorlevel 1 (
+        set "UNINSTALL_CMD=msiexec /x !UNINSTALL_RAW! /qn /norestart"
+    ) else (
+        echo !UNINSTALL_CMD! | findstr /i " /S /s /quiet /qn" >nul
+        if errorlevel 1 set "UNINSTALL_CMD=!UNINSTALL_CMD! /S"
+        echo !UNINSTALL_CMD! | findstr /i "/norestart" >nul
+        if errorlevel 1 set "UNINSTALL_CMD=!UNINSTALL_CMD! /norestart"
+    )
+)
+
+echo Commande de desinstallation executee: !UNINSTALL_CMD!
+start /wait "" cmd /c "!UNINSTALL_CMD!"
+set "UNINSTALL_RC=!errorlevel!"
+
+echo Code retour desinstallation VMware Tools: !UNINSTALL_RC!
+if "!UNINSTALL_RC!"=="0" (
+    echo Desinstallation VMware Tools terminee avec succes.
+    set "VMWARE_TOOLS_STATUS=SUCCESS"
+    goto :EOF
+)
+
+if "!UNINSTALL_RC!"=="1605" (
+    echo VMware Tools deja absent (code MSI 1605). Aucune action supplementaire.
+    set "VMWARE_TOOLS_STATUS=ABSENT"
+    goto :EOF
+)
+
+if "!UNINSTALL_RC!"=="1614" (
+    echo VMware Tools deja desinstalle (code MSI 1614). Aucune action supplementaire.
+    set "VMWARE_TOOLS_STATUS=ABSENT"
+    goto :EOF
+)
+
+echo ERREUR : echec de la desinstallation de VMware Tools (code !UNINSTALL_RC!).
+set "VMWARE_TOOLS_STATUS=ERROR"
+goto :EOF
+
+:IsIntegrationServicesEligible
+set "IS_ELIGIBLE=0"
+set "OS_VERSION="
+for /f "tokens=2 delims==" %%A in ('wmic os get version /value ^| find "="') do set "OS_VERSION=%%A"
+
+if not defined OS_VERSION (
+    echo ERREUR : impossible de determiner la version de l'OS.
+    goto :EOF
+)
+
+for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
+    set "OS_MAJOR=%%A"
+    set "OS_MINOR=%%B"
+)
+
+echo Version OS detectee: !OS_VERSION! (major=!OS_MAJOR!, minor=!OS_MINOR!)
+REM Windows 2003 = 5.x
+REM Windows 2008 = 6.0
+REM Windows 2008 R2 = 6.1
+
+if !OS_MAJOR! LSS 6 set "IS_ELIGIBLE=1"
+if !OS_MAJOR! EQU 6 if !OS_MINOR! LEQ 1 set "IS_ELIGIBLE=1"
+
+if "!IS_ELIGIBLE!"=="1" (
+    echo OS eligible Integration Services (Windows <= 6.1).
+) else (
+    echo OS non eligible Integration Services (Windows > 6.1).
+)
 goto :EOF
