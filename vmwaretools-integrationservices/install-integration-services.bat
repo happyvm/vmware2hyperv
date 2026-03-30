@@ -268,7 +268,7 @@ if "!UNINSTALL_RC!"=="1614" (
 )
 
 call :Log "Echec desinstallation VMware Tools (code !UNINSTALL_RC!). Tentative cleanup force."
-call :RunJasonCleanup
+call :RunVmwareCleanup
 if /i "!VMWARE_TOOLS_STATUS!"=="CLEANUP_ONLY" (
     set "NEED_REBOOT=1"
 )
@@ -326,10 +326,6 @@ set "HAS_SILENT_SWITCH=0"
 echo !CHECK_CMD! | findstr /i " /S" >nul
 if not errorlevel 1 set "HAS_SILENT_SWITCH=1"
 if "!HAS_SILENT_SWITCH!"=="0" (
-    echo !CHECK_CMD! | findstr /i " /s" >nul
-    if not errorlevel 1 set "HAS_SILENT_SWITCH=1"
-)
-if "!HAS_SILENT_SWITCH!"=="0" (
     echo !CHECK_CMD! | findstr /i " /quiet" >nul
     if not errorlevel 1 set "HAS_SILENT_SWITCH=1"
 )
@@ -353,6 +349,11 @@ set "HIDDEN_VMWARE_CLEANUP_REMOVED=0"
 
 call :Log "Demarrage cleanup des devices caches VMware (post v2v)."
 
+if not defined OS_MAJOR (
+    call :Log "ATTENTION : OS_MAJOR inconnu, cleanup devices ignore."
+    goto :EOF
+)
+
 if !OS_MAJOR! GTR 6 goto :UseModernCleanup
 if !OS_MAJOR! EQU 6 if !OS_MINOR! GEQ 2 goto :UseModernCleanup
 
@@ -368,6 +369,7 @@ if not exist "!DEVCON_EXE!" (
 
 "!DEVCON_EXE!" remove @*VMWARE* >nul 2>&1
 "!DEVCON_EXE!" remove @*VMware* >nul 2>&1
+"!DEVCON_EXE!" remove @*vmware* >nul 2>&1
 set "NEED_REBOOT=1"
 goto :EOF
 
@@ -402,8 +404,8 @@ if errorlevel 1 (
 )
 goto :EOF
 
-:RunJasonCleanup
-set "JASON_CLEANUP_RC=0"
+:RunVmwareCleanup
+set "VMWARE_CLEANUP_RC=0"
 set "VMWARE_REG_ID="
 set "VMWARE_MSI_ID="
 
@@ -470,8 +472,8 @@ if "%ENABLE_GENERIC_VMWARE_SERVICE_SWEEP%"=="1" (
 call :DeleteDirectory "C:\Program Files\VMware"
 call :DeleteDirectory "C:\Program Files\Common Files\VMware"
 
-call :Log "Code retour cleanup force VMware Tools: !JASON_CLEANUP_RC!"
-if "!JASON_CLEANUP_RC!"=="0" (
+call :Log "Code retour cleanup force VMware Tools: !VMWARE_CLEANUP_RC!"
+if "!VMWARE_CLEANUP_RC!"=="0" (
     set "VMWARE_TOOLS_STATUS=CLEANUP_ONLY"
 ) else (
     set "VMWARE_TOOLS_STATUS=ERROR"
@@ -486,7 +488,7 @@ call :Log "Suppression cle registre: %REG_KEY%"
 reg delete "%REG_KEY%" /f >nul 2>&1
 if errorlevel 1 (
     call :Log "ATTENTION : echec suppression cle registre: %REG_KEY%"
-    set "JASON_CLEANUP_RC=1"
+    set "VMWARE_CLEANUP_RC=1"
 )
 goto :EOF
 
@@ -516,7 +518,7 @@ if /i "!SERVICE_STATE!"=="RUNNING" (
 sc delete "%SERVICE_NAME%" >nul 2>&1
 if errorlevel 1 (
     call :Log "ATTENTION : echec suppression service: %SERVICE_NAME%"
-    set "JASON_CLEANUP_RC=1"
+    set "VMWARE_CLEANUP_RC=1"
 )
 goto :EOF
 
@@ -528,7 +530,7 @@ call :Log "Suppression dossier: %TARGET_DIR%"
 rmdir /s /q "%TARGET_DIR%" >nul 2>&1
 if errorlevel 1 (
     call :Log "ATTENTION : echec suppression dossier: %TARGET_DIR%"
-    set "JASON_CLEANUP_RC=1"
+    set "VMWARE_CLEANUP_RC=1"
 )
 goto :EOF
 
@@ -575,12 +577,15 @@ for /f "tokens=2 delims==" %%A in ('wmic os get version /value 2^>nul ^| find "=
 if not defined OS_VERSION (
     for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentVersion 2^>nul ^| findstr /i "CurrentVersion"') do set "OS_VERSION=%%B"
 )
+if defined OS_VERSION set "OS_VERSION=!OS_VERSION:"=!"
 
 if not defined OS_VERSION (
     for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMajorVersionNumber 2^>nul ^| findstr /i "CurrentMajorVersionNumber"') do set "OS_MAJOR=%%B"
     for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMinorVersionNumber 2^>nul ^| findstr /i "CurrentMinorVersionNumber"') do set "OS_MINOR=%%B"
     if defined OS_MAJOR set "RAW_OS_MAJOR=!OS_MAJOR!"
     if defined OS_MINOR set "RAW_OS_MINOR=!OS_MINOR!"
+    if defined RAW_OS_MAJOR set "RAW_OS_MAJOR=!RAW_OS_MAJOR:"=!"
+    if defined RAW_OS_MINOR set "RAW_OS_MINOR=!RAW_OS_MINOR:"=!"
     if defined RAW_OS_MAJOR (
         set /a OS_MAJOR_NUM=!RAW_OS_MAJOR! >nul 2>&1
         if not errorlevel 1 set "OS_MAJOR=!OS_MAJOR_NUM!"
@@ -597,6 +602,8 @@ if defined OS_VERSION if not defined OS_MAJOR (
         set "OS_MAJOR=%%A"
         set "OS_MINOR=%%B"
     )
+    set "OS_MAJOR=!OS_MAJOR:"=!"
+    set "OS_MINOR=!OS_MINOR:"=!"
 )
 
 if not defined OS_VERSION (
