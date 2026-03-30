@@ -15,6 +15,21 @@ if not errorlevel 1 (
 echo %MANU% | find /i "Microsoft" >nul
 if not errorlevel 1 (
     echo Environnement Hyper-V detecte.
+    set "NEED_REBOOT=0"
+
+    call :UninstallVmwareTools
+    if /i "!VMWARE_TOOLS_STATUS!"=="ERROR" (
+        echo ERREUR : la desinstallation de VMware Tools a echoue. Arret du script.
+        goto :EOF
+    )
+
+    if /i "!VMWARE_TOOLS_STATUS!"=="SUCCESS" set "NEED_REBOOT=1"
+
+    call :IsIntegrationServicesEligible
+    if /i not "!IS_ELIGIBLE!"=="1" (
+        echo OS non eligible pour l'installation des Integration Services. Fin sans action.
+        goto :EOF
+    )
 
     call :UninstallVmwareTools
     if /i "!VMWARE_TOOLS_STATUS!"=="ERROR" (
@@ -50,9 +65,23 @@ if not errorlevel 1 (
         )
 
         start /wait "" "%IS_SETUP_EXE%" /quiet /norestart
-        echo Code retour installeur : %errorlevel%
+        set "IS_INSTALL_RC=!errorlevel!"
+        echo Code retour installeur : !IS_INSTALL_RC!
+        if "!IS_INSTALL_RC!"=="0" set "NEED_REBOOT=1"
     ) else (
         echo Service "%HV_SERVICE%" deja present. Rien a faire.
+    )
+
+    if "!NEED_REBOOT!"=="1" (
+        echo Redemarrage requis (desinstallation VMware Tools et/ou installation Integration Services).
+        shutdown /r /t 60 /c "Redemarrage automatique apres maintenance VMware Tools / Hyper-V Integration Services"
+        if errorlevel 1 (
+            echo ATTENTION : impossible de planifier le redemarrage automatiquement.
+        ) else (
+            echo Redemarrage planifie dans 60 secondes.
+        )
+    ) else (
+        echo Aucun redemarrage requis.
     )
     goto :EOF
 )
@@ -169,6 +198,9 @@ for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
 )
 
 echo Version OS detectee: !OS_VERSION! (major=!OS_MAJOR!, minor=!OS_MINOR!)
+REM Windows 2003 = 5.x
+REM Windows 2008 = 6.0
+REM Windows 2008 R2 = 6.1
 
 if !OS_MAJOR! LSS 6 set "IS_ELIGIBLE=1"
 if !OS_MAJOR! EQU 6 if !OS_MINOR! LEQ 1 set "IS_ELIGIBLE=1"
