@@ -31,6 +31,18 @@ if not errorlevel 1 (
         goto :EOF
     )
 
+    call :UninstallVmwareTools
+    if /i "!VMWARE_TOOLS_STATUS!"=="ERROR" (
+        echo ERREUR : la desinstallation de VMware Tools a echoue. Arret du script.
+        goto :EOF
+    )
+
+    call :IsIntegrationServicesEligible
+    if /i not "!IS_ELIGIBLE!"=="1" (
+        echo OS non eligible pour l'installation des Integration Services. Fin sans action.
+        goto :EOF
+    )
+
     REM ===== Vérification du service Integration Services =====
     set "HV_SERVICE=vmicheartbeat"
     sc query "%HV_SERVICE%" >nul 2>&1
