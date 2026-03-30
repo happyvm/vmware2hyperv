@@ -20,12 +20,14 @@ set "VMWARE_TOOLS_STATUS=ABSENT"
 set "LOG_FILE=C:\temp\vmware2hyperv-postmigration.log"
 set "ENABLE_GENERIC_VMWARE_SERVICE_SWEEP=0"
 set "ENABLE_HIDDEN_DEVICE_CLEANUP=1"
+set "ENABLE_FORCE_VMWARE_CLEANUP=0"
 set "OS_VERSION="
 set "OS_MAJOR="
 set "OS_MINOR="
 
 if /i "%~1"=="/noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="-noreboot" set "AUTO_REBOOT=0"
+if /i "%~1"=="/forcecleanup" set "ENABLE_FORCE_VMWARE_CLEANUP=1"
 
 call :InitLog
 call :Log "Debut du script post-migration VMware -> Hyper-V"
@@ -155,6 +157,14 @@ echo %LOG_MSG%
 >>"%LOG_FILE%" echo [%date% %time%] %LOG_MSG%
 goto :EOF
 
+:RunCommand
+set "CMD_TO_RUN=%~1"
+call :Log "Execution: !CMD_TO_RUN!"
+cmd /c "!CMD_TO_RUN!"
+set "CMD_RC=%ERRORLEVEL%"
+call :Log "RC=!CMD_RC!"
+exit /b !CMD_RC!
+
 :RequireAdmin
 net session >nul 2>&1
 if errorlevel 1 exit /b 1
@@ -241,8 +251,8 @@ if defined QUIET_UNINSTALL_RAW (
 )
 
 call :Log "Commande desinstallation executee: !UNINSTALL_CMD!"
-start /wait "" cmd /c "!UNINSTALL_CMD!"
-set "UNINSTALL_RC=!errorlevel!"
+call :RunCommand "!UNINSTALL_CMD!"
+set "UNINSTALL_RC=!CMD_RC!"
 call :Log "Code retour desinstallation VMware Tools: !UNINSTALL_RC!"
 
 if "!UNINSTALL_RC!"=="0" (
@@ -268,7 +278,12 @@ if "!UNINSTALL_RC!"=="1614" (
 )
 
 call :Log "Echec desinstallation VMware Tools (code !UNINSTALL_RC!). Tentative cleanup force."
-call :RunVmwareCleanup
+if "!ENABLE_FORCE_VMWARE_CLEANUP!"=="1" (
+    call :RunVmwareCleanup
+) else (
+    call :Log "Cleanup force desactive. Aucun fallback agressif applique."
+    set "VMWARE_TOOLS_STATUS=ERROR"
+)
 if /i "!VMWARE_TOOLS_STATUS!"=="CLEANUP_ONLY" (
     set "NEED_REBOOT=1"
 )
@@ -313,7 +328,8 @@ if not errorlevel 1 (
 set "UNINSTALL_CMD=!RAW_UNINSTALL!"
 call :HasSilentSwitch "!UNINSTALL_CMD!"
 if "!HAS_SILENT_SWITCH!"=="0" (
-    call :Log "Aucune option silencieuse detectee sur uninstall executable: commande conservee telle quelle."
+    call :Log "ERREUR : uninstall non silencieux detecte. Abandon pour eviter blocage."
+    exit /b 1
 )
 call :HasNoRestartSwitch "!UNINSTALL_CMD!"
 if "!HAS_NORESTART_SWITCH!"=="0" set "UNINSTALL_CMD=!UNINSTALL_CMD! /norestart"
@@ -368,10 +384,11 @@ if not exist "!DEVCON_EXE!" (
 )
 
 call :Log "Suppression devices VMware via devcon..."
-"!DEVCON_EXE!" remove @*VMWARE* 2>&1 | findstr /v "^$" >>"%LOG_FILE%"
-"!DEVCON_EXE!" remove @*VMware* 2>&1 | findstr /v "^$" >>"%LOG_FILE%"
-"!DEVCON_EXE!" remove @*vmware* 2>&1 | findstr /v "^$" >>"%LOG_FILE%"
-set "NEED_REBOOT=1"
+set "DEVCON_CHANGED=0"
+"!DEVCON_EXE!" remove @*VMWARE* >nul 2>&1 && set "DEVCON_CHANGED=1"
+"!DEVCON_EXE!" remove @*VMware* >nul 2>&1 && set "DEVCON_CHANGED=1"
+"!DEVCON_EXE!" remove @*vmware* >nul 2>&1 && set "DEVCON_CHANGED=1"
+if "!DEVCON_CHANGED!"=="1" set "NEED_REBOOT=1"
 goto :EOF
 
 :UseModernCleanup
@@ -561,48 +578,21 @@ goto :EOF
 set "OS_VERSION="
 set "OS_MAJOR="
 set "OS_MINOR="
-set "RAW_OS_MAJOR="
-set "RAW_OS_MINOR="
+REM PRIORITE REGISTRY (compatible toutes versions)
+for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMajorVersionNumber 2^>nul ^| findstr /i "CurrentMajorVersionNumber"') do set "OS_MAJOR=%%B"
+for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMinorVersionNumber 2^>nul ^| findstr /i "CurrentMinorVersionNumber"') do set "OS_MINOR=%%B"
 
-for /f "tokens=2 delims==" %%A in ('wmic os get version /value 2^>nul ^| find "="') do set "OS_VERSION=%%A"
-
-if not defined OS_VERSION (
-    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentVersion 2^>nul ^| findstr /i "CurrentVersion"') do set "OS_VERSION=%%B"
-)
-if defined OS_VERSION set "OS_VERSION=!OS_VERSION:"=!"
-
-if not defined OS_VERSION (
-    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMajorVersionNumber 2^>nul ^| findstr /i "CurrentMajorVersionNumber"') do set "OS_MAJOR=%%B"
-    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMinorVersionNumber 2^>nul ^| findstr /i "CurrentMinorVersionNumber"') do set "OS_MINOR=%%B"
-    if defined OS_MAJOR set "RAW_OS_MAJOR=!OS_MAJOR!"
-    if defined OS_MINOR set "RAW_OS_MINOR=!OS_MINOR!"
-    if defined RAW_OS_MAJOR set "RAW_OS_MAJOR=!RAW_OS_MAJOR:"=!"
-    if defined RAW_OS_MINOR set "RAW_OS_MINOR=!RAW_OS_MINOR:"=!"
-    if defined RAW_OS_MAJOR (
-        set /a OS_MAJOR_NUM=!RAW_OS_MAJOR! >nul 2>&1
-        if not errorlevel 1 set "OS_MAJOR=!OS_MAJOR_NUM!"
+REM fallback ancienne version
+if not defined OS_MAJOR (
+    for /f "tokens=2 delims==" %%A in ('wmic os get version /value 2^>nul ^| find "="') do set "OS_VERSION=%%A"
+    if defined OS_VERSION (
+        for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
+            set "OS_MAJOR=%%A"
+            set "OS_MINOR=%%B"
+        )
     )
-    if defined RAW_OS_MINOR (
-        set /a OS_MINOR_NUM=!RAW_OS_MINOR! >nul 2>&1
-        if not errorlevel 1 set "OS_MINOR=!OS_MINOR_NUM!"
-    )
-    if defined OS_MAJOR if defined OS_MINOR set "OS_VERSION=!OS_MAJOR!.!OS_MINOR!"
 )
-
-if defined OS_VERSION if not defined OS_MAJOR (
-    for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
-        set "OS_MAJOR=%%A"
-        set "OS_MINOR=%%B"
-    )
-    set "OS_MAJOR=!OS_MAJOR:"=!"
-    set "OS_MINOR=!OS_MINOR:"=!"
-)
-
-if not defined OS_VERSION (
-    call :Log "ATTENTION : version OS introuvable (wmic/reg indisponible)."
-) else (
-    call :Log "Version OS globalement detectee: !OS_VERSION! (major=!OS_MAJOR!, minor=!OS_MINOR!)"
-)
+call :Log "Version OS detectee: !OS_MAJOR!.!OS_MINOR!"
 goto :EOF
 
 :GetServiceState
