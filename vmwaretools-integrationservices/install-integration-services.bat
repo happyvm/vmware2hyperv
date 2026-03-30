@@ -349,12 +349,25 @@ set "HIDDEN_VMWARE_CLEANUP_FOUND=0"
 set "HIDDEN_VMWARE_CLEANUP_REMOVED=0"
 
 call :Log "Demarrage cleanup des devices caches VMware (post v2v)."
-call :IsPnpRemoveDeviceSupported
-if /i not "!PNP_REMOVE_DEVICE_SUPPORTED!"=="1" (
-    call :Log "OS legacy detecte: pnputil /remove-device indisponible. Cleanup devices caches ignore."
-    goto :EOF
+
+if !OS_MAJOR! GTR 6 goto :UseModernCleanup
+if !OS_MAJOR! EQU 6 if !OS_MINOR! GEQ 2 goto :UseModernCleanup
+
+REM Legacy : devcon (Windows 6.0/6.1 et 5.x)
+set "DEVCON_ARCH=x86"
+if !OS_MAJOR! GEQ 6 if /i "!PROCESSOR_ARCHITECTURE!"=="AMD64" set "DEVCON_ARCH=x64"
+set "DEVCON_EXE=C:\temp\HYPERVIS\devcon\!DEVCON_ARCH!\devcon.exe"
+if not exist "!DEVCON_EXE!" (
+    call :Log "ATTENTION : devcon.exe introuvable, cleanup devices legacy ignore."
+    goto :FallbackRegistryCleanup
 )
 
+"!DEVCON_EXE!" remove @*VMWARE* >nul 2>&1
+"!DEVCON_EXE!" remove @*VMware* >nul 2>&1
+set "NEED_REBOOT=1"
+goto :EOF
+
+:UseModernCleanup
 where powershell.exe >nul 2>&1
 if errorlevel 1 (
     call :Log "ATTENTION : powershell.exe indisponible, cleanup devices caches ignore."
@@ -371,6 +384,16 @@ for /f "usebackq delims=" %%L in (`powershell.exe -NoProfile -ExecutionPolicy By
 call :Log "Devices caches VMware detectes: !HIDDEN_VMWARE_CLEANUP_FOUND!"
 call :Log "Devices caches VMware supprimes: !HIDDEN_VMWARE_CLEANUP_REMOVED!"
 if not "!HIDDEN_VMWARE_CLEANUP_REMOVED!"=="0" (
+    set "NEED_REBOOT=1"
+)
+goto :EOF
+
+:FallbackRegistryCleanup
+call :Log "Activation du filet de securite registry CleanupDeviceInstallation."
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager" /v CleanupDeviceInstallation /t REG_DWORD /d 1 /f >nul 2>&1
+if errorlevel 1 (
+    call :Log "ATTENTION : echec activation CleanupDeviceInstallation."
+) else (
     set "NEED_REBOOT=1"
 )
 goto :EOF
