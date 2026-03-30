@@ -24,10 +24,19 @@ set "ENABLE_FORCE_VMWARE_CLEANUP=0"
 set "OS_VERSION="
 set "OS_MAJOR="
 set "OS_MINOR="
+set "MODEL="
 
+goto :ParseArgs
+
+:ParseArgs
+if "%~1"=="" goto :AfterParseArgs
 if /i "%~1"=="/noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="-noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="/forcecleanup" set "ENABLE_FORCE_VMWARE_CLEANUP=1"
+shift
+goto :ParseArgs
+
+:AfterParseArgs
 
 call :InitLog
 call :Log "Debut du script post-migration VMware -> Hyper-V"
@@ -42,6 +51,7 @@ if errorlevel 1 (
 call :GetOSVersion
 call :DetectHypervisor
 call :Log "Hyperviseur detecte (manufacturer): %MANU%"
+call :Log "Modele detecte: %MODEL%"
 
 echo %MANU% | find /i "VMware" >nul
 if not errorlevel 1 (
@@ -172,11 +182,17 @@ exit /b 0
 
 :DetectHypervisor
 set "MANU="
+set "MODEL="
 for /f "tokens=2 delims==" %%A in ('wmic computersystem get manufacturer /value 2^>nul ^| find "="') do set "MANU=%%A"
+for /f "tokens=2 delims==" %%A in ('wmic computersystem get model /value 2^>nul ^| find "="') do set "MODEL=%%A"
 if not defined MANU (
     for /f "tokens=2,*" %%A in ('reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" /v SystemManufacturer 2^>nul ^| findstr /i "SystemManufacturer"') do set "MANU=%%B"
 )
+if not defined MODEL (
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" /v SystemProductName 2^>nul ^| findstr /i "SystemProductName"') do set "MODEL=%%B"
+)
 if not defined MANU set "MANU=UNKNOWN"
+if not defined MODEL set "MODEL=UNKNOWN"
 goto :EOF
 
 :UninstallVmwareTools
@@ -371,7 +387,7 @@ if not defined OS_MAJOR (
 )
 
 if !OS_MAJOR! GTR 6 goto :UseModernCleanup
-if !OS_MAJOR! EQU 6 if !OS_MINOR! GEQ 2 goto :UseModernCleanup
+if !OS_MAJOR! EQU 6 if !OS_MINOR! GEQ 4 goto :UseModernCleanup
 
 REM Legacy : devcon (Windows 6.0/6.1 et 5.x)
 set "DEVCON_ARCH=x86"
