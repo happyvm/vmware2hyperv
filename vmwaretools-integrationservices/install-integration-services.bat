@@ -20,6 +20,9 @@ set "VMWARE_TOOLS_STATUS=ABSENT"
 set "LOG_FILE=C:\temp\vmware2hyperv-postmigration.log"
 set "ENABLE_GENERIC_VMWARE_SERVICE_SWEEP=0"
 set "ENABLE_HIDDEN_DEVICE_CLEANUP=1"
+set "OS_VERSION="
+set "OS_MAJOR="
+set "OS_MINOR="
 
 if /i "%~1"=="/noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="-noreboot" set "AUTO_REBOOT=0"
@@ -34,6 +37,7 @@ if errorlevel 1 (
     goto :EndScript
 )
 
+call :GetOSVersion
 call :DetectHypervisor
 call :Log "Hyperviseur detecte (manufacturer): %MANU%"
 
@@ -155,7 +159,10 @@ exit /b 0
 
 :DetectHypervisor
 set "MANU="
-for /f "tokens=2 delims==" %%A in ('wmic computersystem get manufacturer /value ^| find "="') do set "MANU=%%A"
+for /f "tokens=2 delims==" %%A in ('wmic computersystem get manufacturer /value 2^>nul ^| find "="') do set "MANU=%%A"
+if not defined MANU (
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" /v SystemManufacturer 2^>nul ^| findstr /i "SystemManufacturer"') do set "MANU=%%B"
+)
 if not defined MANU set "MANU=UNKNOWN"
 goto :EOF
 
@@ -465,9 +472,11 @@ call :GetServiceState "%SERVICE_NAME%"
 if /i "!SERVICE_STATE!"=="RUNNING" (
     sc stop "%SERVICE_NAME%" >nul 2>&1
     for /l %%I in (1,1,5) do (
-        timeout /t 1 /nobreak >nul 2>&1
+        ping -n 2 127.0.0.1 >nul
         call :GetServiceState "%SERVICE_NAME%"
+        if /i "!SERVICE_STATE!"=="STOPPED" goto :ServiceStopped
     )
+:ServiceStopped
     if /i not "!SERVICE_STATE!"=="STOPPED" (
         call :Log "ATTENTION : timeout arret service %SERVICE_NAME% (etat !SERVICE_STATE!)."
     )
@@ -495,19 +504,9 @@ goto :EOF
 
 :IsIntegrationServicesEligible
 set "IS_ELIGIBLE=0"
-set "OS_VERSION="
-set "OS_MAJOR="
-set "OS_MINOR="
-for /f "tokens=2 delims==" %%A in ('wmic os get version /value ^| find "="') do set "OS_VERSION=%%A"
-
-if not defined OS_VERSION (
+if not defined OS_MAJOR (
     call :Log "ERREUR : impossible de determiner la version de l'OS."
     goto :EOF
-)
-
-for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
-    set "OS_MAJOR=%%A"
-    set "OS_MINOR=%%B"
 )
 
 call :Log "Version OS detectee: !OS_VERSION! (major=!OS_MAJOR!, minor=!OS_MINOR!)"
@@ -527,23 +526,42 @@ goto :EOF
 
 :IsPnpRemoveDeviceSupported
 set "PNP_REMOVE_DEVICE_SUPPORTED=0"
-set "OS_VERSION="
-set "OS_MAJOR="
-set "OS_MINOR="
-for /f "tokens=2 delims==" %%A in ('wmic os get version /value ^| find "="') do set "OS_VERSION=%%A"
-
-if not defined OS_VERSION goto :EOF
-
-for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
-    set "OS_MAJOR=%%A"
-    set "OS_MINOR=%%B"
-)
-
 if not defined OS_MAJOR goto :EOF
 if not defined OS_MINOR goto :EOF
 
 if !OS_MAJOR! GTR 6 set "PNP_REMOVE_DEVICE_SUPPORTED=1"
 if !OS_MAJOR! EQU 6 if !OS_MINOR! GEQ 2 set "PNP_REMOVE_DEVICE_SUPPORTED=1"
+goto :EOF
+
+:GetOSVersion
+set "OS_VERSION="
+set "OS_MAJOR="
+set "OS_MINOR="
+
+for /f "tokens=2 delims==" %%A in ('wmic os get version /value 2^>nul ^| find "="') do set "OS_VERSION=%%A"
+
+if not defined OS_VERSION (
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMajorVersionNumber 2^>nul ^| findstr /i "CurrentMajorVersionNumber"') do set "OS_MAJOR=%%B"
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMinorVersionNumber 2^>nul ^| findstr /i "CurrentMinorVersionNumber"') do set "OS_MINOR=%%B"
+    if defined OS_MAJOR if defined OS_MINOR set "OS_VERSION=!OS_MAJOR!.!OS_MINOR!"
+)
+
+if not defined OS_VERSION (
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentVersion 2^>nul ^| findstr /i "CurrentVersion"') do set "OS_VERSION=%%B"
+)
+
+if defined OS_VERSION if not defined OS_MAJOR (
+    for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
+        set "OS_MAJOR=%%A"
+        set "OS_MINOR=%%B"
+    )
+)
+
+if not defined OS_VERSION (
+    call :Log "ATTENTION : version OS introuvable (wmic/reg indisponible)."
+) else (
+    call :Log "Version OS globalement detectee: !OS_VERSION! (major=!OS_MAJOR!, minor=!OS_MINOR!)"
+)
 goto :EOF
 
 :GetServiceState
