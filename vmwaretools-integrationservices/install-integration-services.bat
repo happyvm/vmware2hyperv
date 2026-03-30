@@ -84,7 +84,10 @@ sc query "%HV_SERVICE%" >nul 2>&1
 if errorlevel 1 (
     call :Log "Service %HV_SERVICE% absent. Installation des Integration Services..."
 
-    if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
+    set "IS_ARCH=x86"
+    if defined PROCESSOR_ARCHITEW6432 set "IS_ARCH=x64"
+    if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" set "IS_ARCH=x64"
+    if /i "!IS_ARCH!"=="x64" (
         set "IS_SETUP_EXE=C:\temp\HYPERVIS\amd64\setup.exe"
         call :Log "OS detecte : 64-bit"
     ) else (
@@ -355,7 +358,8 @@ if !OS_MAJOR! EQU 6 if !OS_MINOR! GEQ 2 goto :UseModernCleanup
 
 REM Legacy : devcon (Windows 6.0/6.1 et 5.x)
 set "DEVCON_ARCH=x86"
-if !OS_MAJOR! GEQ 6 if /i "!PROCESSOR_ARCHITECTURE!"=="AMD64" set "DEVCON_ARCH=x64"
+if defined PROCESSOR_ARCHITEW6432 set "DEVCON_ARCH=x64"
+if /i "!PROCESSOR_ARCHITECTURE!"=="AMD64" set "DEVCON_ARCH=x64"
 set "DEVCON_EXE=C:\temp\HYPERVIS\devcon\!DEVCON_ARCH!\devcon.exe"
 if not exist "!DEVCON_EXE!" (
     call :Log "ATTENTION : devcon.exe introuvable, cleanup devices legacy ignore."
@@ -368,13 +372,13 @@ set "NEED_REBOOT=1"
 goto :EOF
 
 :UseModernCleanup
-where powershell.exe >nul 2>&1
-if errorlevel 1 (
+set "POWERSHELL_EXE=%SystemRoot%\system32\windowspowershell\v1.0\powershell.exe"
+if not exist "!POWERSHELL_EXE!" (
     call :Log "ATTENTION : powershell.exe indisponible, cleanup devices caches ignore."
     goto :EOF
 )
 
-for /f "usebackq delims=" %%L in (`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $found=0; $removed=0; $devices=Get-WmiObject Win32_PnPEntity ^| Where-Object { $_.ConfigManagerErrorCode -eq 24 -and (($_.Name -like '*VMware*') -or ($_.Manufacturer -like '*VMware*') -or ($_.PNPDeviceID -like '*VMWARE*')) }; foreach($d in $devices){ $found++; $id=$d.PNPDeviceID; if([string]::IsNullOrWhiteSpace($id)){ continue }; $null = cmd /c ('pnputil /remove-device ' + $id); if($LASTEXITCODE -eq 0){ $removed++ } }; Write-Output ('FOUND=' + $found); Write-Output ('REMOVED=' + $removed)"`) do (
+for /f "usebackq delims=" %%L in (`"!POWERSHELL_EXE!" -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $found=0; $removed=0; $devices=Get-WmiObject Win32_PnPEntity ^| Where-Object { $_.ConfigManagerErrorCode -eq 24 -and (($_.Name -like '*VMware*') -or ($_.Manufacturer -like '*VMware*') -or ($_.PNPDeviceID -like '*VMWARE*')) }; foreach($d in $devices){ $found++; $id=$d.PNPDeviceID; if([string]::IsNullOrWhiteSpace($id)){ continue }; $null = cmd /c ('pnputil /remove-device ' + $id); if($LASTEXITCODE -eq 0){ $removed++ } }; Write-Output ('FOUND=' + $found); Write-Output ('REMOVED=' + $removed)"`) do (
     echo %%L | findstr /b /i "FOUND=" >nul
     if not errorlevel 1 for /f "tokens=2 delims==" %%A in ("%%L") do set "HIDDEN_VMWARE_CLEANUP_FOUND=%%A"
     echo %%L | findstr /b /i "REMOVED=" >nul
@@ -437,6 +441,7 @@ if defined VMWARE_MSI_ID (
 )
 
 call :DeleteRegKey "HKCR\CLSID\{D86ADE52-C4D9-4B98-AA0D-9B0C7F1EBBC8}"
+REM VMware Tools 9.x / 10.x connus en environnement legacy.
 call :DeleteRegKey "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{9709436B-5A41-4946-8BE7-2AA433CAF108}"
 call :DeleteRegKey "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{FE2F6A2C-196E-4210-9C04-2B1BC21F07EF}"
 call :DeleteRegKey "HKLM\SOFTWARE\VMware, Inc."
@@ -493,13 +498,15 @@ if errorlevel 1 goto :EOF
 call :Log "Suppression service: %SERVICE_NAME%"
 call :GetServiceState "%SERVICE_NAME%"
 if /i "!SERVICE_STATE!"=="RUNNING" (
+    set "SERVICE_STOPPED=0"
     sc stop "%SERVICE_NAME%" >nul 2>&1
     for /l %%I in (1,1,5) do (
-        ping -n 2 127.0.0.1 >nul
-        call :GetServiceState "%SERVICE_NAME%"
-        if /i "!SERVICE_STATE!"=="STOPPED" goto :ServiceStopped
+        if "!SERVICE_STOPPED!"=="0" (
+            ping -n 2 127.0.0.1 >nul
+            call :GetServiceState "%SERVICE_NAME%"
+            if /i "!SERVICE_STATE!"=="STOPPED" set "SERVICE_STOPPED=1"
+        )
     )
-:ServiceStopped
     if /i not "!SERVICE_STATE!"=="STOPPED" (
         call :Log "ATTENTION : timeout arret service %SERVICE_NAME% (etat !SERVICE_STATE!)."
     )
@@ -560,17 +567,29 @@ goto :EOF
 set "OS_VERSION="
 set "OS_MAJOR="
 set "OS_MINOR="
+set "RAW_OS_MAJOR="
+set "RAW_OS_MINOR="
 
 for /f "tokens=2 delims==" %%A in ('wmic os get version /value 2^>nul ^| find "="') do set "OS_VERSION=%%A"
 
 if not defined OS_VERSION (
-    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMajorVersionNumber 2^>nul ^| findstr /i "CurrentMajorVersionNumber"') do set "OS_MAJOR=%%B"
-    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMinorVersionNumber 2^>nul ^| findstr /i "CurrentMinorVersionNumber"') do set "OS_MINOR=%%B"
-    if defined OS_MAJOR if defined OS_MINOR set "OS_VERSION=!OS_MAJOR!.!OS_MINOR!"
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentVersion 2^>nul ^| findstr /i "CurrentVersion"') do set "OS_VERSION=%%B"
 )
 
 if not defined OS_VERSION (
-    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentVersion 2^>nul ^| findstr /i "CurrentVersion"') do set "OS_VERSION=%%B"
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMajorVersionNumber 2^>nul ^| findstr /i "CurrentMajorVersionNumber"') do set "OS_MAJOR=%%B"
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMinorVersionNumber 2^>nul ^| findstr /i "CurrentMinorVersionNumber"') do set "OS_MINOR=%%B"
+    if defined OS_MAJOR set "RAW_OS_MAJOR=!OS_MAJOR!"
+    if defined OS_MINOR set "RAW_OS_MINOR=!OS_MINOR!"
+    if defined RAW_OS_MAJOR (
+        set /a OS_MAJOR_NUM=!RAW_OS_MAJOR! >nul 2>&1
+        if not errorlevel 1 set "OS_MAJOR=!OS_MAJOR_NUM!"
+    )
+    if defined RAW_OS_MINOR (
+        set /a OS_MINOR_NUM=!RAW_OS_MINOR! >nul 2>&1
+        if not errorlevel 1 set "OS_MINOR=!OS_MINOR_NUM!"
+    )
+    if defined OS_MAJOR if defined OS_MINOR set "OS_VERSION=!OS_MAJOR!.!OS_MINOR!"
 )
 
 if defined OS_VERSION if not defined OS_MAJOR (
