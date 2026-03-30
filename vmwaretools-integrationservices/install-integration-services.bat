@@ -81,6 +81,8 @@ if /i "!VMWARE_TOOLS_STATUS!"=="CLEANUP_ONLY" (
     set "SCRIPT_EXIT_CODE=2"
 )
 
+call :UninstallHardwareAgents
+
 if /i "!ENABLE_HIDDEN_DEVICE_CLEANUP!"=="1" (
     call :CleanupHiddenVmwareDevices
 )
@@ -302,6 +304,116 @@ if "!ENABLE_FORCE_VMWARE_CLEANUP!"=="1" (
 )
 if /i "!VMWARE_TOOLS_STATUS!"=="CLEANUP_ONLY" (
     set "NEED_REBOOT=1"
+)
+goto :EOF
+
+:UninstallHardwareAgents
+call :Log "Demarrage desinstallation agents hardware HP/HPE/Dell."
+
+REM Patterns de detection par DisplayName (Publisher verifie si present)
+REM HP/HPE
+call :UninstallByDisplayName "HP Insight" "HP" "Hewlett"
+call :UninstallByDisplayName "HP System Management" "HP" "Hewlett"
+call :UninstallByDisplayName "HP ProLiant" "HP" "Hewlett"
+call :UninstallByDisplayName "HP iLO" "HP" "Hewlett"
+call :UninstallByDisplayName "HPE Agentless" "HPE" "Hewlett"
+call :UninstallByDisplayName "HPE Insight" "HPE" "Hewlett"
+call :UninstallByDisplayName "HP Array" "HP" "Hewlett"
+call :UninstallByDisplayName "Hewlett Packard" "HP" "Hewlett"
+REM Dell
+call :UninstallByDisplayName "Dell OpenManage" "Dell" ""
+call :UninstallByDisplayName "Dell System" "Dell" ""
+call :UninstallByDisplayName "Dell BSAFE" "Dell" ""
+call :UninstallByDisplayName "iDRAC Service" "Dell" ""
+call :UninstallByDisplayName "OpenManage" "Dell" ""
+
+call :Log "Fin desinstallation agents hardware HP/HPE/Dell."
+goto :EOF
+
+:UninstallByDisplayName
+REM %1 = pattern DisplayName, %2 = pattern Publisher 1, %3 = pattern Publisher 2
+set "UBD_PATTERN=%~1"
+set "UBD_PUB1=%~2"
+set "UBD_PUB2=%~3"
+set "UBD_KEY="
+set "UBD_NAME="
+set "UBD_UNINSTALL_RAW="
+set "UBD_QUIET_UNINSTALL_RAW="
+set "UBD_UNINSTALL_CMD="
+
+for %%R in (
+    "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    "HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+) do (
+    for /f "delims=" %%K in ('reg query %%~R 2^>nul ^| findstr /r /c:"HKEY_"') do (
+        if not defined UBD_KEY (
+            set "UBD_DN="
+            set "UBD_PUB="
+            for /f "tokens=2,*" %%V in ('reg query "%%K" /v DisplayName 2^>nul ^| findstr /i "DisplayName"') do set "UBD_DN=%%W"
+            for /f "tokens=2,*" %%V in ('reg query "%%K" /v Publisher 2^>nul ^| findstr /i "Publisher"') do set "UBD_PUB=%%W"
+
+            if defined UBD_DN (
+                echo !UBD_DN! | findstr /i /c:"!UBD_PATTERN!" >nul
+                if not errorlevel 1 (
+                    set "UBD_MATCH_PUB=0"
+                    if not defined UBD_PUB set "UBD_MATCH_PUB=1"
+                    if defined UBD_PUB (
+                        if not "!UBD_PUB1!"=="" (
+                            echo !UBD_PUB! | findstr /i /c:"!UBD_PUB1!" >nul
+                            if not errorlevel 1 set "UBD_MATCH_PUB=1"
+                        )
+                        if not "!UBD_PUB2!"=="" if "!UBD_MATCH_PUB!"=="0" (
+                            echo !UBD_PUB! | findstr /i /c:"!UBD_PUB2!" >nul
+                            if not errorlevel 1 set "UBD_MATCH_PUB=1"
+                        )
+                    )
+                    if "!UBD_MATCH_PUB!"=="1" (
+                        set "UBD_KEY=%%K"
+                        set "UBD_NAME=!UBD_DN!"
+                    )
+                )
+            )
+        )
+    )
+)
+
+if not defined UBD_KEY goto :EOF
+
+call :Log "Agent detecte: !UBD_NAME! (cle: !UBD_KEY!)"
+
+for /f "tokens=2,*" %%V in ('reg query "!UBD_KEY!" /v QuietUninstallString 2^>nul ^| findstr /i "QuietUninstallString"') do set "UBD_QUIET_UNINSTALL_RAW=%%W"
+for /f "tokens=2,*" %%V in ('reg query "!UBD_KEY!" /v UninstallString 2^>nul ^| findstr /i "UninstallString"') do set "UBD_UNINSTALL_RAW=%%W"
+
+if defined UBD_QUIET_UNINSTALL_RAW (
+    set "UBD_UNINSTALL_CMD=!UBD_QUIET_UNINSTALL_RAW!"
+    call :Log "Utilisation QuietUninstallString."
+) else (
+    if not defined UBD_UNINSTALL_RAW (
+        call :Log "ATTENTION : UninstallString introuvable pour !UBD_NAME!. Ignore."
+        goto :EOF
+    )
+    call :BuildUninstallCommand "!UBD_UNINSTALL_RAW!"
+    if errorlevel 1 (
+        call :Log "ATTENTION : impossible de construire commande desinstall pour !UBD_NAME!. Ignore."
+        goto :EOF
+    )
+    set "UBD_UNINSTALL_CMD=!UNINSTALL_CMD!"
+)
+
+call :RunCommand "!UBD_UNINSTALL_CMD!"
+set "UBD_RC=!CMD_RC!"
+
+if "!UBD_RC!"=="0" (
+    call :Log "Desinstallation !UBD_NAME! : succes."
+) else if "!UBD_RC!"=="3010" (
+    call :Log "Desinstallation !UBD_NAME! : succes, reboot requis."
+    set "NEED_REBOOT=1"
+) else if "!UBD_RC!"=="1605" (
+    call :Log "!UBD_NAME! deja absent (MSI 1605)."
+) else if "!UBD_RC!"=="1614" (
+    call :Log "!UBD_NAME! deja desinstalle (MSI 1614)."
+) else (
+    call :Log "ATTENTION : echec desinstallation !UBD_NAME! (code !UBD_RC!). Poursuite."
 )
 goto :EOF
 
