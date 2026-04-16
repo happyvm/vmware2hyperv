@@ -93,9 +93,10 @@ if /i not "!IS_ELIGIBLE!"=="1" (
     goto :Finalize
 )
 
-call :EvaluateIntegrationServicesPresence
-if /i "!INSTALL_IS_REQUIRED!"=="1" (
-    call :Log "Integration Services incomplets/absents. Installation requise..."
+set "HV_SERVICE=vmicheartbeat"
+sc query "%HV_SERVICE%" >nul 2>&1
+if errorlevel 1 (
+    call :Log "Service %HV_SERVICE% absent. Installation des Integration Services..."
 
     set "IS_ARCH=x86"
     if defined PROCESSOR_ARCHITEW6432 set "IS_ARCH=x64"
@@ -129,7 +130,7 @@ if /i "!INSTALL_IS_REQUIRED!"=="1" (
         goto :EndScript
     )
 ) else (
-    call :Log "Integration Services deja presents (services core detectes). Pas d'installation."
+    call :Log "Service %HV_SERVICE% deja present. Pas d'installation Integration Services."
 )
 
 :Finalize
@@ -828,37 +829,6 @@ if not defined OS_MAJOR (
     )
 )
 call :Log "Version OS detectee: !OS_MAJOR!.!OS_MINOR!"
-goto :EOF
-
-:EvaluateIntegrationServicesPresence
-set "INSTALL_IS_REQUIRED=0"
-set "IS_MISSING_COMPONENTS="
-
-call :AppendMissingService "vmicheartbeat"
-call :AppendMissingService "vmicshutdown"
-call :AppendMissingService "vmbus"
-call :AppendMissingService "storvsc"
-call :AppendMissingService "netvsc"
-
-if defined IS_MISSING_COMPONENTS (
-    set "INSTALL_IS_REQUIRED=1"
-    call :Log "Composants Integration Services manquants: !IS_MISSING_COMPONENTS!"
-) else (
-    call :Log "Verification Integration Services: tous les composants core sont presents."
-)
-goto :EOF
-
-:AppendMissingService
-set "AIS_SERVICE=%~1"
-if "%AIS_SERVICE%"=="" goto :EOF
-sc query "%AIS_SERVICE%" >nul 2>&1
-if errorlevel 1 (
-    if defined IS_MISSING_COMPONENTS (
-        set "IS_MISSING_COMPONENTS=!IS_MISSING_COMPONENTS!,%AIS_SERVICE%"
-    ) else (
-        set "IS_MISSING_COMPONENTS=%AIS_SERVICE%"
-    )
-)
 goto :EOF
 
 :GetServiceState
