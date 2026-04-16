@@ -29,6 +29,8 @@ set "LOG_FILE=C:\temp\vmware2hyperv-postmigration.log"
 set "ENABLE_GENERIC_VMWARE_SERVICE_SWEEP=0"
 set "ENABLE_HIDDEN_DEVICE_CLEANUP=1"
 set "ENABLE_FORCE_VMWARE_CLEANUP=0"
+set "FORCE_IS_INSTALL=0"
+set "ENABLE_WMIC_FALLBACK=0"
 set "OS_VERSION="
 set "OS_MAJOR="
 set "OS_MINOR="
@@ -43,6 +45,12 @@ if /i "%~1"=="-reboot" set "AUTO_REBOOT=1"
 if /i "%~1"=="/noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="-noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="/forcecleanup" set "ENABLE_FORCE_VMWARE_CLEANUP=1"
+if /i "%~1"=="/forceisinstall" set "FORCE_IS_INSTALL=1"
+if /i "%~1"=="-forceisinstall" set "FORCE_IS_INSTALL=1"
+if /i "%~1"=="/forceis" set "FORCE_IS_INSTALL=1"
+if /i "%~1"=="-forceis" set "FORCE_IS_INSTALL=1"
+if /i "%~1"=="/usewmic" set "ENABLE_WMIC_FALLBACK=1"
+if /i "%~1"=="-usewmic" set "ENABLE_WMIC_FALLBACK=1"
 shift
 goto :ParseArgs
 
@@ -116,6 +124,24 @@ for %%S in (vmicheartbeat vmicshutdown vmbus storvsc netvsc) do (
             set "IS_MISSING_COMPONENTS=%%S"
         )
     )
+)
+if "!INSTALL_IS_REQUIRED!"=="0" (
+    call :DetectIntegrationServicesInPrograms
+    if !OS_MAJOR! LSS 6 if "!IS_ARP_FOUND!"=="0" (
+        set "INSTALL_IS_REQUIRED=1"
+        set "IS_MISSING_COMPONENTS=LEGACY_ARP_ABSENT"
+        call :Log "OS legacy detecte (major=!OS_MAJOR!) sans entree Integration Services dans Ajout/Suppression de programmes."
+        call :Log "Les services core peuvent etre presents mais incomplets sur cet OS: installation Integration Services forcee."
+    )
+)
+if "!FORCE_IS_INSTALL!"=="1" (
+    set "INSTALL_IS_REQUIRED=1"
+    if defined IS_MISSING_COMPONENTS (
+        set "IS_MISSING_COMPONENTS=!IS_MISSING_COMPONENTS!,FORCED_BY_OPTION"
+    ) else (
+        set "IS_MISSING_COMPONENTS=FORCED_BY_OPTION"
+    )
+    call :Log "Option /forceisinstall detectee: installation Integration Services forcee."
 )
 if /i "!INSTALL_IS_REQUIRED!"=="1" (
     call :Log "Composants Integration Services manquants: !IS_MISSING_COMPONENTS!"
@@ -253,16 +279,35 @@ exit /b 0
 :DetectHypervisor
 set "MANU="
 set "MODEL="
-for /f "tokens=2 delims==" %%A in ('wmic computersystem get manufacturer /value 2^>nul ^| find "="') do set "MANU=%%A"
-for /f "tokens=2 delims==" %%A in ('wmic computersystem get model /value 2^>nul ^| find "="') do set "MODEL=%%A"
+set "HYP_DETECT_SOURCE="
+for /f "tokens=2,*" %%A in ('reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" /v SystemManufacturer 2^>nul ^| findstr /i "SystemManufacturer"') do set "MANU=%%B"
+if defined MANU set "HYP_DETECT_SOURCE=registry-bios"
+for /f "tokens=2,*" %%A in ('reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" /v SystemProductName 2^>nul ^| findstr /i "SystemProductName"') do set "MODEL=%%B"
 if not defined MANU (
-    for /f "tokens=2,*" %%A in ('reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" /v SystemManufacturer 2^>nul ^| findstr /i "SystemManufacturer"') do set "MANU=%%B"
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters" /v HostName 2^>nul ^| findstr /i "HostName"') do set "HV_HOST=%%B"
+    if defined HV_HOST (
+        set "MANU=Microsoft Corporation"
+        set "MODEL=Virtual Machine"
+        set "HYP_DETECT_SOURCE=registry-hv-guest-parameters"
+    )
 )
-if not defined MODEL (
-    for /f "tokens=2,*" %%A in ('reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" /v SystemProductName 2^>nul ^| findstr /i "SystemProductName"') do set "MODEL=%%B"
+if not defined MANU (
+    sc query "vmbus" >nul 2>&1
+    if "!errorlevel!"=="0" (
+        set "MANU=Microsoft Corporation"
+        set "MODEL=Virtual Machine"
+        set "HYP_DETECT_SOURCE=service-vmbus"
+    )
+)
+if not defined MANU if "!ENABLE_WMIC_FALLBACK!"=="1" (
+    for /f "tokens=2 delims==" %%A in ('wmic computersystem get manufacturer /value 2^>nul ^| find "="') do set "MANU=%%A"
+    for /f "tokens=2 delims==" %%A in ('wmic computersystem get model /value 2^>nul ^| find "="') do set "MODEL=%%A"
+    if defined MANU set "HYP_DETECT_SOURCE=wmic-fallback"
 )
 if not defined MANU set "MANU=UNKNOWN"
 if not defined MODEL set "MODEL=UNKNOWN"
+if not defined HYP_DETECT_SOURCE set "HYP_DETECT_SOURCE=none"
+call :Log "Detection hyperviseur source: !HYP_DETECT_SOURCE!"
 goto :EOF
 
 :UninstallVmwareTools
@@ -887,8 +932,19 @@ REM PRIORITE REGISTRY (compatible toutes versions)
 for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMajorVersionNumber 2^>nul ^| findstr /i "CurrentMajorVersionNumber"') do set "OS_MAJOR=%%B"
 for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMinorVersionNumber 2^>nul ^| findstr /i "CurrentMinorVersionNumber"') do set "OS_MINOR=%%B"
 
-REM fallback ancienne version
+REM fallback registry legacy (XP/2003/2008)
 if not defined OS_MAJOR (
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentVersion 2^>nul ^| findstr /i "CurrentVersion"') do set "OS_VERSION=%%B"
+    if defined OS_VERSION (
+        for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
+            set "OS_MAJOR=%%A"
+            set "OS_MINOR=%%B"
+        )
+    )
+)
+
+REM fallback WMIC optionnel (desactive par defaut pour eviter les popups wmic.exe sur OS casses)
+if not defined OS_MAJOR if "!ENABLE_WMIC_FALLBACK!"=="1" (
     for /f "tokens=2 delims==" %%A in ('wmic os get version /value 2^>nul ^| find "="') do set "OS_VERSION=%%A"
     if defined OS_VERSION (
         for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
