@@ -38,12 +38,11 @@ install-integration-services.bat
 - `/reboot` ou `-reboot` : active le redémarrage automatique si le script détecte qu’il est requis.
 - `/noreboot` ou `-noreboot` : force la désactivation du redémarrage automatique (comportement par défaut actuel).
 - `/forcecleanup` : active un nettoyage VMware forcé supplémentaire.
-- `/forceisinstall` (alias `/forceis`) : force l’installation des Integration Services même si les services core semblent déjà présents.
 
 Exemple :
 
 ```bat
-install-integration-services.bat /reboot /forcecleanup /forceisinstall
+install-integration-services.bat /reboot /forcecleanup
 ```
 
 ## Journalisation
@@ -65,11 +64,10 @@ Le script crée `C:\temp` si le dossier n’existe pas.
 1. Vérifie les droits administrateur.
 2. Détecte fabricant/modèle (WMIC puis fallback registre).
 3. Si VMware détecté : sortie sans action.
-4. Si Hyper‑V détecté : désinstallation/cleanup VMware.
-5. Vérifie l’éligibilité OS pour Integration Services.
-6. Si service `vmicheartbeat` absent : lance `setup.exe /quiet /norestart` selon l’architecture.
-7. Si nécessaire, planifie un reboot uniquement si `/reboot` est fourni (sinon il l’indique sans le déclencher).
-8. Cas legacy Windows 5.x : si aucune entrée Integration Services n’est trouvée dans Ajout/Suppression de programmes, le script force l’installation même si certains services existent déjà.
+4. Si Hyper‑V détecté :
+   1. **Integration Services d’abord** : pour les OS non intégrés (Windows ≤ 6.1), vérifie la présence d’une entrée `Hyper-V Integration Services` / `Integration Services` dans Ajout/Suppression de programmes. Si absente, lance `setup.exe` en **mode non silencieux** (fenêtre d’installation visible) selon l’architecture.
+   2. Désinstalle VMware Tools, puis les agents hardware (HP/HPE/Dell), puis nettoie les devices VMware cachés.
+5. Si nécessaire, planifie un reboot uniquement si `/reboot` est fourni (sinon il l’indique sans le déclencher).
 
 ## Recommandations d’exploitation
 
