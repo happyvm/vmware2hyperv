@@ -93,10 +93,22 @@ if /i not "!IS_ELIGIBLE!"=="1" (
     goto :Finalize
 )
 
-set "HV_SERVICE=vmicheartbeat"
-sc query "%HV_SERVICE%" >nul 2>&1
-if errorlevel 1 (
-    call :Log "Service %HV_SERVICE% absent. Installation des Integration Services..."
+set "INSTALL_IS_REQUIRED=0"
+set "IS_MISSING_COMPONENTS="
+for %%S in (vmicheartbeat vmicshutdown vmbus storvsc netvsc) do (
+    sc query "%%S" >nul 2>&1
+    if errorlevel 1 (
+        set "INSTALL_IS_REQUIRED=1"
+        if defined IS_MISSING_COMPONENTS (
+            set "IS_MISSING_COMPONENTS=!IS_MISSING_COMPONENTS!,%%S"
+        ) else (
+            set "IS_MISSING_COMPONENTS=%%S"
+        )
+    )
+)
+if /i "!INSTALL_IS_REQUIRED!"=="1" (
+    call :Log "Composants Integration Services manquants: !IS_MISSING_COMPONENTS!"
+    call :Log "Integration Services incomplets/absents. Installation requise..."
 
     set "IS_ARCH=x86"
     if defined PROCESSOR_ARCHITEW6432 set "IS_ARCH=x64"
@@ -130,7 +142,8 @@ if errorlevel 1 (
         goto :EndScript
     )
 ) else (
-    call :Log "Service %HV_SERVICE% deja present. Pas d'installation Integration Services."
+    call :Log "Verification Integration Services: tous les composants core sont presents."
+    call :Log "Integration Services deja presents (services core detectes). Pas d'installation."
 )
 
 :Finalize
