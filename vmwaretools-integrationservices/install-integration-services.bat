@@ -15,7 +15,7 @@ REM ============================================================================
 
 set "SCRIPT_EXIT_CODE=0"
 set "NEED_REBOOT=0"
-set "AUTO_REBOOT=1"
+set "AUTO_REBOOT=0"
 set "VMWARE_TOOLS_STATUS=ABSENT"
 set "LOG_FILE=C:\temp\vmware2hyperv-postmigration.log"
 set "ENABLE_GENERIC_VMWARE_SERVICE_SWEEP=0"
@@ -30,6 +30,8 @@ goto :ParseArgs
 
 :ParseArgs
 if "%~1"=="" goto :AfterParseArgs
+if /i "%~1"=="/reboot" set "AUTO_REBOOT=1"
+if /i "%~1"=="-reboot" set "AUTO_REBOOT=1"
 if /i "%~1"=="/noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="-noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="/forcecleanup" set "ENABLE_FORCE_VMWARE_CLEANUP=1"
@@ -157,7 +159,7 @@ if "!NEED_REBOOT!"=="1" (
             call :Log "Redemarrage planifie dans 60 secondes."
         )
     ) else (
-        call :Log "Mode /noreboot actif: redemarrage requis mais non declenche automatiquement."
+        call :Log "Mode par defaut (sans /reboot): redemarrage requis mais non declenche automatiquement."
     )
 ) else (
     call :Log "Decision reboot: aucun redemarrage requis."
