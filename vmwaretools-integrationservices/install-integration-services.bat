@@ -294,13 +294,13 @@ call :Log "Code retour desinstallation VMware Tools: !UNINSTALL_RC!"
 
 if "!UNINSTALL_RC!"=="0" (
     call :Log "Desinstallation VMware Tools terminee avec succes."
-    set "VMWARE_TOOLS_STATUS=SUCCESS"
+    call :VerifyVmwareToolsRemoved
     goto :EOF
 )
 if "!UNINSTALL_RC!"=="3010" (
     call :Log "Desinstallation VMware Tools succes avec redemarrage requis (3010)."
-    set "VMWARE_TOOLS_STATUS=SUCCESS"
     set "NEED_REBOOT=1"
+    call :VerifyVmwareToolsRemoved
     goto :EOF
 )
 if "!UNINSTALL_RC!"=="1605" (
@@ -323,6 +323,62 @@ if "!ENABLE_FORCE_VMWARE_CLEANUP!"=="1" (
 )
 if /i "!VMWARE_TOOLS_STATUS!"=="CLEANUP_ONLY" (
     set "NEED_REBOOT=1"
+)
+goto :EOF
+
+:VerifyVmwareToolsRemoved
+call :FindVmwareToolsUninstallEntry
+if not defined DETECTED_VMWARE_TOOLS_KEY (
+    call :Log "Verification post-desinstallation: VMware Tools non detecte dans Add/Remove Programs."
+    set "VMWARE_TOOLS_STATUS=SUCCESS"
+    goto :EOF
+)
+
+call :Log "Verification post-desinstallation: VMware Tools toujours present (cle: !DETECTED_VMWARE_TOOLS_KEY!)."
+if "!ENABLE_FORCE_VMWARE_CLEANUP!"=="1" (
+    call :Log "Option /forcecleanup active : lancement du cleanup force pour supprimer les residus."
+    call :RunVmwareCleanup
+) else (
+    call :Log "Cleanup force desactive. Relancer avec /forcecleanup pour supprimer l'entree restante."
+    set "VMWARE_TOOLS_STATUS=ERROR"
+)
+if /i "!VMWARE_TOOLS_STATUS!"=="CLEANUP_ONLY" set "NEED_REBOOT=1"
+goto :EOF
+
+:FindVmwareToolsUninstallEntry
+set "DETECTED_VMWARE_TOOLS_KEY="
+set "DETECTED_VMWARE_TOOLS_NAME="
+set "DETECTED_VMWARE_TOOLS_PUBLISHER="
+
+for %%R in (
+    "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    "HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+) do (
+    for /f "delims=" %%K in ('reg query %%~R 2^>nul ^| findstr /r /c:"HKEY_"') do (
+        set "CURRENT_DISPLAY_NAME="
+        set "CURRENT_PUBLISHER="
+
+        for /f "tokens=2,*" %%V in ('reg query "%%K" /v DisplayName 2^>nul ^| findstr /i "DisplayName"') do set "CURRENT_DISPLAY_NAME=%%W"
+        for /f "tokens=2,*" %%V in ('reg query "%%K" /v Publisher 2^>nul ^| findstr /i "Publisher"') do set "CURRENT_PUBLISHER=%%W"
+
+        if defined CURRENT_DISPLAY_NAME (
+            echo !CURRENT_DISPLAY_NAME! | findstr /i /c:"VMware Tools" >nul
+            if not errorlevel 1 if not defined DETECTED_VMWARE_TOOLS_KEY (
+                if not defined CURRENT_PUBLISHER (
+                    set "DETECTED_VMWARE_TOOLS_KEY=%%K"
+                    set "DETECTED_VMWARE_TOOLS_NAME=!CURRENT_DISPLAY_NAME!"
+                    set "DETECTED_VMWARE_TOOLS_PUBLISHER=!CURRENT_PUBLISHER!"
+                ) else (
+                    echo !CURRENT_PUBLISHER! | findstr /i /c:"VMware" >nul
+                    if not errorlevel 1 (
+                        set "DETECTED_VMWARE_TOOLS_KEY=%%K"
+                        set "DETECTED_VMWARE_TOOLS_NAME=!CURRENT_DISPLAY_NAME!"
+                        set "DETECTED_VMWARE_TOOLS_PUBLISHER=!CURRENT_PUBLISHER!"
+                    )
+                )
+            )
+        )
+    )
 )
 goto :EOF
 
@@ -597,6 +653,17 @@ set "VMWARE_REG_ID="
 set "VMWARE_MSI_ID="
 
 call :Log "Demarrage cleanup force VMware Tools (fallback uniquement)."
+
+if defined VMWARE_TOOLS_KEY (
+    call :Log "Suppression de la cle uninstall VMware Tools detectee initialement."
+    call :DeleteRegKey "!VMWARE_TOOLS_KEY!"
+)
+
+call :FindVmwareToolsUninstallEntry
+if defined DETECTED_VMWARE_TOOLS_KEY (
+    call :Log "Suppression de la cle uninstall VMware Tools encore detectee apres echec."
+    call :DeleteRegKey "!DETECTED_VMWARE_TOOLS_KEY!"
+)
 
 REM Fallback agressif: nettoyage Installer\Products/Features seulement si
 REM la desinstallation standard a echoue.
