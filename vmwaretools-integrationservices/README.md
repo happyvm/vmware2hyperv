@@ -38,11 +38,12 @@ install-integration-services.bat
 - `/reboot` ou `-reboot` : active le redémarrage automatique si le script détecte qu’il est requis.
 - `/noreboot` ou `-noreboot` : force la désactivation du redémarrage automatique (comportement par défaut actuel).
 - `/forcecleanup` : active un nettoyage VMware forcé supplémentaire.
+- `/forceisinstall` (alias `/forceis`) : force l’installation des Integration Services même si les services core semblent déjà présents.
 
 Exemple :
 
 ```bat
-install-integration-services.bat /reboot /forcecleanup
+install-integration-services.bat /reboot /forcecleanup /forceisinstall
 ```
 
 ## Journalisation
@@ -68,6 +69,7 @@ Le script crée `C:\temp` si le dossier n’existe pas.
 5. Vérifie l’éligibilité OS pour Integration Services.
 6. Si service `vmicheartbeat` absent : lance `setup.exe /quiet /norestart` selon l’architecture.
 7. Si nécessaire, planifie un reboot uniquement si `/reboot` est fourni (sinon il l’indique sans le déclencher).
+8. Cas legacy Windows 5.x : si aucune entrée Integration Services n’est trouvée dans Ajout/Suppression de programmes, le script force l’installation même si certains services existent déjà.
 
 ## Recommandations d’exploitation
 
@@ -77,3 +79,10 @@ Le script crée `C:\temp` si le dossier n’existe pas.
   - privilèges administrateur,
   - présence des installateurs Integration Services,
   - état des services/pilotes VMware résiduels.
+
+## Dépannage rapide
+
+- Si le script affiche `Hyperviseur detecte (manufacturer): UNKNOWN` et `Modele detecte: UNKNOWN`, il peut s’agir d’un OS legacy où WMIC/BIOS ne remonte pas correctement les infos.
+- Le script tente désormais aussi une détection Hyper‑V via :
+  - `HKLM\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters` ;
+  - le service `vmbus`.
