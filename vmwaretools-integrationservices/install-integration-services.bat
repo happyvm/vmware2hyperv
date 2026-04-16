@@ -12,6 +12,9 @@ REM   0 = succes
 REM   1 = erreur
 REM   2 = cleanup partiel (fallback force applique)
 REM   3 = succes avec fallback interactif Integration Services
+REM   4 = cleanup partiel + succes avec fallback interactif Integration Services
+REM   5 = intervention manuelle Integration Services requise (detecte via Ajout/Suppression de programmes)
+REM   6 = cleanup partiel + intervention manuelle Integration Services requise
 REM ============================================================================
 
 set "SCRIPT_EXIT_CODE=0"
@@ -21,6 +24,7 @@ set "VMWARE_TOOLS_STATUS=ABSENT"
 set "IS_INSTALL_ATTEMPTED=0"
 set "IS_POSTCHECK=NOT_RUN"
 set "IS_INSTALL_FALLBACK_USED=0"
+set "IS_MANUAL_FAILBACK_USED=0"
 set "LOG_FILE=C:\temp\vmware2hyperv-postmigration.log"
 set "ENABLE_GENERIC_VMWARE_SERVICE_SWEEP=0"
 set "ENABLE_HIDDEN_DEVICE_CLEANUP=1"
@@ -154,6 +158,14 @@ if /i "!INSTALL_IS_REQUIRED!"=="1" (
     call :VerifyIntegrationServicesCore "silent"
     if /i "!IS_POSTCHECK!"=="KO" (
         call :Log "silent install ineffective: composants core toujours absents apres RC !IS_INSTALL_RC!."
+        call :DetectIntegrationServicesInPrograms
+        if "!IS_ARP_FOUND!"=="1" (
+            set "IS_MANUAL_FAILBACK_USED=1"
+            call :Log "failback manuel: Integration Services detectes dans Ajout/Suppression de programmes (!IS_ARP_DISPLAY_NAME!)."
+            call :Log "failback manuel: cette version semble necessiter une installation/validation manuelle des Integration Services."
+            set "IS_POSTCHECK=MANUAL_REQUIRED"
+            goto :Finalize
+        )
         set "IS_INSTALL_FALLBACK_USED=1"
         set "IS_INSTALL_CMD=\"%IS_SETUP_EXE%\""
         call :Log "Commande installation Integration Services (fallback interactif): !IS_INSTALL_CMD!"
@@ -205,7 +217,10 @@ goto :EndScript
 
 :EndScript
 if "!SCRIPT_EXIT_CODE!"=="0" if "!IS_INSTALL_FALLBACK_USED!"=="1" set "SCRIPT_EXIT_CODE=3"
-call :Log "SUMMARY: VMWARE_TOOLS_STATUS=%VMWARE_TOOLS_STATUS%, IS_INSTALL_ATTEMPTED=%IS_INSTALL_ATTEMPTED%, IS_INSTALL_FALLBACK_USED=%IS_INSTALL_FALLBACK_USED%, IS_POSTCHECK=%IS_POSTCHECK%, NEED_REBOOT=%NEED_REBOOT%, EXIT=%SCRIPT_EXIT_CODE%"
+if "!SCRIPT_EXIT_CODE!"=="2" if "!IS_INSTALL_FALLBACK_USED!"=="1" set "SCRIPT_EXIT_CODE=4"
+if "!SCRIPT_EXIT_CODE!"=="0" if "!IS_MANUAL_FAILBACK_USED!"=="1" set "SCRIPT_EXIT_CODE=5"
+if "!SCRIPT_EXIT_CODE!"=="2" if "!IS_MANUAL_FAILBACK_USED!"=="1" set "SCRIPT_EXIT_CODE=6"
+call :Log "SUMMARY: VMWARE_TOOLS_STATUS=%VMWARE_TOOLS_STATUS%, IS_INSTALL_ATTEMPTED=%IS_INSTALL_ATTEMPTED%, IS_INSTALL_FALLBACK_USED=%IS_INSTALL_FALLBACK_USED%, IS_MANUAL_FAILBACK_USED=%IS_MANUAL_FAILBACK_USED%, IS_POSTCHECK=%IS_POSTCHECK%, NEED_REBOOT=%NEED_REBOOT%, EXIT=%SCRIPT_EXIT_CODE%"
 call :Log "Fin du script avec code de sortie %SCRIPT_EXIT_CODE% (statut VMware Tools=%VMWARE_TOOLS_STATUS%, NEED_REBOOT=%NEED_REBOOT%)."
 endlocal & exit /b %SCRIPT_EXIT_CODE%
 
@@ -904,6 +919,42 @@ if "!SC_QUERY_RC!"=="0" (
     call :Log "sc query \"%SC_QUERY_TARGET%\" => RC=1060 (service absent/non installe)"
 ) else (
     call :Log "sc query \"%SC_QUERY_TARGET%\" => RC=!SC_QUERY_RC!"
+)
+goto :EOF
+
+:DetectIntegrationServicesInPrograms
+set "IS_ARP_FOUND=0"
+set "IS_ARP_KEY="
+set "IS_ARP_DISPLAY_NAME="
+for %%R in (
+    "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    "HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+) do (
+    for /f "delims=" %%K in ('reg query %%~R 2^>nul ^| findstr /r /c:"HKEY_"') do (
+        set "CURRENT_DISPLAY_NAME="
+        for /f "tokens=2,*" %%V in ('reg query "%%K" /v DisplayName 2^>nul ^| findstr /i "DisplayName"') do set "CURRENT_DISPLAY_NAME=%%W"
+        if defined CURRENT_DISPLAY_NAME (
+            echo !CURRENT_DISPLAY_NAME! | findstr /i /c:"Hyper-V Integration Services" >nul
+            if not errorlevel 1 if "!IS_ARP_FOUND!"=="0" (
+                set "IS_ARP_FOUND=1"
+                set "IS_ARP_KEY=%%K"
+                set "IS_ARP_DISPLAY_NAME=!CURRENT_DISPLAY_NAME!"
+            )
+            if "!IS_ARP_FOUND!"=="0" (
+                echo !CURRENT_DISPLAY_NAME! | findstr /i /c:"Integration Services" >nul
+                if not errorlevel 1 (
+                    set "IS_ARP_FOUND=1"
+                    set "IS_ARP_KEY=%%K"
+                    set "IS_ARP_DISPLAY_NAME=!CURRENT_DISPLAY_NAME!"
+                )
+            )
+        )
+    )
+)
+if "!IS_ARP_FOUND!"=="1" (
+    call :Log "Ajout/Suppression programmes: Integration Services detectes: !IS_ARP_DISPLAY_NAME! (!IS_ARP_KEY!)."
+) else (
+    call :Log "Ajout/Suppression programmes: aucune entree Integration Services detectee."
 )
 goto :EOF
 
