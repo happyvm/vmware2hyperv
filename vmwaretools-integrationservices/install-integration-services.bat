@@ -29,6 +29,7 @@ set "LOG_FILE=C:\temp\vmware2hyperv-postmigration.log"
 set "ENABLE_GENERIC_VMWARE_SERVICE_SWEEP=0"
 set "ENABLE_HIDDEN_DEVICE_CLEANUP=1"
 set "ENABLE_FORCE_VMWARE_CLEANUP=0"
+set "FORCE_IS_INSTALL=0"
 set "OS_VERSION="
 set "OS_MAJOR="
 set "OS_MINOR="
@@ -43,6 +44,10 @@ if /i "%~1"=="-reboot" set "AUTO_REBOOT=1"
 if /i "%~1"=="/noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="-noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="/forcecleanup" set "ENABLE_FORCE_VMWARE_CLEANUP=1"
+if /i "%~1"=="/forceisinstall" set "FORCE_IS_INSTALL=1"
+if /i "%~1"=="-forceisinstall" set "FORCE_IS_INSTALL=1"
+if /i "%~1"=="/forceis" set "FORCE_IS_INSTALL=1"
+if /i "%~1"=="-forceis" set "FORCE_IS_INSTALL=1"
 shift
 goto :ParseArgs
 
@@ -116,6 +121,24 @@ for %%S in (vmicheartbeat vmicshutdown vmbus storvsc netvsc) do (
             set "IS_MISSING_COMPONENTS=%%S"
         )
     )
+)
+if "!INSTALL_IS_REQUIRED!"=="0" (
+    call :DetectIntegrationServicesInPrograms
+    if !OS_MAJOR! LSS 6 if "!IS_ARP_FOUND!"=="0" (
+        set "INSTALL_IS_REQUIRED=1"
+        set "IS_MISSING_COMPONENTS=LEGACY_ARP_ABSENT"
+        call :Log "OS legacy detecte (major=!OS_MAJOR!) sans entree Integration Services dans Ajout/Suppression de programmes."
+        call :Log "Les services core peuvent etre presents mais incomplets sur cet OS: installation Integration Services forcee."
+    )
+)
+if "!FORCE_IS_INSTALL!"=="1" (
+    set "INSTALL_IS_REQUIRED=1"
+    if defined IS_MISSING_COMPONENTS (
+        set "IS_MISSING_COMPONENTS=!IS_MISSING_COMPONENTS!,FORCED_BY_OPTION"
+    ) else (
+        set "IS_MISSING_COMPONENTS=FORCED_BY_OPTION"
+    )
+    call :Log "Option /forceisinstall detectee: installation Integration Services forcee."
 )
 if /i "!INSTALL_IS_REQUIRED!"=="1" (
     call :Log "Composants Integration Services manquants: !IS_MISSING_COMPONENTS!"
