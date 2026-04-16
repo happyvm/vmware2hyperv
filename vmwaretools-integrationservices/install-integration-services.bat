@@ -206,6 +206,7 @@ set "UNINSTALL_RAW="
 set "QUIET_UNINSTALL_RAW="
 set "UNINSTALL_CMD="
 set "UNINSTALL_RC="
+set "VMWARE_PRODUCT_CODE="
 
 for %%R in (
     "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -251,9 +252,27 @@ call :Log "Cle uninstall: !VMWARE_TOOLS_KEY!"
 for /f "tokens=2,*" %%V in ('reg query "!VMWARE_TOOLS_KEY!" /v QuietUninstallString 2^>nul ^| findstr /i "QuietUninstallString"') do set "QUIET_UNINSTALL_RAW=%%W"
 for /f "tokens=2,*" %%V in ('reg query "!VMWARE_TOOLS_KEY!" /v UninstallString 2^>nul ^| findstr /i "UninstallString"') do set "UNINSTALL_RAW=%%W"
 
-if defined QUIET_UNINSTALL_RAW (
-    set "UNINSTALL_CMD=!QUIET_UNINSTALL_RAW!"
-    call :Log "Utilisation de QuietUninstallString prioritaire."
+call :ExtractGuidFromKey "!VMWARE_TOOLS_KEY!"
+if defined EXTRACTED_GUID set "VMWARE_PRODUCT_CODE=!EXTRACTED_GUID!"
+if not defined VMWARE_PRODUCT_CODE (
+    call :ExtractGuidFromCommand "!UNINSTALL_RAW!"
+    if defined EXTRACTED_GUID set "VMWARE_PRODUCT_CODE=!EXTRACTED_GUID!"
+)
+if not defined VMWARE_PRODUCT_CODE (
+    call :ExtractGuidFromCommand "!QUIET_UNINSTALL_RAW!"
+    if defined EXTRACTED_GUID set "VMWARE_PRODUCT_CODE=!EXTRACTED_GUID!"
+)
+
+if defined VMWARE_PRODUCT_CODE (
+    set "UNINSTALL_CMD=msiexec /x !VMWARE_PRODUCT_CODE! /qn REBOOT=ReallySuppress /norestart"
+    call :Log "Utilisation de msiexec direct pour VMware Tools: !VMWARE_PRODUCT_CODE!"
+) else if defined QUIET_UNINSTALL_RAW (
+    call :BuildUninstallCommand "!QUIET_UNINSTALL_RAW!"
+    if errorlevel 1 (
+        set "VMWARE_TOOLS_STATUS=ERROR"
+        goto :EOF
+    )
+    call :Log "Utilisation de QuietUninstallString (normalisee)."
 ) else (
     if not defined UNINSTALL_RAW (
         call :Log "ERREUR : UninstallString/QuietUninstallString introuvable pour VMware Tools."
@@ -304,6 +323,28 @@ if "!ENABLE_FORCE_VMWARE_CLEANUP!"=="1" (
 )
 if /i "!VMWARE_TOOLS_STATUS!"=="CLEANUP_ONLY" (
     set "NEED_REBOOT=1"
+)
+goto :EOF
+
+:ExtractGuidFromKey
+set "RAW_KEY=%~1"
+set "EXTRACTED_GUID="
+for /f "tokens=2 delims={}" %%G in ("!RAW_KEY!") do (
+    if not defined EXTRACTED_GUID (
+        echo {%%G} | findstr /r /i /c:"{[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]}" >nul
+        if not errorlevel 1 set "EXTRACTED_GUID={%%G}"
+    )
+)
+goto :EOF
+
+:ExtractGuidFromCommand
+set "RAW_CMD=%~1"
+set "EXTRACTED_GUID="
+for /f "tokens=2 delims={}" %%G in ("!RAW_CMD!") do (
+    if not defined EXTRACTED_GUID (
+        echo {%%G} | findstr /r /i /c:"{[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]}" >nul
+        if not errorlevel 1 set "EXTRACTED_GUID={%%G}"
+    )
 )
 goto :EOF
 
