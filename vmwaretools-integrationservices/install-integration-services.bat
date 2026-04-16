@@ -391,10 +391,7 @@ goto :EOF
 set "RAW_KEY=%~1"
 set "EXTRACTED_GUID="
 for /f "tokens=2 delims={}" %%G in ("!RAW_KEY!") do (
-    if not defined EXTRACTED_GUID (
-        echo {%%G} | findstr /r /i /c:"{[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]}" >nul
-        if not errorlevel 1 set "EXTRACTED_GUID={%%G}"
-    )
+    if not defined EXTRACTED_GUID set "EXTRACTED_GUID={%%G}"
 )
 goto :EOF
 
@@ -402,10 +399,7 @@ goto :EOF
 set "RAW_CMD=%~1"
 set "EXTRACTED_GUID="
 for /f "tokens=2 delims={}" %%G in ("!RAW_CMD!") do (
-    if not defined EXTRACTED_GUID (
-        echo {%%G} | findstr /r /i /c:"{[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]}" >nul
-        if not errorlevel 1 set "EXTRACTED_GUID={%%G}"
-    )
+    if not defined EXTRACTED_GUID set "EXTRACTED_GUID={%%G}"
 )
 goto :EOF
 
