@@ -35,13 +35,14 @@ install-integration-services.bat
 
 ### Options disponibles
 
-- `/noreboot` ou `-noreboot` : n’effectue pas de redémarrage automatique (même si nécessaire).
+- `/reboot` ou `-reboot` : active le redémarrage automatique si le script détecte qu’il est requis.
+- `/noreboot` ou `-noreboot` : force la désactivation du redémarrage automatique (comportement par défaut actuel).
 - `/forcecleanup` : active un nettoyage VMware forcé supplémentaire.
 
 Exemple :
 
 ```bat
-install-integration-services.bat /noreboot /forcecleanup
+install-integration-services.bat /reboot /forcecleanup
 ```
 
 ## Journalisation
@@ -66,7 +67,7 @@ Le script crée `C:\temp` si le dossier n’existe pas.
 4. Si Hyper‑V détecté : désinstallation/cleanup VMware.
 5. Vérifie l’éligibilité OS pour Integration Services.
 6. Si service `vmicheartbeat` absent : lance `setup.exe /quiet /norestart` selon l’architecture.
-7. Si nécessaire, planifie un reboot (ou l’indique si `/noreboot`).
+7. Si nécessaire, planifie un reboot uniquement si `/reboot` est fourni (sinon il l’indique sans le déclencher).
 
 ## Recommandations d’exploitation
 
