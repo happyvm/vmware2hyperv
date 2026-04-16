@@ -11,6 +11,7 @@ REM Exit codes:
 REM   0 = succes
 REM   1 = erreur
 REM   2 = cleanup partiel (fallback force applique)
+REM   3 = succes avec fallback interactif Integration Services
 REM ============================================================================
 
 set "SCRIPT_EXIT_CODE=0"
@@ -19,6 +20,7 @@ set "AUTO_REBOOT=0"
 set "VMWARE_TOOLS_STATUS=ABSENT"
 set "IS_INSTALL_ATTEMPTED=0"
 set "IS_POSTCHECK=NOT_RUN"
+set "IS_INSTALL_FALLBACK_USED=0"
 set "LOG_FILE=C:\temp\vmware2hyperv-postmigration.log"
 set "ENABLE_GENERIC_VMWARE_SERVICE_SWEEP=0"
 set "ENABLE_HIDDEN_DEVICE_CLEANUP=1"
@@ -134,10 +136,11 @@ if /i "!INSTALL_IS_REQUIRED!"=="1" (
         goto :EndScript
     )
 
-    call :Log "Commande installation Integration Services: \"%IS_SETUP_EXE%\" /quiet /norestart"
+    set "IS_INSTALL_CMD=\"%IS_SETUP_EXE%\" /quiet /norestart"
+    call :Log "Commande installation Integration Services (silent): !IS_INSTALL_CMD!"
     start /wait "" "%IS_SETUP_EXE%" /quiet /norestart
     set "IS_INSTALL_RC=!errorlevel!"
-    call :Log "Code retour install Integration Services: !IS_INSTALL_RC!"
+    call :Log "Code retour install Integration Services (silent): !IS_INSTALL_RC!"
 
     if "!IS_INSTALL_RC!"=="0" (
         set "NEED_REBOOT=1"
@@ -148,7 +151,33 @@ if /i "!INSTALL_IS_REQUIRED!"=="1" (
         set "SCRIPT_EXIT_CODE=1"
         goto :EndScript
     )
-    call :PostCheckIntegrationServices
+    call :VerifyIntegrationServicesCore "silent"
+    if /i "!IS_POSTCHECK!"=="KO" (
+        call :Log "silent install ineffective: composants core toujours absents apres RC !IS_INSTALL_RC!."
+        set "IS_INSTALL_FALLBACK_USED=1"
+        set "IS_INSTALL_CMD=\"%IS_SETUP_EXE%\""
+        call :Log "Commande installation Integration Services (fallback interactif): !IS_INSTALL_CMD!"
+        start /wait "" "%IS_SETUP_EXE%"
+        set "IS_INSTALL_FALLBACK_RC=!errorlevel!"
+        call :Log "Code retour install Integration Services (fallback interactif): !IS_INSTALL_FALLBACK_RC!"
+
+        if "!IS_INSTALL_FALLBACK_RC!"=="0" (
+            set "NEED_REBOOT=1"
+        ) else if "!IS_INSTALL_FALLBACK_RC!"=="3010" (
+            set "NEED_REBOOT=1"
+        ) else (
+            call :Log "ERREUR : echec fallback interactif Integration Services (code !IS_INSTALL_FALLBACK_RC!)."
+            set "SCRIPT_EXIT_CODE=1"
+            goto :EndScript
+        )
+
+        call :VerifyIntegrationServicesCore "fallback-interactif"
+        if /i "!IS_POSTCHECK!"=="KO" (
+            call :Log "ERREUR : composants Integration Services toujours absents apres fallback interactif."
+            set "SCRIPT_EXIT_CODE=1"
+            goto :EndScript
+        )
+    )
 ) else (
     call :Log "Verification Integration Services: tous les composants core sont presents."
     call :Log "Integration Services deja presents (services core detectes). Pas d'installation."
@@ -175,7 +204,8 @@ if "!NEED_REBOOT!"=="1" (
 goto :EndScript
 
 :EndScript
-call :Log "SUMMARY: VMWARE_TOOLS_STATUS=%VMWARE_TOOLS_STATUS%, IS_INSTALL_ATTEMPTED=%IS_INSTALL_ATTEMPTED%, IS_POSTCHECK=%IS_POSTCHECK%, NEED_REBOOT=%NEED_REBOOT%, EXIT=%SCRIPT_EXIT_CODE%"
+if "!SCRIPT_EXIT_CODE!"=="0" if "!IS_INSTALL_FALLBACK_USED!"=="1" set "SCRIPT_EXIT_CODE=3"
+call :Log "SUMMARY: VMWARE_TOOLS_STATUS=%VMWARE_TOOLS_STATUS%, IS_INSTALL_ATTEMPTED=%IS_INSTALL_ATTEMPTED%, IS_INSTALL_FALLBACK_USED=%IS_INSTALL_FALLBACK_USED%, IS_POSTCHECK=%IS_POSTCHECK%, NEED_REBOOT=%NEED_REBOOT%, EXIT=%SCRIPT_EXIT_CODE%"
 call :Log "Fin du script avec code de sortie %SCRIPT_EXIT_CODE% (statut VMware Tools=%VMWARE_TOOLS_STATUS%, NEED_REBOOT=%NEED_REBOOT%)."
 endlocal & exit /b %SCRIPT_EXIT_CODE%
 
@@ -913,7 +943,9 @@ call :Log "Decision Matrix - Resultat global composants: !DECISION_STATUS!"
 call :Log "===== End Decision Matrix ====="
 goto :EOF
 
-:PostCheckIntegrationServices
+:VerifyIntegrationServicesCore
+set "VERIFY_CONTEXT=%~1"
+if "%VERIFY_CONTEXT%"=="" set "VERIFY_CONTEXT=unspecified"
 set "IS_POSTCHECK=OK"
 set "IS_POSTCHECK_DETAILS="
 for %%S in (vmicheartbeat vmicshutdown vmbus storvsc netvsc) do (
@@ -925,5 +957,5 @@ for %%S in (vmicheartbeat vmicshutdown vmbus storvsc netvsc) do (
         set "IS_POSTCHECK_DETAILS=!IS_POSTCHECK_DETAILS! %%S=KO(RC=!SC_QUERY_RC!)"
     )
 )
-call :Log "Post-check Integration Services: !IS_POSTCHECK! (!IS_POSTCHECK_DETAILS!)"
+call :Log "Post-check Integration Services [!VERIFY_CONTEXT!]: !IS_POSTCHECK! (!IS_POSTCHECK_DETAILS!)"
 goto :EOF
