@@ -17,6 +17,8 @@ set "SCRIPT_EXIT_CODE=0"
 set "NEED_REBOOT=0"
 set "AUTO_REBOOT=0"
 set "VMWARE_TOOLS_STATUS=ABSENT"
+set "IS_INSTALL_ATTEMPTED=0"
+set "IS_POSTCHECK=NOT_RUN"
 set "LOG_FILE=C:\temp\vmware2hyperv-postmigration.log"
 set "ENABLE_GENERIC_VMWARE_SERVICE_SWEEP=0"
 set "ENABLE_HIDDEN_DEVICE_CLEANUP=1"
@@ -90,6 +92,7 @@ if /i "!ENABLE_HIDDEN_DEVICE_CLEANUP!"=="1" (
 )
 
 call :IsIntegrationServicesEligible
+call :LogDecisionMatrix
 if /i not "!IS_ELIGIBLE!"=="1" (
     call :Log "OS non eligible a l'installation Integration Services. Fin sans installation."
     goto :Finalize
@@ -98,8 +101,8 @@ if /i not "!IS_ELIGIBLE!"=="1" (
 set "INSTALL_IS_REQUIRED=0"
 set "IS_MISSING_COMPONENTS="
 for %%S in (vmicheartbeat vmicshutdown vmbus storvsc netvsc) do (
-    sc query "%%S" >nul 2>&1
-    if errorlevel 1 (
+    call :QueryService "%%S"
+    if not "!SC_QUERY_RC!"=="0" (
         set "INSTALL_IS_REQUIRED=1"
         if defined IS_MISSING_COMPONENTS (
             set "IS_MISSING_COMPONENTS=!IS_MISSING_COMPONENTS!,%%S"
@@ -111,6 +114,7 @@ for %%S in (vmicheartbeat vmicshutdown vmbus storvsc netvsc) do (
 if /i "!INSTALL_IS_REQUIRED!"=="1" (
     call :Log "Composants Integration Services manquants: !IS_MISSING_COMPONENTS!"
     call :Log "Integration Services incomplets/absents. Installation requise..."
+    set "IS_INSTALL_ATTEMPTED=1"
 
     set "IS_ARCH=x86"
     if defined PROCESSOR_ARCHITEW6432 set "IS_ARCH=x64"
@@ -122,6 +126,7 @@ if /i "!INSTALL_IS_REQUIRED!"=="1" (
         set "IS_SETUP_EXE=C:\temp\HYPERVIS\x86\setup.exe"
         call :Log "OS detecte : 32-bit"
     )
+    call :LogPathCheck "IS_SETUP_EXE" "!IS_SETUP_EXE!"
 
     if not exist "%IS_SETUP_EXE%" (
         call :Log "ERREUR : installeur Integration Services introuvable: %IS_SETUP_EXE%"
@@ -143,9 +148,11 @@ if /i "!INSTALL_IS_REQUIRED!"=="1" (
         set "SCRIPT_EXIT_CODE=1"
         goto :EndScript
     )
+    call :PostCheckIntegrationServices
 ) else (
     call :Log "Verification Integration Services: tous les composants core sont presents."
     call :Log "Integration Services deja presents (services core detectes). Pas d'installation."
+    set "IS_POSTCHECK=SKIPPED_ALREADY_OK"
 )
 
 :Finalize
@@ -168,6 +175,7 @@ if "!NEED_REBOOT!"=="1" (
 goto :EndScript
 
 :EndScript
+call :Log "SUMMARY: VMWARE_TOOLS_STATUS=%VMWARE_TOOLS_STATUS%, IS_INSTALL_ATTEMPTED=%IS_INSTALL_ATTEMPTED%, IS_POSTCHECK=%IS_POSTCHECK%, NEED_REBOOT=%NEED_REBOOT%, EXIT=%SCRIPT_EXIT_CODE%"
 call :Log "Fin du script avec code de sortie %SCRIPT_EXIT_CODE% (statut VMware Tools=%VMWARE_TOOLS_STATUS%, NEED_REBOOT=%NEED_REBOOT%)."
 endlocal & exit /b %SCRIPT_EXIT_CODE%
 
@@ -618,6 +626,7 @@ set "DEVCON_ARCH=x86"
 if defined PROCESSOR_ARCHITEW6432 set "DEVCON_ARCH=x64"
 if /i "!PROCESSOR_ARCHITECTURE!"=="AMD64" set "DEVCON_ARCH=x64"
 set "DEVCON_EXE=C:\temp\HYPERVIS\devcon\!DEVCON_ARCH!\devcon.exe"
+call :LogPathCheck "DEVCON_EXE" "!DEVCON_EXE!"
 if not exist "!DEVCON_EXE!" (
     call :Log "ATTENTION : devcon.exe introuvable, cleanup devices legacy ignore."
     goto :FallbackRegistryCleanup
@@ -764,8 +773,8 @@ goto :EOF
 :RemoveService
 set "SERVICE_NAME=%~1"
 if "%SERVICE_NAME%"=="" goto :EOF
-sc query "%SERVICE_NAME%" >nul 2>&1
-if errorlevel 1 goto :EOF
+call :QueryService "%SERVICE_NAME%"
+if not "!SC_QUERY_RC!"=="0" goto :EOF
 call :Log "Suppression service: %SERVICE_NAME%"
 call :GetServiceState "%SERVICE_NAME%"
 if /i "!SERVICE_STATE!"=="RUNNING" (
@@ -851,4 +860,70 @@ set "SERVICE_STATE=UNKNOWN"
 set "SERVICE_NAME=%~1"
 if "%SERVICE_NAME%"=="" goto :EOF
 for /f "tokens=3" %%A in ('sc query "%SERVICE_NAME%" ^| findstr /r /c:"STATE *:"') do set "SERVICE_STATE=%%A"
+goto :EOF
+
+:QueryService
+set "SC_QUERY_TARGET=%~1"
+set "SC_QUERY_RC=0"
+if "%SC_QUERY_TARGET%"=="" goto :EOF
+sc query "%SC_QUERY_TARGET%" >nul 2>&1
+set "SC_QUERY_RC=!errorlevel!"
+if "!SC_QUERY_RC!"=="0" (
+    call :Log "sc query \"%SC_QUERY_TARGET%\" => RC=0 (service present)"
+) else if "!SC_QUERY_RC!"=="1060" (
+    call :Log "sc query \"%SC_QUERY_TARGET%\" => RC=1060 (service absent/non installe)"
+) else (
+    call :Log "sc query \"%SC_QUERY_TARGET%\" => RC=!SC_QUERY_RC!"
+)
+goto :EOF
+
+:LogPathCheck
+set "CHECK_LABEL=%~1"
+set "CHECK_PATH=%~2"
+if "%CHECK_LABEL%"=="" goto :EOF
+if "%CHECK_PATH%"=="" (
+    call :Log "Path check [%CHECK_LABEL%]: chemin vide"
+    goto :EOF
+)
+if exist "%CHECK_PATH%" (
+    call :Log "Path check [%CHECK_LABEL%]: %CHECK_PATH% (EXISTS=YES)"
+) else (
+    call :Log "Path check [%CHECK_LABEL%]: %CHECK_PATH% (EXISTS=NO)"
+)
+goto :EOF
+
+:LogDecisionMatrix
+set "DECISION_STATUS=OK"
+set "DECISION_COMPONENTS="
+call :Log "===== Decision Matrix ====="
+call :Log "Decision Matrix - OS major/minor: !OS_MAJOR!.!OS_MINOR!"
+call :Log "Decision Matrix - Hyperviseur detecte: !MANU! (!MODEL!)"
+call :Log "Decision Matrix - NEED_REBOOT courant: !NEED_REBOOT!"
+for %%S in (vmicheartbeat vmicshutdown vmbus storvsc netvsc) do (
+    call :QueryService "%%S"
+    if "!SC_QUERY_RC!"=="0" (
+        set "DECISION_COMPONENTS=!DECISION_COMPONENTS! %%S=OK(RC=0)"
+    ) else (
+        set "DECISION_STATUS=KO"
+        set "DECISION_COMPONENTS=!DECISION_COMPONENTS! %%S=KO(RC=!SC_QUERY_RC!)"
+    )
+)
+call :Log "Decision Matrix - Composants:!DECISION_COMPONENTS!"
+call :Log "Decision Matrix - Resultat global composants: !DECISION_STATUS!"
+call :Log "===== End Decision Matrix ====="
+goto :EOF
+
+:PostCheckIntegrationServices
+set "IS_POSTCHECK=OK"
+set "IS_POSTCHECK_DETAILS="
+for %%S in (vmicheartbeat vmicshutdown vmbus storvsc netvsc) do (
+    call :QueryService "%%S"
+    if "!SC_QUERY_RC!"=="0" (
+        set "IS_POSTCHECK_DETAILS=!IS_POSTCHECK_DETAILS! %%S=OK"
+    ) else (
+        set "IS_POSTCHECK=KO"
+        set "IS_POSTCHECK_DETAILS=!IS_POSTCHECK_DETAILS! %%S=KO(RC=!SC_QUERY_RC!)"
+    )
+)
+call :Log "Post-check Integration Services: !IS_POSTCHECK! (!IS_POSTCHECK_DETAILS!)"
 goto :EOF
