@@ -157,15 +157,15 @@ if /i "!INSTALL_IS_REQUIRED!"=="1" (
     )
     call :LogPathCheck "IS_SETUP_EXE" "!IS_SETUP_EXE!"
 
-    if not exist "%IS_SETUP_EXE%" (
-        call :Log "ERREUR : installeur Integration Services introuvable: %IS_SETUP_EXE%"
+    if not exist "!IS_SETUP_EXE!" (
+        call :Log "ERREUR : installeur Integration Services introuvable: !IS_SETUP_EXE!"
         set "SCRIPT_EXIT_CODE=1"
         goto :EndScript
     )
 
-    set "IS_INSTALL_CMD=\"%IS_SETUP_EXE%\" /quiet /norestart"
+    set "IS_INSTALL_CMD=\"!IS_SETUP_EXE!\" /quiet /norestart"
     call :Log "Commande installation Integration Services (silent): !IS_INSTALL_CMD!"
-    start /wait "" "%IS_SETUP_EXE%" /quiet /norestart
+    start /wait "" "!IS_SETUP_EXE!" /quiet /norestart
     set "IS_INSTALL_RC=!errorlevel!"
     call :Log "Code retour install Integration Services (silent): !IS_INSTALL_RC!"
 
@@ -190,9 +190,9 @@ if /i "!INSTALL_IS_REQUIRED!"=="1" (
             goto :Finalize
         )
         set "IS_INSTALL_FALLBACK_USED=1"
-        set "IS_INSTALL_CMD=\"%IS_SETUP_EXE%\""
+        set "IS_INSTALL_CMD=\"!IS_SETUP_EXE!\""
         call :Log "Commande installation Integration Services (fallback interactif): !IS_INSTALL_CMD!"
-        start /wait "" "%IS_SETUP_EXE%"
+        start /wait "" "!IS_SETUP_EXE!"
         set "IS_INSTALL_FALLBACK_RC=!errorlevel!"
         call :Log "Code retour install Integration Services (fallback interactif): !IS_INSTALL_FALLBACK_RC!"
 
