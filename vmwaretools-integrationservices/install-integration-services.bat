@@ -276,16 +276,37 @@ exit /b 0
 :DetectHypervisor
 set "MANU="
 set "MODEL="
+set "HYP_DETECT_SOURCE="
 for /f "tokens=2 delims==" %%A in ('wmic computersystem get manufacturer /value 2^>nul ^| find "="') do set "MANU=%%A"
 for /f "tokens=2 delims==" %%A in ('wmic computersystem get model /value 2^>nul ^| find "="') do set "MODEL=%%A"
+if defined MANU set "HYP_DETECT_SOURCE=wmic"
 if not defined MANU (
     for /f "tokens=2,*" %%A in ('reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" /v SystemManufacturer 2^>nul ^| findstr /i "SystemManufacturer"') do set "MANU=%%B"
+    if defined MANU set "HYP_DETECT_SOURCE=registry-bios"
 )
 if not defined MODEL (
     for /f "tokens=2,*" %%A in ('reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" /v SystemProductName 2^>nul ^| findstr /i "SystemProductName"') do set "MODEL=%%B"
 )
+if not defined MANU (
+    for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters" /v HostName 2^>nul ^| findstr /i "HostName"') do set "HV_HOST=%%B"
+    if defined HV_HOST (
+        set "MANU=Microsoft Corporation"
+        set "MODEL=Virtual Machine"
+        set "HYP_DETECT_SOURCE=registry-hv-guest-parameters"
+    )
+)
+if not defined MANU (
+    sc query "vmbus" >nul 2>&1
+    if "!errorlevel!"=="0" (
+        set "MANU=Microsoft Corporation"
+        set "MODEL=Virtual Machine"
+        set "HYP_DETECT_SOURCE=service-vmbus"
+    )
+)
 if not defined MANU set "MANU=UNKNOWN"
 if not defined MODEL set "MODEL=UNKNOWN"
+if not defined HYP_DETECT_SOURCE set "HYP_DETECT_SOURCE=none"
+call :Log "Detection hyperviseur source: !HYP_DETECT_SOURCE!"
 goto :EOF
 
 :UninstallVmwareTools

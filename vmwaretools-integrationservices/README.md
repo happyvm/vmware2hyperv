@@ -79,3 +79,10 @@ Le script crée `C:\temp` si le dossier n’existe pas.
   - privilèges administrateur,
   - présence des installateurs Integration Services,
   - état des services/pilotes VMware résiduels.
+
+## Dépannage rapide
+
+- Si le script affiche `Hyperviseur detecte (manufacturer): UNKNOWN` et `Modele detecte: UNKNOWN`, il peut s’agir d’un OS legacy où WMIC/BIOS ne remonte pas correctement les infos.
+- Le script tente désormais aussi une détection Hyper‑V via :
+  - `HKLM\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters` ;
+  - le service `vmbus`.
