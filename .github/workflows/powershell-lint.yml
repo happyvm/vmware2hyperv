@@ -1,0 +1,40 @@
+name: PowerShell Lint
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  psscriptanalyzer:
+    name: PSScriptAnalyzer
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Run lint checks
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+
+          $scripts = Get-ChildItem -Path ./powershell-migration -Filter *.ps1 -Recurse | Select-Object -ExpandProperty FullName
+          if (-not $scripts) {
+            throw 'No PowerShell scripts found in ./powershell-migration'
+          }
+
+          $results = Invoke-ScriptAnalyzer -Path $scripts -Recurse -Severity Error, Warning
+          if ($results) {
+            $results | Format-Table -AutoSize
+            throw "PSScriptAnalyzer found $($results.Count) issue(s)."
+          }
+
+          Write-Host 'PSScriptAnalyzer found no issues.'
