@@ -73,9 +73,9 @@ if ($startIndex -le 1) {
         & "$PSScriptRoot\step2-ShutdownVM_StartBackupVeeam.ps1" -Tag $Tag -RecipientGroup $RecipientGroup -LogFile $LogFile
     }
 
-    Write-Host ""
-    Write-Host ">>> PAUSE before step3 (Instant Recovery)" -ForegroundColor Yellow
-    Write-Host "    Check in the Veeam console that job 'Backup-$Tag' is completed." -ForegroundColor Yellow
+    Write-Information "" -InformationAction Continue
+    Write-Warning ">>> PAUSE before step3 (Instant Recovery)"
+    Write-Warning "    Check in the Veeam console that job 'Backup-$Tag' is completed."
     Read-Host "    Press Enter to continue"
     Write-Log "Manual validation confirmed — launching step3." -LogFile $LogFile
 }
