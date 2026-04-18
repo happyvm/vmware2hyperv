@@ -22,14 +22,14 @@ Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
 
 
-Write-Log "Starting step1 - tagging and creating Veeam jobs" -LogFile $LogFile
-Assert-FileExists -Path $CsvFile -Label "batch CSV" -LogFile $LogFile
+Write-MigrationLog "Starting step1 - tagging and creating Veeam jobs" -LogFile $LogFile
+Assert-PathPresent -Path $CsvFile -Label "batch CSV" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 # Check / create the tag category
 $category = Get-TagCategory -Name $TagCategory -ErrorAction SilentlyContinue
 if (-not $category) {
-    Write-Log "Creating tag category: $TagCategory" -LogFile $LogFile
+    Write-MigrationLog "Creating tag category: $TagCategory" -LogFile $LogFile
     New-TagCategory -Name $TagCategory -Cardinality Single -EntityType VirtualMachine
 }
 
@@ -43,7 +43,7 @@ $csvTags = $csvData |
 foreach ($entry in $csvData) {
     $vmName  = $entry.VMName
     if ([string]::IsNullOrWhiteSpace($entry.Tag)) {
-        Write-Log "Missing tag in CSV for VM '$vmName'. Skipping this entry." -Level WARNING -LogFile $LogFile
+        Write-MigrationLog "Missing tag in CSV for VM '$vmName'. Skipping this entry." -Level WARNING -LogFile $LogFile
         continue
     }
 
@@ -51,28 +51,28 @@ foreach ($entry in $csvData) {
 
     $existingTag = Get-Tag -Name $tagName -ErrorAction SilentlyContinue
     if (-not $existingTag) {
-        Write-Log "Creating tag: $tagName" -LogFile $LogFile
+        Write-MigrationLog "Creating tag: $tagName" -LogFile $LogFile
         New-Tag -Name $tagName -Category $TagCategory
     }
 
     $existingTags = Get-TagAssignment -Entity (VMware.VimAutomation.Core\Get-VM -Name $vmName) | Where-Object { $_.Tag.Category -eq $TagCategory }
     foreach ($existingTag in $existingTags) {
-        Write-Log "Removing existing tag $($existingTag.Tag.Name) from $vmName" -Level WARNING -LogFile $LogFile
+        Write-MigrationLog "Removing existing tag $($existingTag.Tag.Name) from $vmName" -Level WARNING -LogFile $LogFile
         Remove-TagAssignment -TagAssignment $existingTag -Confirm:$false
     }
 
     $vm = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if ($vm) {
-        Write-Log "Adding tag $tagName to $vmName" -LogFile $LogFile
+        Write-MigrationLog "Adding tag $tagName to $vmName" -LogFile $LogFile
         New-TagAssignment -Tag $tagName -Entity $vm
     } else {
-        Write-Log "VM not found: $vmName" -Level WARNING -LogFile $LogFile
+        Write-MigrationLog "VM not found: $vmName" -Level WARNING -LogFile $LogFile
     }
 }
 
 # Creating Veeam jobs by tag from CSV (configurable and deterministic)
 if ($PSVersionTable.PSEdition -eq "Core") {
-    Write-Log "PowerShell 7 detected: creating Veeam jobs in Windows PowerShell to avoid deserialized repository objects." -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "PowerShell 7 detected: creating Veeam jobs in Windows PowerShell to avoid deserialized repository objects." -Level WARNING -LogFile $LogFile
 
     $tagsJson = $csvTags | ConvertTo-Json -Compress
     $jobCreationScript = @'
@@ -132,19 +132,19 @@ foreach ($tagName in $tags) {
 
     foreach ($line in $winPsOutput) {
         if ($line -match '^\[WARNING\]\s+(.*)$') {
-            Write-Log $Matches[1] -Level WARNING -LogFile $LogFile
+            Write-MigrationLog $Matches[1] -Level WARNING -LogFile $LogFile
         } elseif ($line -match '^\[SUCCESS\]\s+(.*)$') {
-            Write-Log $Matches[1] -Level SUCCESS -LogFile $LogFile
+            Write-MigrationLog $Matches[1] -Level SUCCESS -LogFile $LogFile
         } elseif ($line -match '^\[INFO\]\s+(.*)$') {
-            Write-Log $Matches[1] -Level INFO -LogFile $LogFile
+            Write-MigrationLog $Matches[1] -Level INFO -LogFile $LogFile
         } elseif (-not [string]::IsNullOrWhiteSpace($line)) {
-            Write-Log "Windows PowerShell: $line" -Level INFO -LogFile $LogFile
+            Write-MigrationLog "Windows PowerShell: $line" -Level INFO -LogFile $LogFile
         }
     }
 
     if ($winPsExitCode -ne 0) {
         $message = "Veeam job creation failed in Windows PowerShell (exit code $winPsExitCode)."
-        Write-Log $message -Level ERROR -LogFile $LogFile
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
         throw $message
     }
 } else {
@@ -154,7 +154,7 @@ foreach ($tagName in $tags) {
     foreach ($tagName in $csvTags) {
         $vmwareTag = $availableVeeamTags | Where-Object { $_.Name -eq $tagName } | Select-Object -First 1
         if (-not $vmwareTag) {
-            Write-Log "Tag '$tagName' not found in VMware/Veeam inventory. Skipping job creation for this tag." -Level WARNING -LogFile $LogFile
+            Write-MigrationLog "Tag '$tagName' not found in VMware/Veeam inventory. Skipping job creation for this tag." -Level WARNING -LogFile $LogFile
             continue
         }
 
@@ -162,13 +162,13 @@ foreach ($tagName in $tags) {
         $job     = Get-VBRJob -Name $jobName -ErrorAction SilentlyContinue
 
         if (-not $job) {
-            Write-Log "Creating backup job: $jobName" -LogFile $LogFile
+            Write-MigrationLog "Creating backup job: $jobName" -LogFile $LogFile
             Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
         } else {
-            Write-Log "The job $jobName already exists." -LogFile $LogFile
+            Write-MigrationLog "The job $jobName already exists." -LogFile $LogFile
         }
     }
 }
 
 Disconnect-VCenter -LogFile $LogFile
-Write-Log "step1 completed." -Level SUCCESS -LogFile $LogFile
+Write-MigrationLog "step1 completed." -Level SUCCESS -LogFile $LogFile

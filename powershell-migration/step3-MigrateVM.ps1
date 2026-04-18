@@ -17,7 +17,6 @@ param (
     [string]$HyperVCluster,
     [string]$ClusterStorage,
     [string]$BackupTag,
-    [string]$Tag,
     [int]$WaitingTimeoutSeconds = 1800,
     [int]$WaitingPollIntervalSeconds = 15,
     [switch]$ForceNetworkConfigOnly,
@@ -26,8 +25,8 @@ param (
 
 . "$PSScriptRoot\lib.ps1"
 
-if (-not (Get-Command -Name Normalize-OS -ErrorAction SilentlyContinue)) {
-    function Normalize-OS {
+if (-not (Get-Command -Name ConvertTo-NormalizedOperatingSystemName -ErrorAction SilentlyContinue)) {
+    function ConvertTo-NormalizedOperatingSystemName {
         param(
             [AllowNull()]
             [string]$Name
@@ -54,13 +53,13 @@ if (-not (Get-Command -Name Resolve-OperatingSystemMapping -ErrorAction Silently
             $OperatingSystemMap
         )
 
-        $normalized = Normalize-OS -Name $OperatingSystem
+        $normalized = ConvertTo-NormalizedOperatingSystemName -Name $OperatingSystem
         if ([string]::IsNullOrWhiteSpace($normalized) -or -not $OperatingSystemMap) {
             return $null
         }
 
         foreach ($entry in $OperatingSystemMap.GetEnumerator()) {
-            $entryKey = Normalize-OS -Name ([string]$entry.Key)
+            $entryKey = ConvertTo-NormalizedOperatingSystemName -Name ([string]$entry.Key)
             if ($entryKey -eq $normalized) {
                 return [string]$entry.Value
             }
@@ -120,6 +119,7 @@ function Invoke-SCVMMCommand {
 }
 
 function Start-SCVMMHostMigration {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Name,
@@ -130,6 +130,10 @@ function Start-SCVMMHostMigration {
         [Parameter(Mandatory = $true)]
         [string]$DestinationHost
     )
+
+    if (-not $PSCmdlet.ShouldProcess($Name, "Start host migration to $DestinationHost via SCVMM")) {
+        return
+    }
 
     Invoke-SCVMMCommand -ScriptBlock {
         param($VmName, $VmmServerName, $TargetHostName)
@@ -170,10 +174,10 @@ function Invoke-SCVMMNetworkAndPostConfig {
         [string]$LogFile
     )
 
-    Write-Log "[$Name] Network configuration (VLAN $Vlan)..." -LogFile $LogFile
+    Write-MigrationLog "[$Name] Network configuration (VLAN $Vlan)..." -LogFile $LogFile
 
     if ($Vlan -notmatch "^\d+$") {
-        Write-Log "[$Name] Invalid VLAN ID: '$Vlan' — network mapping skipped." -Level WARNING -LogFile $LogFile
+        Write-MigrationLog "[$Name] Invalid VLAN ID: '$Vlan' — network mapping skipped." -Level WARNING -LogFile $LogFile
         return
     }
 
@@ -206,7 +210,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
     } -ArgumentList @($ServerName, $Vlan)
 
     if ([string]::IsNullOrWhiteSpace($NetworkMapping.VMNetworkName) -or [string]::IsNullOrWhiteSpace($NetworkMapping.VMSubnetName)) {
-        Write-Log "[$Name] No VMNetwork/VMSubnet found for VLAN $Vlan." -Level WARNING -LogFile $LogFile
+        Write-MigrationLog "[$Name] No VMNetwork/VMSubnet found for VLAN $Vlan." -Level WARNING -LogFile $LogFile
         return
     }
 
@@ -216,7 +220,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" }
     } -ArgumentList @($Name, $ServerName)
     if (!$TargetVM) {
-        Write-Log "[$Name] VM not found in SCVMM." -Level WARNING -LogFile $LogFile
+        Write-MigrationLog "[$Name] VM not found in SCVMM." -Level WARNING -LogFile $LogFile
         return
     }
 
@@ -321,15 +325,15 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $Config.SCVMM.Network.PortClassificationName
     )
 
-    Write-Log "[$Name] Network configured (VLAN $Vlan, VMNetwork $($NetworkMapping.VMNetworkName))." -Level SUCCESS -LogFile $LogFile
-    Write-Log "[$Name] Integration Services configured." -LogFile $LogFile
+    Write-MigrationLog "[$Name] Network configured (VLAN $Vlan, VMNetwork $($NetworkMapping.VMNetworkName))." -Level SUCCESS -LogFile $LogFile
+    Write-MigrationLog "[$Name] Integration Services configured." -LogFile $LogFile
     Set-SCVMMOperatingSystem -Name $Name -ServerName $ServerName -SourceOperatingSystem $SourceOperatingSystem -OperatingSystemMap $Config.SCVMM.OperatingSystemMap -LogFile $LogFile
 
     try {
         Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $TargetVM.Name
-        Write-Log "[$Name] VM added to cluster $ClusterName." -Level SUCCESS -LogFile $LogFile
+        Write-MigrationLog "[$Name] VM added to cluster $ClusterName." -Level SUCCESS -LogFile $LogFile
     } catch {
-        Write-Log "[$Name] Cluster error: $_" -Level ERROR -LogFile $LogFile
+        Write-MigrationLog "[$Name] Cluster error: $_" -Level ERROR -LogFile $LogFile
     }
 
     try {
@@ -339,27 +343,27 @@ function Invoke-SCVMMNetworkAndPostConfig {
         if ($hyperVMoveCommand) {
             try {
                 & $hyperVMoveCommand -Name $TargetVM.Name -DestinationHost $DestinationHost -ErrorAction Stop
-                Write-Log "[$Name] LiveMigration to $DestinationHost performed via Hyper-V module." -Level SUCCESS -LogFile $LogFile
+                Write-MigrationLog "[$Name] LiveMigration to $DestinationHost performed via Hyper-V module." -Level SUCCESS -LogFile $LogFile
             } catch {
                 if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {
-                    Write-Log "[$Name] Hyper-V Move-VM failed due to local platform limits; retrying migration via SCVMM." -Level WARNING -LogFile $LogFile
+                    Write-MigrationLog "[$Name] Hyper-V Move-VM failed due to local platform limits; retrying migration via SCVMM." -Level WARNING -LogFile $LogFile
                     Start-SCVMMHostMigration -Name $Name -ServerName $ServerName -DestinationHost $DestinationHost
-                    Write-Log "[$Name] LiveMigration to $DestinationHost requested via SCVMM after Hyper-V failure." -Level SUCCESS -LogFile $LogFile
+                    Write-MigrationLog "[$Name] LiveMigration to $DestinationHost requested via SCVMM after Hyper-V failure." -Level SUCCESS -LogFile $LogFile
                 } else {
                     throw
                 }
             }
         } else {
-            Write-Log "[$Name] Hyper-V Move-VM cmdlet unavailable on runner, trying SCVMM move." -Level WARNING -LogFile $LogFile
+            Write-MigrationLog "[$Name] Hyper-V Move-VM cmdlet unavailable on runner, trying SCVMM move." -Level WARNING -LogFile $LogFile
             Start-SCVMMHostMigration -Name $Name -ServerName $ServerName -DestinationHost $DestinationHost
 
-            Write-Log "[$Name] LiveMigration to $DestinationHost requested via SCVMM." -Level SUCCESS -LogFile $LogFile
+            Write-MigrationLog "[$Name] LiveMigration to $DestinationHost requested via SCVMM." -Level SUCCESS -LogFile $LogFile
         }
     } catch {
         if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {
-            Write-Log "[$Name] LiveMigration unavailable on this runner (missing local Hyper-V platform). Migration already completed; run host-to-host move from a Hyper-V capable node or via SCVMM." -Level WARNING -LogFile $LogFile
+            Write-MigrationLog "[$Name] LiveMigration unavailable on this runner (missing local Hyper-V platform). Migration already completed; run host-to-host move from a Hyper-V capable node or via SCVMM." -Level WARNING -LogFile $LogFile
         } else {
-            Write-Log "[$Name] LiveMigration error: $_" -Level ERROR -LogFile $LogFile
+            Write-MigrationLog "[$Name] LiveMigration error: $_" -Level ERROR -LogFile $LogFile
         }
     }
 
@@ -374,10 +378,11 @@ function Invoke-SCVMMNetworkAndPostConfig {
         Set-SCVirtualMachine -VM $vm -Tag $TagName | Out-Null
     } -ArgumentList @($Name, $ServerName, $BackupTagName)
 
-    Write-Log "[$Name] Backup tag '$BackupTagName' applied." -LogFile $LogFile
+    Write-MigrationLog "[$Name] Backup tag '$BackupTagName' applied." -LogFile $LogFile
 }
 
 function Set-SCVMMOperatingSystem {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Name,
@@ -394,14 +399,18 @@ function Set-SCVMMOperatingSystem {
     )
 
     if ([string]::IsNullOrWhiteSpace($SourceOperatingSystem)) {
-        Write-Log "[$Name] No source operating system provided; SCVMM OS update skipped." -Level WARNING -LogFile $LogFile
+        Write-MigrationLog "[$Name] No source operating system provided; SCVMM OS update skipped." -Level WARNING -LogFile $LogFile
         return
     }
 
     $targetOperatingSystem = Resolve-OperatingSystemMapping -OperatingSystem $SourceOperatingSystem -OperatingSystemMap $OperatingSystemMap
     if ([string]::IsNullOrWhiteSpace($targetOperatingSystem)) {
-        $normalizedOperatingSystem = Normalize-OS -Name $SourceOperatingSystem
-        Write-Log "[$Name] No SCVMM OS mapping found for '$normalizedOperatingSystem'." -Level WARNING -LogFile $LogFile
+        $normalizedOperatingSystem = ConvertTo-NormalizedOperatingSystemName -Name $SourceOperatingSystem
+        Write-MigrationLog "[$Name] No SCVMM OS mapping found for '$normalizedOperatingSystem'." -Level WARNING -LogFile $LogFile
+        return
+    }
+
+    if (-not $PSCmdlet.ShouldProcess($Name, "Set SCVMM operating system to '$targetOperatingSystem'")) {
         return
     }
 
@@ -424,7 +433,7 @@ function Set-SCVMMOperatingSystem {
         return $scvmmOperatingSystem.Name
     } -ArgumentList @($Name, $ServerName, $targetOperatingSystem)
 
-    Write-Log "[$Name] SCVMM operating system set to '$mappingResult' from source '$SourceOperatingSystem'." -Level SUCCESS -LogFile $LogFile
+    Write-MigrationLog "[$Name] SCVMM operating system set to '$mappingResult' from source '$SourceOperatingSystem'." -Level SUCCESS -LogFile $LogFile
 }
 
 # ── SCVMM connection ────────────────────────────────────────────────────────
@@ -441,9 +450,9 @@ try {
     } -ArgumentList @($SCVMMServer)
 } catch {
     if ([string]$_ -match "IndigoLayer") {
-        Write-Log "[$VMName] SCVMM module error hints at a VMM console/runtime mismatch on the runner. Validate that Virtual Machine Manager Console matching the SCVMM server version is installed and restart the shell." -Level ERROR -LogFile $LogFile
+        Write-MigrationLog "[$VMName] SCVMM module error hints at a VMM console/runtime mismatch on the runner. Validate that Virtual Machine Manager Console matching the SCVMM server version is installed and restart the shell." -Level ERROR -LogFile $LogFile
     }
-    Write-Log "[$VMName] Failed to connect to SCVMM server '$SCVMMServer': $_" -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "[$VMName] Failed to connect to SCVMM server '$SCVMMServer': $_" -Level ERROR -LogFile $LogFile
     throw
 }
 
@@ -451,7 +460,7 @@ try {
 
 if (-not $ForceNetworkConfigOnly) {
 
-Write-Log "[$VMName] Checking SCVMM in Veeam..." -LogFile $LogFile
+Write-MigrationLog "[$VMName] Checking SCVMM in Veeam..." -LogFile $LogFile
 $VBRSCVMM = Invoke-VeeamCommand -ScriptBlock {
     param($ScvmmServerName)
     Get-VBRServer | Where-Object { $_.Name -eq $ScvmmServerName -and $_.Type -eq "Scvmm" } |
@@ -459,7 +468,7 @@ $VBRSCVMM = Invoke-VeeamCommand -ScriptBlock {
 } -ArgumentList @($SCVMMServer)
 
 if (!$VBRSCVMM) {
-    Write-Log "[$VMName] SCVMM $SCVMMServer is not registered in Veeam." -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "[$VMName] SCVMM $SCVMMServer is not registered in Veeam." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
@@ -470,7 +479,7 @@ $Backup = Invoke-VeeamCommand -ScriptBlock {
 } -ArgumentList @($BackupJobName)
 
 if (!$Backup) {
-    Write-Log "[$VMName] Backup job '$BackupJobName' not found in Veeam." -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "[$VMName] Backup job '$BackupJobName' not found in Veeam." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
@@ -501,13 +510,13 @@ try {
         return $true
     } -ArgumentList @($BackupJobName, $VMName, $HyperVHost, "$ClusterStorage\$VMName")
 } catch {
-    Write-Log "[$VMName] Instant Recovery preparation failed: $_" -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "[$VMName] Instant Recovery preparation failed: $_" -Level ERROR -LogFile $LogFile
     throw
 }
 
-Write-Log "[$VMName] Starting Instant Recovery..." -LogFile $LogFile
+Write-MigrationLog "[$VMName] Starting Instant Recovery..." -LogFile $LogFile
 try {
-    Write-Log "[$VMName] Instant Recovery started." -Level SUCCESS -LogFile $LogFile
+    Write-MigrationLog "[$VMName] Instant Recovery started." -Level SUCCESS -LogFile $LogFile
 
     $elapsed = 0
     do {
@@ -560,10 +569,10 @@ try {
             }
         } -ArgumentList @($VMName)
 
-        Write-Log "[$VMName] Current states: InstantRecovery='$($waitCheck.CurrentState)', RestoreSession='$($waitCheck.RestoreSessionState)' (elapsed: ${elapsed}s)." -LogFile $LogFile
+        Write-MigrationLog "[$VMName] Current states: InstantRecovery='$($waitCheck.CurrentState)', RestoreSession='$($waitCheck.RestoreSessionState)' (elapsed: ${elapsed}s)." -LogFile $LogFile
 
         if ($waitCheck.WaitingDetected) {
-            Write-Log "[$VMName] Instant Recovery in waiting mode (source=$($waitCheck.DetectionSource))." -Level SUCCESS -LogFile $LogFile
+            Write-MigrationLog "[$VMName] Instant Recovery in waiting mode (source=$($waitCheck.DetectionSource))." -Level SUCCESS -LogFile $LogFile
             break
         }
 
@@ -576,7 +585,7 @@ try {
         throw "Timeout of $WaitingTimeoutSeconds seconds reached while waiting for WaitingForUserAction."
     }
 } catch {
-    Write-Log "[$VMName] Instant Recovery error: $_" -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "[$VMName] Instant Recovery error: $_" -Level ERROR -LogFile $LogFile
     throw
 }
 
@@ -589,7 +598,7 @@ $IRSession = Invoke-VeeamCommand -ScriptBlock {
 } -ArgumentList @($VMName)
 
 if (!$IRSession) {
-    Write-Log "[$VMName] No active Instant Recovery session." -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "[$VMName] No active Instant Recovery session." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
@@ -599,11 +608,11 @@ $vmInScvmm = Invoke-SCVMMCommand -ScriptBlock {
     Get-SCVirtualMachine -Name $Name -VMMServer $server
 } -ArgumentList @($VMName, $VMMServerName)
 if (!$vmInScvmm) {
-    Write-Log "[$VMName] VM missing from SCVMM, finalization impossible." -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "[$VMName] VM missing from SCVMM, finalization impossible." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
-Write-Log "[$VMName] Finalizing Instant Recovery..." -LogFile $LogFile
+Write-MigrationLog "[$VMName] Finalizing Instant Recovery..." -LogFile $LogFile
 try {
     Invoke-VeeamCommand -ScriptBlock {
         param($Vm)
@@ -614,7 +623,7 @@ try {
         Start-VBRHvInstantRecoveryMigration -InstantRecovery $irSession | Out-Null
     } -ArgumentList @($VMName)
 
-    Write-Log "[$VMName] Finalization completed." -Level SUCCESS -LogFile $LogFile
+    Write-MigrationLog "[$VMName] Finalization completed." -Level SUCCESS -LogFile $LogFile
 
     $finalizationElapsed = 0
     do {
@@ -644,12 +653,12 @@ try {
         } -ArgumentList @($VMName)
 
         if (-not $finalizationCheck.Found) {
-            Write-Log "[$VMName] Restore session not yet visible after finalization start (elapsed: ${finalizationElapsed}s)." -Level WARNING -LogFile $LogFile
+            Write-MigrationLog "[$VMName] Restore session not yet visible after finalization start (elapsed: ${finalizationElapsed}s)." -Level WARNING -LogFile $LogFile
         } else {
-            Write-Log "[$VMName] Restore session '$($finalizationCheck.Name)' status: State='$($finalizationCheck.State)', Result='$($finalizationCheck.Result)' (elapsed: ${finalizationElapsed}s)." -LogFile $LogFile
+            Write-MigrationLog "[$VMName] Restore session '$($finalizationCheck.Name)' status: State='$($finalizationCheck.State)', Result='$($finalizationCheck.Result)' (elapsed: ${finalizationElapsed}s)." -LogFile $LogFile
 
             if ($finalizationCheck.Result -eq "Success") {
-                Write-Log "[$VMName] VM restored permanently; network reconfiguration can start." -Level SUCCESS -LogFile $LogFile
+                Write-MigrationLog "[$VMName] VM restored permanently; network reconfiguration can start." -Level SUCCESS -LogFile $LogFile
                 break
             }
 
@@ -666,7 +675,7 @@ try {
         throw "Timeout of $WaitingTimeoutSeconds seconds reached while waiting for restore session success before network reconfiguration."
     }
 } catch {
-    Write-Log "[$VMName] Finalization error: $_" -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "[$VMName] Finalization error: $_" -Level ERROR -LogFile $LogFile
     throw
 }
 }
@@ -674,7 +683,7 @@ try {
 # ── Network mapping ────────────────────────────────────────────────────────────
 
 if ($ForceNetworkConfigOnly) {
-    Write-Log "[$VMName] ForceNetworkConfigOnly enabled: skipping Instant Recovery/finalization and replaying only network/OS/post-configuration actions." -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "[$VMName] ForceNetworkConfigOnly enabled: skipping Instant Recovery/finalization and replaying only network/OS/post-configuration actions." -Level WARNING -LogFile $LogFile
 }
 
 Invoke-SCVMMNetworkAndPostConfig `
@@ -688,4 +697,4 @@ Invoke-SCVMMNetworkAndPostConfig `
     -DestinationHost $HyperVHost2 `
     -LogFile $LogFile
 
-Write-Log "[$VMName] Migration completed." -Level SUCCESS -LogFile $LogFile
+Write-MigrationLog "[$VMName] Migration completed." -Level SUCCESS -LogFile $LogFile
