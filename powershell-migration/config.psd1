@@ -1,4 +1,4 @@
-@{
+﻿@{
     VCenter = @{
         Server = "vcenter.domain.local"
     }
