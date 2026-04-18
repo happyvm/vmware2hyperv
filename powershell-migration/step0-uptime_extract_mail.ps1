@@ -18,22 +18,22 @@ if (-not $MailFrom)      { $MailFrom      = $Config.Smtp.From }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step0-uptime-mail$(if ($Tag) { "-$Tag" })-$(Get-Date -Format 'yyyyMMdd').log" }
 # MailTo is mandatory if missing from config — it must be provided as a parameter
 if (-not $MailTo) {
-    Write-Log "-MailTo parameter is mandatory (not present in config.psd1)" -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "-MailTo parameter is mandatory (not present in config.psd1)" -Level ERROR -LogFile $LogFile
     exit 1
 }
 
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 
-Write-Log "Starting step0 - uptime email" -LogFile $LogFile
+Write-MigrationLog "Starting step0 - uptime email" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $Subject = "VM uptime - $(Get-Date -Format 'dd/MM/yyyy HH:mm')"
 try {
     $VMs = VMware.VimAutomation.Core\Get-VM | Where-Object { $_.PowerState -eq "PoweredOn" }
-    Write-Log "Powered-on VMs: $($VMs.Count)" -LogFile $LogFile
+    Write-MigrationLog "Powered-on VMs: $($VMs.Count)" -LogFile $LogFile
 }
 catch {
-    Write-Log "Failed to retrieve VMs from vCenter '$VCenterServer': $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "Failed to retrieve VMs from vCenter '$VCenterServer': $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
     Disconnect-VCenter -LogFile $LogFile
     exit 1
 }
@@ -65,7 +65,7 @@ foreach ($VM in $VMs) {
     }
 }
 
-Write-Log "Generating HTML table" -LogFile $LogFile
+Write-MigrationLog "Generating HTML table" -LogFile $LogFile
 
 $HTMLTable  = "<html><body>"
 $HTMLTable += "<h2>VM uptime</h2>"

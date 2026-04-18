@@ -4,9 +4,9 @@
 # Load: . "$PSScriptRoot\lib.ps1"
 
 # ---------------------------------------------------------------------------
-# Write-Log : timestamped logging to streams + file
+# Write-MigrationLog : timestamped logging to streams + file
 # ---------------------------------------------------------------------------
-function Write-Log {
+function Write-MigrationLog {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Message,
@@ -44,9 +44,9 @@ function Write-Log {
 }
 
 # ---------------------------------------------------------------------------
-# Assert-FileExists : stops the script if a file is missing
+# Assert-PathPresent : stops the script if a file is missing
 # ---------------------------------------------------------------------------
-function Assert-FileExists {
+function Assert-PathPresent {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path,
@@ -58,7 +58,7 @@ function Assert-FileExists {
 
     if (-not (Test-Path $Path)) {
         $message = "$Label not found: $Path"
-        Write-Log $message -Level ERROR -LogFile $LogFile
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
         throw $message
     }
 }
@@ -82,10 +82,10 @@ function Connect-VCenter {
 
     try {
         Connect-VIServer -Server $Server | Out-Null
-        Write-Log "Connected to vCenter: $Server" -Level SUCCESS -LogFile $LogFile
+        Write-MigrationLog "Connected to vCenter: $Server" -Level SUCCESS -LogFile $LogFile
     } catch {
         $message = "Failed to connect to vCenter $Server : $_"
-        Write-Log $message -Level ERROR -LogFile $LogFile
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
         throw $message
     }
 }
@@ -97,7 +97,7 @@ function Disconnect-VCenter {
     param([string]$LogFile)
 
     Disconnect-VIServer -Confirm:$false -ErrorAction SilentlyContinue
-    Write-Log "Disconnected from vCenter." -Level INFO -LogFile $LogFile
+    Write-MigrationLog "Disconnected from vCenter." -Level INFO -LogFile $LogFile
 }
 
 # ---------------------------------------------------------------------------
@@ -116,32 +116,32 @@ function Import-RequiredModule {
     if ($PSVersionTable.PSEdition -eq "Core" -and $UseWindowsPowerShellFallback) {
         try {
             Import-Module -Name $Name -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop
-            Write-Log "Module imported via Windows PowerShell compatibility mode: $Name" -Level WARNING -LogFile $LogFile
+            Write-MigrationLog "Module imported via Windows PowerShell compatibility mode: $Name" -Level WARNING -LogFile $LogFile
             return
         } catch {
-            Write-Log "Windows PowerShell compatibility mode import failed for $Name, trying standard import." -Level WARNING -LogFile $LogFile
+            Write-MigrationLog "Windows PowerShell compatibility mode import failed for $Name, trying standard import." -Level WARNING -LogFile $LogFile
         }
     }
 
     try {
         Import-Module -Name $Name -DisableNameChecking -ErrorAction Stop
-        Write-Log "Module imported: $Name" -LogFile $LogFile
+        Write-MigrationLog "Module imported: $Name" -LogFile $LogFile
         return
     } catch {
         if ($PSVersionTable.PSEdition -eq "Core") {
             try {
                 Import-Module -Name $Name -SkipEditionCheck -DisableNameChecking -ErrorAction Stop
-                Write-Log "Module imported via SkipEditionCheck fallback: $Name" -Level WARNING -LogFile $LogFile
+                Write-MigrationLog "Module imported via SkipEditionCheck fallback: $Name" -Level WARNING -LogFile $LogFile
                 return
             } catch {
                 $message = "Unable to import module $Name (standard import and fallbacks failed): $_"
-                Write-Log $message -Level ERROR -LogFile $LogFile
+                Write-MigrationLog $message -Level ERROR -LogFile $LogFile
                 throw $message
             }
         }
 
         $message = "Unable to import module $Name : $_"
-        Write-Log $message -Level ERROR -LogFile $LogFile
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
         throw $message
     }
 }
@@ -187,17 +187,17 @@ function Send-HtmlMail {
         $mailMessage.Dispose()
         $smtpClient.Dispose()
 
-        Write-Log "Email sent to: $($To -join ', ')" -Level SUCCESS -LogFile $LogFile
+        Write-MigrationLog "Email sent to: $($To -join ', ')" -Level SUCCESS -LogFile $LogFile
     } catch {
-        Write-Log "Failed to send email : $_" -Level ERROR -LogFile $LogFile
+        Write-MigrationLog "Failed to send email : $_" -Level ERROR -LogFile $LogFile
     }
 }
 
 
 # ---------------------------------------------------------------------------
-# Normalize-OS : normalize OS labels before mapping to SCVMM operating systems
+# ConvertTo-NormalizedOperatingSystemName : normalize OS labels before mapping to SCVMM operating systems
 # ---------------------------------------------------------------------------
-function Normalize-OS {
+function ConvertTo-NormalizedOperatingSystemName {
     param(
         [AllowNull()]
         [string]$Name
@@ -225,13 +225,13 @@ function Resolve-OperatingSystemMapping {
         $OperatingSystemMap
     )
 
-    $normalized = Normalize-OS -Name $OperatingSystem
+    $normalized = ConvertTo-NormalizedOperatingSystemName -Name $OperatingSystem
     if ([string]::IsNullOrWhiteSpace($normalized) -or -not $OperatingSystemMap) {
         return $null
     }
 
     foreach ($entry in $OperatingSystemMap.GetEnumerator()) {
-        $entryKey = Normalize-OS -Name ([string]$entry.Key)
+        $entryKey = ConvertTo-NormalizedOperatingSystemName -Name ([string]$entry.Key)
         if ($entryKey -eq $normalized) {
             return [string]$entry.Value
         }

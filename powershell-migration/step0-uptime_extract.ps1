@@ -16,11 +16,11 @@ if (-not $LogFile)       { $LogFile = "$($Config.Paths.LogDir)\step0-uptime$(if 
 
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 
-Write-Log "Starting step0 - uptime extraction" -LogFile $LogFile
+Write-MigrationLog "Starting step0 - uptime extraction" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $VMs = VMware.VimAutomation.Core\Get-VM | Where-Object { $_.PowerState -eq "PoweredOn" }
-Write-Log "Powered-on VMs: $($VMs.Count)" -LogFile $LogFile
+Write-MigrationLog "Powered-on VMs: $($VMs.Count)" -LogFile $LogFile
 
 $Results = @()
 
@@ -53,5 +53,5 @@ foreach ($VM in $VMs) {
 $Results | Format-Table -AutoSize
 $Results | Export-Csv -Path $OutputCsvPath -NoTypeInformation -Encoding UTF8
 
-Write-Log "Results exported to: $OutputCsvPath" -Level SUCCESS -LogFile $LogFile
+Write-MigrationLog "Results exported to: $OutputCsvPath" -Level SUCCESS -LogFile $LogFile
 Disconnect-VCenter -LogFile $LogFile

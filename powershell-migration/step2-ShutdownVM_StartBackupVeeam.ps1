@@ -26,17 +26,17 @@ Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 
 $JobName = "Backup-$Tag"
 
-Write-Log "Starting step2 - VM shutdown and Veeam backup for tag $Tag" -LogFile $LogFile
-Assert-FileExists -Path $CsvFile -Label "batch CSV" -LogFile $LogFile
+Write-MigrationLog "Starting step2 - VM shutdown and Veeam backup for tag $Tag" -LogFile $LogFile
+Assert-PathPresent -Path $CsvFile -Label "batch CSV" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $vmList = Import-Csv -Path $CsvFile -Delimiter ";"
 
 foreach ($vmEntry in $vmList) {
-    Write-Log "Graceful shutdown of VM: $($vmEntry.VMName)" -LogFile $LogFile
+    Write-MigrationLog "Graceful shutdown of VM: $($vmEntry.VMName)" -LogFile $LogFile
     $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vmEntry.VMName -ErrorAction SilentlyContinue
     if (-not $vmObj) {
-        Write-Log "VM not found: $($vmEntry.VMName)" -Level WARNING -LogFile $LogFile
+        Write-MigrationLog "VM not found: $($vmEntry.VMName)" -Level WARNING -LogFile $LogFile
         continue
     }
     if ($vmObj.PowerState -ne "PoweredOff") {
@@ -50,20 +50,20 @@ foreach ($vmEntry in $vmList) {
         } while ($vmObj.PowerState -ne "PoweredOff" -and $elapsed -lt $timeout)
 
         if ($vmObj.PowerState -ne "PoweredOff") {
-            Write-Log "VM $($vmEntry.VMName) not powered off after ${timeout}s — forced power-off." -Level WARNING -LogFile $LogFile
+            Write-MigrationLog "VM $($vmEntry.VMName) not powered off after ${timeout}s — forced power-off." -Level WARNING -LogFile $LogFile
             VMware.VimAutomation.Core\Stop-VM -VM $vmEntry.VMName -Confirm:$false -ErrorAction SilentlyContinue
         }
     }
-    Write-Log "VM $($vmEntry.VMName) powered off." -Level SUCCESS -LogFile $LogFile
+    Write-MigrationLog "VM $($vmEntry.VMName) powered off." -Level SUCCESS -LogFile $LogFile
 }
 
 Disconnect-VCenter -LogFile $LogFile
 
-Write-Log "Sending pre-migration email" -LogFile $LogFile
+Write-MigrationLog "Sending pre-migration email" -LogFile $LogFile
 & $PreMigrationMailScript -tagName $Tag -recipientGroup $RecipientGroup -vCenterServer $VCenterServer -SkipVCenterLogin
 
 if ($PSVersionTable.PSEdition -eq "Core") {
-    Write-Log "PowerShell 7 detected: starting the Veeam job in Windows PowerShell to avoid deserialized objects." -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "PowerShell 7 detected: starting the Veeam job in Windows PowerShell to avoid deserialized objects." -Level WARNING -LogFile $LogFile
 
     $startJobScript = @'
 $JobName = $env:VMW2HV_JOB_NAME
@@ -93,26 +93,26 @@ Write-Output "[SUCCESS] Job Veeam '$JobName' started successfully."
 
     foreach ($line in $winPsOutput) {
         if ($line -match '^\[ERROR\]\s+(.*)$') {
-            Write-Log $Matches[1] -Level ERROR -LogFile $LogFile
+            Write-MigrationLog $Matches[1] -Level ERROR -LogFile $LogFile
         } elseif ($line -match '^\[SUCCESS\]\s+(.*)$') {
-            Write-Log $Matches[1] -Level SUCCESS -LogFile $LogFile
+            Write-MigrationLog $Matches[1] -Level SUCCESS -LogFile $LogFile
         } elseif (-not [string]::IsNullOrWhiteSpace($line)) {
-            Write-Log "Windows PowerShell: $line" -Level INFO -LogFile $LogFile
+            Write-MigrationLog "Windows PowerShell: $line" -Level INFO -LogFile $LogFile
         }
     }
 
     if ($winPsExitCode -ne 0) {
         $message = "Failed to start Veeam job '$JobName' in Windows PowerShell (exit code $winPsExitCode)."
-        Write-Log $message -Level ERROR -LogFile $LogFile
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
         exit 1
     }
 } else {
     $Job = Get-VBRJob -Name $JobName
     if ($Job) {
         Start-VBRJob -Job $Job
-        Write-Log "Job Veeam '$JobName' started successfully." -Level SUCCESS -LogFile $LogFile
+        Write-MigrationLog "Job Veeam '$JobName' started successfully." -Level SUCCESS -LogFile $LogFile
     } else {
-        Write-Log "Job '$JobName' not found in Veeam." -Level ERROR -LogFile $LogFile
+        Write-MigrationLog "Job '$JobName' not found in Veeam." -Level ERROR -LogFile $LogFile
         exit 1
     }
 }
