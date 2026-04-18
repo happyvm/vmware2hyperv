@@ -30,6 +30,16 @@ If `step3` already restored the VM but failed during SCVMM network/OS/post-confi
   - `Veeam.Backup.PowerShell`
   - `VirtualMachineManager`
 
+### Bootstrap PowerShell on Ubuntu
+
+If `pwsh` is not available yet on your runner/host, install it with:
+
+```bash
+./scripts/install-powershell.sh
+```
+
+The script is idempotent: if PowerShell is already installed, it exits without changes.
+
 ## Configuration
 
 Default configuration is stored in:
@@ -131,3 +141,11 @@ pwsh ./extracted/stepx-premigration_mail.ps1 -tagName HypMig-lot-118 -recipientG
 Each script writes timestamped logs to the path configured in `Paths.LogDir`.
 
 For orchestration runs, a global `run-migration-*.log` file is generated, plus per-VM logs for step3.
+
+## Tests
+
+Run Pester tests from repository root:
+
+```powershell
+pwsh -NoProfile -Command "Invoke-Pester -Path ./tests"
+```
