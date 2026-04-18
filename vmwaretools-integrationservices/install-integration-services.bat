@@ -91,6 +91,9 @@ if /i "!IS_ELIGIBLE!"=="1" (
         call :Log "Integration Services deja presents dans Ajout/Suppression de programmes (!IS_ARP_DISPLAY_NAME!). Pas d'installation."
         set "IS_INSTALL_STATUS=SKIPPED_ALREADY_PRESENT"
     )
+) else if not defined OS_MAJOR (
+    call :Log "OS indetermine. Installation Integration Services sautee par securite."
+    set "IS_INSTALL_STATUS=SKIPPED_OS_UNKNOWN"
 ) else (
     call :Log "OS non eligible (Integration Services integres a l'OS). Pas d'installation."
     set "IS_INSTALL_STATUS=SKIPPED_OS_INTEGRATED"
@@ -814,11 +817,13 @@ goto :EOF
 set "OS_VERSION="
 set "OS_MAJOR="
 set "OS_MINOR="
-REM PRIORITE REGISTRY (compatible toutes versions)
+set "OS_DETECT_SOURCE="
+REM Source 1 : registre (Windows 8.1+)
 for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMajorVersionNumber 2^>nul ^| findstr /i "CurrentMajorVersionNumber"') do set "OS_MAJOR=%%B"
 for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMinorVersionNumber 2^>nul ^| findstr /i "CurrentMinorVersionNumber"') do set "OS_MINOR=%%B"
+if defined OS_MAJOR set "OS_DETECT_SOURCE=registry-current-version-numbers"
 
-REM fallback ancienne version
+REM Source 2 : WMIC (XP/2003 et plus)
 if not defined OS_MAJOR (
     for /f "tokens=2 delims==" %%A in ('wmic os get version /value 2^>nul ^| find "="') do set "OS_VERSION=%%A"
     if defined OS_VERSION (
@@ -826,8 +831,36 @@ if not defined OS_MAJOR (
             set "OS_MAJOR=%%A"
             set "OS_MINOR=%%B"
         )
+        if defined OS_MAJOR set "OS_DETECT_SOURCE=wmic"
     )
 )
+
+REM Source 3 : commande "ver" (built-in cmd, dispo sur toutes versions Windows)
+if not defined OS_MAJOR (
+    for /f "tokens=2 delims=[]" %%A in ('ver') do set "OS_VER_RAW=%%A"
+    if defined OS_VER_RAW (
+        for /f "tokens=2,3 delims=. " %%A in ("!OS_VER_RAW!") do (
+            set "OS_MAJOR=%%A"
+            set "OS_MINOR=%%B"
+        )
+        if defined OS_MAJOR set "OS_DETECT_SOURCE=ver"
+    )
+)
+
+REM Source 4 : registre CurrentVersion (champ texte "5.2", "6.1", etc.)
+if not defined OS_MAJOR (
+    for /f "tokens=3" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentVersion 2^>nul ^| findstr /i /c:"REG_SZ"') do set "OS_VERSION=%%A"
+    if defined OS_VERSION (
+        for /f "tokens=1,2 delims=." %%A in ("!OS_VERSION!") do (
+            set "OS_MAJOR=%%A"
+            set "OS_MINOR=%%B"
+        )
+        if defined OS_MAJOR set "OS_DETECT_SOURCE=registry-current-version"
+    )
+)
+
+if not defined OS_DETECT_SOURCE set "OS_DETECT_SOURCE=none"
+call :Log "Detection OS source: !OS_DETECT_SOURCE!"
 call :Log "Version OS detectee: !OS_MAJOR!.!OS_MINOR!"
 goto :EOF
 
