@@ -1,0 +1,55 @@
+name: PowerShell Lint
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  psscriptanalyzer:
+    name: PSScriptAnalyzer
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Run lint checks
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+
+          $scripts = Get-ChildItem -Path ./powershell-migration -Filter *.ps1 -File -Recurse
+          if (-not $scripts) {
+            throw 'No PowerShell scripts found in ./powershell-migration'
+          }
+
+          $results = foreach ($script in $scripts) {
+            Invoke-ScriptAnalyzer -Path $script.FullName -Severity Error, Warning
+          }
+
+          if (-not $results) {
+            Write-Host 'PSScriptAnalyzer found no issues.'
+            exit 0
+          }
+
+          $errorResults = @($results | Where-Object { $_.Severity -eq 'Error' })
+          $warningResults = @($results | Where-Object { $_.Severity -eq 'Warning' })
+
+          if ($warningResults.Count -gt 0) {
+            Write-Host "PSScriptAnalyzer found $($warningResults.Count) warning(s)."
+            $warningResults | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize
+          }
+
+          if ($errorResults.Count -gt 0) {
+            Write-Host "PSScriptAnalyzer found $($errorResults.Count) error(s)."
+            $errorResults | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize
+            throw "PSScriptAnalyzer found $($errorResults.Count) error(s)."
+          }
