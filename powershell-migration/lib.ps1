@@ -4,7 +4,7 @@
 # Load: . "$PSScriptRoot\lib.ps1"
 
 # ---------------------------------------------------------------------------
-# Write-Log : timestamped logging to console + file
+# Write-Log : timestamped logging to streams + file
 # ---------------------------------------------------------------------------
 function Write-Log {
     param(
@@ -20,13 +20,19 @@ function Write-Log {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $entry = "[$timestamp] [$Level] $Message"
 
-    $color = switch ($Level) {
-        "ERROR"   { "Red" }
-        "WARNING" { "Yellow" }
-        "SUCCESS" { "Green" }
-        default   { "Cyan" }
+    Write-Verbose -Message $entry
+
+    switch ($Level) {
+        "ERROR" {
+            Write-Error -Message $entry -ErrorAction Continue
+        }
+        "WARNING" {
+            Write-Warning -Message $entry
+        }
+        default {
+            Write-Information -MessageData $entry -InformationAction Continue
+        }
     }
-    Write-Host $entry -ForegroundColor $color
 
     if ($LogFile) {
         $logDir = Split-Path $LogFile -Parent
