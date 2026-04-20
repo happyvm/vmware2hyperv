@@ -117,6 +117,7 @@ Connect-VCenter -Server $Config.VCenter.Server -LogFile $LogFile
 
 $vmVlans = @{}
 $vmOperatingSystems = @{}
+$vmRemarks = @{}
 
 $cmdbPath = $Config.Paths.CmdbExtractCsv
 $cmdbOperatingSystems = @{}
@@ -151,7 +152,9 @@ foreach ($row in $vmRows) {
 
 foreach ($vmName in $vmNames) {
     $VMObject = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    $remark = $null
     if ($VMObject) {
+        $remark = [string]$VMObject.ExtensionData.Summary.Config.Annotation
         $NetworkAdapter = Get-NetworkAdapter -VM $VMObject -ErrorAction SilentlyContinue
         if ($NetworkAdapter -and $NetworkAdapter.NetworkName) {
             $DVPortGroup = Get-VDPortgroup -Name $NetworkAdapter.NetworkName -ErrorAction SilentlyContinue
@@ -164,6 +167,7 @@ foreach ($vmName in $vmNames) {
     }
     Write-MigrationLog "VLAN $vmName : $vlanId" -LogFile $LogFile
     $vmVlans[$vmName] = $vlanId
+    $vmRemarks[$vmName] = $remark
 }
 
 Disconnect-VCenter -LogFile $LogFile
@@ -177,6 +181,7 @@ $jobs = foreach ($vmName in $vmNames) {
     $vmLogFile       = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
     $vlanId          = $vmVlans[$vmName]
     $operatingSystem = $vmOperatingSystems[$vmName]
+    $remark          = $vmRemarks[$vmName]
 
     Start-Job -Name "migration-$vmName" -ScriptBlock {
         $ErrorActionPreference = "Stop"
@@ -186,7 +191,7 @@ $jobs = foreach ($vmName in $vmNames) {
         Get-ChildItem -Path $using:PSScriptRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
             Unblock-File -ErrorAction SilentlyContinue
 
-        & "$using:PSScriptRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$using:Tag" -VMName $using:vmName -VlanId $using:vlanId -OperatingSystem $using:operatingSystem -ForceNetworkConfigOnly:$using:ForceNetworkConfigOnly -LogFile $using:vmLogFile
+        & "$using:PSScriptRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$using:Tag" -VMName $using:vmName -VlanId $using:vlanId -OperatingSystem $using:operatingSystem -Remark $using:remark -ForceNetworkConfigOnly:$using:ForceNetworkConfigOnly -LogFile $using:vmLogFile
     }
 }
 
