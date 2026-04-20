@@ -113,7 +113,7 @@ function Import-RequiredModule {
 
     if ($PSVersionTable.PSEdition -eq "Core" -and $UseWindowsPowerShellFallback) {
         try {
-            Import-Module -Name $Name -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop
+            Import-Module -Name $Name -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop 3>$null
             Write-MigrationLog "Module imported via Windows PowerShell compatibility mode: $Name" -Level WARNING -LogFile $LogFile
             return
         } catch {
@@ -122,13 +122,13 @@ function Import-RequiredModule {
     }
 
     try {
-        Import-Module -Name $Name -DisableNameChecking -ErrorAction Stop
+        Import-Module -Name $Name -DisableNameChecking -ErrorAction Stop 3>$null
         Write-MigrationLog "Module imported: $Name" -LogFile $LogFile
         return
     } catch {
         if ($PSVersionTable.PSEdition -eq "Core") {
             try {
-                Import-Module -Name $Name -SkipEditionCheck -DisableNameChecking -ErrorAction Stop
+                Import-Module -Name $Name -SkipEditionCheck -DisableNameChecking -ErrorAction Stop 3>$null
                 Write-MigrationLog "Module imported via SkipEditionCheck fallback: $Name" -Level WARNING -LogFile $LogFile
                 return
             } catch {
