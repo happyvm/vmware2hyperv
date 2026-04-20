@@ -1,5 +1,3 @@
-﻿#requires -Version 7.0
-
 # lib.ps1 — Common functions for VMware → Hyper-V migration scripts
 # Load: . "$PSScriptRoot\lib.ps1"
 

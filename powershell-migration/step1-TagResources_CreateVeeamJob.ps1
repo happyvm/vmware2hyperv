@@ -1,4 +1,4 @@
-﻿param (
+param (
     [string]$VCenterServer,
     [string]$CsvFile,
     [string]$TagCategory,
