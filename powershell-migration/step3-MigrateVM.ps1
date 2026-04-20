@@ -224,7 +224,12 @@ function Invoke-SCVMMNetworkAndPostConfig {
         return
     }
 
-    Invoke-SCVMMCommand -ScriptBlock {
+    $networkConfigRetryDelaySeconds = 30
+    $networkConfigRetryCount = 2
+
+    for ($networkConfigAttempt = 1; $networkConfigAttempt -le $networkConfigRetryCount; $networkConfigAttempt++) {
+        try {
+            Invoke-SCVMMCommand -ScriptBlock {
         param(
             $Name,
             $ServerName,
@@ -329,7 +334,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
 
         Set-SCVirtualMachine @setVmParameters | Out-Null
-    } -ArgumentList @(
+            } -ArgumentList @(
         $Name,
         $ServerName,
         $NetworkMapping.VMNetworkName,
@@ -338,7 +343,17 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $Config.SCVMM.Network.LogicalSwitchName,
         $Config.SCVMM.Network.PortClassificationName,
         $SourceRemark
-    )
+            )
+            break
+        } catch {
+            if ($networkConfigAttempt -ge $networkConfigRetryCount) {
+                throw
+            }
+
+            Write-MigrationLog "[$Name] SCVMM network/post-configuration attempt $networkConfigAttempt failed (`"$($_.Exception.Message)`"). Waiting $networkConfigRetryDelaySeconds seconds before retry (suspected transient SCVMM refresh/state delay)." -Level WARNING -LogFile $LogFile
+            Start-Sleep -Seconds $networkConfigRetryDelaySeconds
+        }
+    }
 
     Write-MigrationLog "[$Name] Network configured (VLAN $Vlan, VMNetwork $($NetworkMapping.VMNetworkName))." -Level SUCCESS -LogFile $LogFile
     Write-MigrationLog "[$Name] Integration Services configured." -LogFile $LogFile
@@ -349,11 +364,30 @@ function Invoke-SCVMMNetworkAndPostConfig {
     }
     Set-SCVMMOperatingSystem -Name $Name -ServerName $ServerName -SourceOperatingSystem $SourceOperatingSystem -OperatingSystemMap $Config.SCVMM.OperatingSystemMap -LogFile $LogFile
 
-    try {
-        Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $TargetVM.Name
-        Write-MigrationLog "[$Name] VM added to cluster $ClusterName." -Level SUCCESS -LogFile $LogFile
-    } catch {
-        Write-MigrationLog "[$Name] Cluster error: $_" -Level ERROR -LogFile $LogFile
+    $vmHaState = Invoke-SCVMMCommand -ScriptBlock {
+        param($VmName, $VmmServerName)
+        $server = Get-SCVMMServer -ComputerName $VmmServerName
+        $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server | Select-Object -First 1
+        if (-not $vm) {
+            return $false
+        }
+
+        return [bool]$vm.IsHighlyAvailable
+    } -ArgumentList @($Name, $ServerName)
+
+    if ($vmHaState) {
+        Write-MigrationLog "[$Name] VM is already highly available in SCVMM. Skipping Add-ClusterVirtualMachineRole." -Level WARNING -LogFile $LogFile
+    } else {
+        try {
+            Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $TargetVM.Name
+            Write-MigrationLog "[$Name] VM added to cluster $ClusterName." -Level SUCCESS -LogFile $LogFile
+        } catch {
+            if ([string]$_ -match "already exists|already been configured|already highly available|is already part of") {
+                Write-MigrationLog "[$Name] Cluster role already present; skipping duplicate high-availability registration." -Level WARNING -LogFile $LogFile
+            } else {
+                Write-MigrationLog "[$Name] Cluster error: $_" -Level ERROR -LogFile $LogFile
+            }
+        }
     }
 
     try {
