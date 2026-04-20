@@ -1,6 +1,4 @@
-﻿#requires -Version 7.0
-
-param (
+﻿param (
     # Name of the batch/tag to migrate (e.g. HypMig-lot-118) — required
     [Parameter(Mandatory = $true)]
     [string]$Tag,

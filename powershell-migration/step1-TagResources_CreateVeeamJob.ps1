@@ -1,6 +1,4 @@
-﻿#requires -Version 7.0
-
-param (
+﻿param (
     [string]$VCenterServer,
     [string]$CsvFile,
     [string]$TagCategory,
