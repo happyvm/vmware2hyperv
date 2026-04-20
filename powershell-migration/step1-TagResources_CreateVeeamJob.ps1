@@ -19,7 +19,12 @@ if (-not $BackupRepoName){ $BackupRepoName = $Config.Veeam.BackupRepo }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step1-tag-veeam$(if ($Tag) { "-$Tag" })-$(Get-Date -Format 'yyyyMMdd').log" }
 
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
-Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
+if ($PSVersionTable.PSEdition -eq "Core") {
+    Write-MigrationLog "PowerShell 7 detected: skipping direct import of Veeam.Backup.PowerShell to avoid VMware/Veeam VimService assembly conflicts." -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "Veeam commands will run in Windows PowerShell for this step." -Level WARNING -LogFile $LogFile
+} else {
+    Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
+}
 
 
 Write-MigrationLog "Starting step1 - tagging and creating Veeam jobs" -LogFile $LogFile
