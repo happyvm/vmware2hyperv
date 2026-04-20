@@ -154,6 +154,83 @@ function Start-SCVMMHostMigration {
     } -ArgumentList @($Name, $ServerName, $DestinationHost)
 }
 
+function Get-SCVMMVmRuntimeState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ServerName
+    )
+
+    return Invoke-SCVMMCommand -ScriptBlock {
+        param($VmName, $VmmServerName)
+        $server = Get-SCVMMServer -ComputerName $VmmServerName
+        $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server | Select-Object -First 1
+        if (-not $vm) {
+            return $null
+        }
+
+        $hostNameCandidates = @(
+            [string]$vm.HostName,
+            [string]$vm.VMHostName,
+            [string]$vm.VMHost.ComputerName,
+            [string]$vm.VMHost.Name,
+            [string]$vm.HostComputerName,
+            [string]$vm.Host
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+        [pscustomobject]@{
+            Name             = [string]$vm.Name
+            IsHighlyAvailable = [bool]$vm.IsHighlyAvailable
+            HostName         = $hostNameCandidates | Select-Object -First 1
+            Status           = [string]$vm.Status
+            StatusString     = [string]$vm.StatusString
+        }
+    } -ArgumentList @($Name, $ServerName)
+}
+
+function Normalize-HostName {
+    param(
+        [AllowNull()]
+        [string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return $null
+    }
+
+    return $Name.Trim().ToLowerInvariant().Split('.')[0]
+}
+
+function Refresh-SCVMMVirtualMachine {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ServerName,
+
+        [string]$LogFile
+    )
+
+    Invoke-SCVMMCommand -ScriptBlock {
+        param($VmName, $VmmServerName)
+        $server = Get-SCVMMServer -ComputerName $VmmServerName
+        $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server | Select-Object -First 1
+        if (-not $vm) {
+            throw "VM '$VmName' not found in SCVMM while refreshing."
+        }
+
+        $refreshCommand = Get-Command -Name 'Read-SCVirtualMachine' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($refreshCommand) {
+            & $refreshCommand -VM $vm | Out-Null
+        }
+    } -ArgumentList @($Name, $ServerName)
+
+    Write-MigrationLog "[$Name] SCVMM VM refresh completed." -LogFile $LogFile
+}
+
 function Invoke-SCVMMNetworkAndPostConfig {
     param(
         [Parameter(Mandatory = $true)]
@@ -364,33 +441,38 @@ function Invoke-SCVMMNetworkAndPostConfig {
     }
     Set-SCVMMOperatingSystem -Name $Name -ServerName $ServerName -SourceOperatingSystem $SourceOperatingSystem -OperatingSystemMap $Config.SCVMM.OperatingSystemMap -LogFile $LogFile
 
-    $vmHaState = Invoke-SCVMMCommand -ScriptBlock {
-        param($VmName, $VmmServerName)
-        $server = Get-SCVMMServer -ComputerName $VmmServerName
-        $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server | Select-Object -First 1
-        if (-not $vm) {
-            return $false
-        }
-
-        return [bool]$vm.IsHighlyAvailable
-    } -ArgumentList @($Name, $ServerName)
+    $vmStateBeforeHa = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
+    $vmHaState = [bool]$vmStateBeforeHa.IsHighlyAvailable
 
     if ($vmHaState) {
-        Write-MigrationLog "[$Name] VM is already highly available in SCVMM. Skipping Add-ClusterVirtualMachineRole." -Level WARNING -LogFile $LogFile
+        Write-MigrationLog "[$Name] VM is already highly available in SCVMM." -Level SUCCESS -LogFile $LogFile
     } else {
         try {
             Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $TargetVM.Name
-            Write-MigrationLog "[$Name] VM added to cluster $ClusterName." -Level SUCCESS -LogFile $LogFile
+            Write-MigrationLog "[$Name] VM added to cluster $ClusterName; validating high availability state in SCVMM after refresh." -Level SUCCESS -LogFile $LogFile
         } catch {
             if ([string]$_ -match "already exists|already been configured|already highly available|is already part of") {
                 Write-MigrationLog "[$Name] Cluster role already present; skipping duplicate high-availability registration." -Level WARNING -LogFile $LogFile
             } else {
                 Write-MigrationLog "[$Name] Cluster error: $_" -Level ERROR -LogFile $LogFile
+                throw
             }
         }
+
+        Refresh-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
+        $vmStateAfterHa = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
+        if (-not $vmStateAfterHa.IsHighlyAvailable) {
+            throw "VM '$Name' is still not highly available in SCVMM after Add-ClusterVirtualMachineRole and refresh."
+        }
+
+        Write-MigrationLog "[$Name] SCVMM confirms high availability is enabled." -Level SUCCESS -LogFile $LogFile
     }
 
     try {
+        Refresh-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
+        $vmStateBeforeMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
+        Write-MigrationLog "[$Name] Preparing host migration validation. Current host: '$($vmStateBeforeMove.HostName)'." -LogFile $LogFile
+
         $hyperVMoveCommand = Get-Command -Name "Move-VM" -Module "Hyper-V" -ErrorAction SilentlyContinue |
             Select-Object -First 1
 
@@ -412,6 +494,32 @@ function Invoke-SCVMMNetworkAndPostConfig {
             Start-SCVMMHostMigration -Name $Name -ServerName $ServerName -DestinationHost $DestinationHost
 
             Write-MigrationLog "[$Name] LiveMigration to $DestinationHost requested via SCVMM." -Level SUCCESS -LogFile $LogFile
+        }
+
+        $destinationHostNormalized = Normalize-HostName -Name $DestinationHost
+        $migrationValidationTimeoutSeconds = 600
+        $migrationValidationPollIntervalSeconds = 15
+        $migrationValidationElapsedSeconds = 0
+        $migrationValidated = $false
+        do {
+            Start-Sleep -Seconds $migrationValidationPollIntervalSeconds
+            $migrationValidationElapsedSeconds += $migrationValidationPollIntervalSeconds
+
+            Refresh-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
+            $vmStateAfterMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
+            $currentHostNormalized = Normalize-HostName -Name $vmStateAfterMove.HostName
+
+            if ($currentHostNormalized -eq $destinationHostNormalized) {
+                Write-MigrationLog "[$Name] LiveMigration validated: VM is now running on '$($vmStateAfterMove.HostName)'." -Level SUCCESS -LogFile $LogFile
+                $migrationValidated = $true
+                break
+            }
+
+            Write-MigrationLog "[$Name] Waiting for live migration completion (current host: '$($vmStateAfterMove.HostName)', expected: '$DestinationHost', elapsed: ${migrationValidationElapsedSeconds}s)." -Level WARNING -LogFile $LogFile
+        } while ($migrationValidationElapsedSeconds -lt $migrationValidationTimeoutSeconds)
+
+        if (-not $migrationValidated) {
+            throw "LiveMigration validation timed out after $migrationValidationTimeoutSeconds seconds. VM current host: '$($vmStateAfterMove.HostName)', expected destination: '$DestinationHost'."
         }
     } catch {
         if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {
