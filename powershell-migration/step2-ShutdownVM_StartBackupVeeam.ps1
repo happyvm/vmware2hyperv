@@ -63,7 +63,7 @@ foreach ($vmEntry in $vmList) {
 Disconnect-VCenter -LogFile $LogFile
 
 Write-MigrationLog "Sending pre-migration email" -LogFile $LogFile
-& $PreMigrationMailScript -tagName $Tag -recipientGroup $RecipientGroup -vCenterServer $VCenterServer -SkipVCenterLogin
+& $PreMigrationMailScript -tagName $Tag -recipientGroup $RecipientGroup -vCenterServer $VCenterServer
 
 if ($PSVersionTable.PSEdition -eq "Core") {
     Write-MigrationLog "PowerShell 7 detected: starting the Veeam job in Windows PowerShell to avoid deserialized objects." -Level WARNING -LogFile $LogFile
