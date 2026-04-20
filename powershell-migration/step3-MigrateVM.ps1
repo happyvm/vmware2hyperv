@@ -9,6 +9,7 @@ param (
     [string]$VlanId,
 
     [string]$OperatingSystem,
+    [string]$Remark,
     [string]$SCVMMServer,
     [string]$HyperVHost,
     [string]$HyperVHost2,
@@ -165,6 +166,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         [string]$Vlan,
 
         [string]$SourceOperatingSystem,
+        [string]$SourceRemark,
         $Config,
         [string]$BackupTagName,
         [string]$ClusterName,
@@ -230,7 +232,8 @@ function Invoke-SCVMMNetworkAndPostConfig {
             $VMSubnetName,
             $Vlan,
             $LogicalSwitch,
-            $PortClassificationName
+            $PortClassificationName,
+            $Description
         )
         $server = Get-SCVMMServer -ComputerName $ServerName
         $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
@@ -312,7 +315,20 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
 
         Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $vmNetwork -VMSubnet $vmSubnet -VLanEnabled $true -VLanID $Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
-        Set-SCVirtualMachine -VM $vm -EnableOperatingSystemShutdown $true -EnableTimeSynchronization $false -EnableDataExchange $true -EnableHeartbeat $true -EnableBackup $true -EnableGuestServicesInterface $true | Out-Null
+        $setVmParameters = @{
+            VM                             = $vm
+            EnableOperatingSystemShutdown  = $true
+            EnableTimeSynchronization      = $false
+            EnableDataExchange             = $true
+            EnableHeartbeat                = $true
+            EnableBackup                   = $true
+            EnableGuestServicesInterface   = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($Description)) {
+            $setVmParameters["Description"] = $Description
+        }
+
+        Set-SCVirtualMachine @setVmParameters | Out-Null
     } -ArgumentList @(
         $Name,
         $ServerName,
@@ -320,11 +336,17 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $NetworkMapping.VMSubnetName,
         $Vlan,
         $Config.SCVMM.Network.LogicalSwitchName,
-        $Config.SCVMM.Network.PortClassificationName
+        $Config.SCVMM.Network.PortClassificationName,
+        $SourceRemark
     )
 
     Write-MigrationLog "[$Name] Network configured (VLAN $Vlan, VMNetwork $($NetworkMapping.VMNetworkName))." -Level SUCCESS -LogFile $LogFile
     Write-MigrationLog "[$Name] Integration Services configured." -LogFile $LogFile
+    if (-not [string]::IsNullOrWhiteSpace($SourceRemark)) {
+        Write-MigrationLog "[$Name] SCVMM description updated from VMware remark." -LogFile $LogFile
+    } else {
+        Write-MigrationLog "[$Name] VMware remark empty; SCVMM description unchanged." -LogFile $LogFile
+    }
     Set-SCVMMOperatingSystem -Name $Name -ServerName $ServerName -SourceOperatingSystem $SourceOperatingSystem -OperatingSystemMap $Config.SCVMM.OperatingSystemMap -LogFile $LogFile
 
     try {
@@ -689,6 +711,7 @@ Invoke-SCVMMNetworkAndPostConfig `
     -ServerName $VMMServerName `
     -Vlan $VlanId `
     -SourceOperatingSystem $OperatingSystem `
+    -SourceRemark $Remark `
     -Config $Config `
     -BackupTagName $BackupTag `
     -ClusterName $HyperVCluster `
