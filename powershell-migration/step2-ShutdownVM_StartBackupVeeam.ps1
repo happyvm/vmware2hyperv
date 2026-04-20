@@ -1,5 +1,3 @@
-﻿#requires -Version 7.0
-
 param (
     # Name of the batch/tag to migrate (e.g. HypMig-lot-118) — required
     [Parameter(Mandatory = $true)]
@@ -20,8 +18,13 @@ if (-not $CsvFile)                { $CsvFile                = $Config.Paths.CsvF
 if (-not $PreMigrationMailScript) { $PreMigrationMailScript = "$PSScriptRoot\stepx-premigration_mail.ps1" }
 if (-not $LogFile)                { $LogFile                = "$($Config.Paths.LogDir)\step2-shutdown-backup-$Tag-$(Get-Date -Format 'yyyyMMdd').log" }
 
-Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
+if ($PSVersionTable.PSEdition -eq "Core") {
+    Write-MigrationLog "PowerShell 7 detected: skipping direct import of Veeam.Backup.PowerShell to avoid VMware/Veeam VimService assembly conflicts." -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "Veeam commands will run in Windows PowerShell for this step." -Level WARNING -LogFile $LogFile
+} else {
+    Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
+}
 
 
 $JobName = "Backup-$Tag"

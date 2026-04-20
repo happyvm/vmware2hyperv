@@ -1,5 +1,3 @@
-﻿#requires -Version 7.0
-
 param (
     [string]$VCenterServer,
     [string]$OutputCsvPath,

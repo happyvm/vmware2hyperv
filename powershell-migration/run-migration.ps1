@@ -1,5 +1,3 @@
-﻿#requires -Version 7.0
-
 # run-migration.ps1 — VMware → Hyper-V migration orchestrator
 #
 # Usage:

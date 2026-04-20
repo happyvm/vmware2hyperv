@@ -1,5 +1,3 @@
-﻿#requires -Version 7.0
-
 param (
     [Parameter(Mandatory = $true)]
     [string]$tagName,             # Batch tag (e.g. HypMig-lot-118)
