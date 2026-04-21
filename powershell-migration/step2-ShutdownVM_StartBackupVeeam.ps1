@@ -35,6 +35,39 @@ Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $vmList = Import-Csv -Path $CsvFile -Delimiter ";"
 
+function Disconnect-VmNetworkAdapters {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+
+        [string]$LogFile
+    )
+
+    $vmObj = VMware.VimAutomation.Core\Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    if (-not $vmObj) {
+        Write-MigrationLog "Unable to disconnect NICs: VM not found ($VmName)." -Level WARNING -LogFile $LogFile
+        return
+    }
+
+    $networkAdapters = VMware.VimAutomation.Core\Get-NetworkAdapter -VM $vmObj -ErrorAction SilentlyContinue
+    if (-not $networkAdapters) {
+        Write-MigrationLog "No network adapter found on VM $VmName." -Level WARNING -LogFile $LogFile
+        return
+    }
+
+    $connectedAdapters = $networkAdapters | Where-Object { $_.Connected }
+    if (-not $connectedAdapters) {
+        Write-MigrationLog "All NICs are already disconnected on VM $VmName." -Level INFO -LogFile $LogFile
+        return
+    }
+
+    foreach ($adapter in $connectedAdapters) {
+        VMware.VimAutomation.Core\Set-NetworkAdapter -NetworkAdapter $adapter -Connected:$false -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    Write-MigrationLog "Disconnected $($connectedAdapters.Count) NIC(s) on VM $VmName." -Level SUCCESS -LogFile $LogFile
+}
+
 $vmStates = @{}
 $timeoutSeconds = 300
 $pollIntervalSeconds = 10
@@ -52,11 +85,14 @@ foreach ($vmEntry in $vmList) {
         Name            = $vmName
         TimeoutHandled  = $false
         PoweredOffLogged = $false
+        NetworkDisconnected = $false
     }
 
     if ($vmObj.PowerState -eq "PoweredOff") {
         Write-MigrationLog "VM $vmName is already powered off." -Level SUCCESS -LogFile $LogFile
         $vmStates[$vmName].PoweredOffLogged = $true
+        Disconnect-VmNetworkAdapters -VmName $vmName -LogFile $LogFile
+        $vmStates[$vmName].NetworkDisconnected = $true
         continue
     }
 
@@ -83,6 +119,10 @@ if ($vmStates.Count -gt 0) {
             if ($vmObj.PowerState -eq "PoweredOff") {
                 Write-MigrationLog "VM $vmName powered off." -Level SUCCESS -LogFile $LogFile
                 $vmStates[$vmName].PoweredOffLogged = $true
+                if (-not $vmStates[$vmName].NetworkDisconnected) {
+                    Disconnect-VmNetworkAdapters -VmName $vmName -LogFile $LogFile
+                    $vmStates[$vmName].NetworkDisconnected = $true
+                }
                 continue
             }
 
