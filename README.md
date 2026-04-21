@@ -136,6 +136,30 @@ pwsh ./powershell-migration/step0-uptime_extract.ps1 -Tag HypMig-lot-118 -Output
 pwsh ./powershell-migration/stepx-premigration_mail.ps1 -tagName HypMig-lot-118 -recipientGroup internal
 ```
 
+
+### Post-migration companion checks (SCVMM)
+
+Run this script in parallel with `run-migration.ps1` (or just after) to loop until all VMs in the CSV are compliant on SCVMM:
+
+- VM exists and is running
+- NIC is connected
+- Integration Services appear healthy
+- SCVMM backup tag is present (`Tags.BackupTag`)
+- guest IPv4 still matches the expected IP from CSV (`ExpectedIP` / `IP` / `IPAddress` columns)
+
+```powershell
+pwsh ./powershell-migration/step-XX-PostMigrationChecks.ps1 -Tag HypMig-lot-118
+```
+
+Useful options:
+
+```powershell
+pwsh ./powershell-migration/step-XX-PostMigrationChecks.ps1 -Tag HypMig-lot-118 -PollIntervalSeconds 120 -MaxIterations 30
+pwsh ./powershell-migration/step-XX-PostMigrationChecks.ps1 -CsvFile D:\Scripts\lotissement.csv
+```
+
+`-MaxIterations 0` means infinite loop until every VM is compliant.
+
 ## Logs
 
 Each script writes timestamped logs to the path configured in `Paths.LogDir`.
