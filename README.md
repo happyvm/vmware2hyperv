@@ -2,10 +2,10 @@
 
 This repository contains PowerShell 7 scripts to orchestrate a **VMware → Hyper-V** migration workflow with Veeam backups and SCVMM operations.
 
-All scripts are in the `extracted/` folder, with the main entry point:
+All migration scripts are in the `powershell-migration/` folder, with the main entry point:
 
-- `extracted/run-migration.ps1`
-- `extracted/step3-MigrateVM.ps1` now also maps a source `OperatingSystem` value to the matching SCVMM operating system when the batch CSV or CMDB extract provides it.
+- `powershell-migration/run-migration.ps1`
+- `powershell-migration/step3-MigrateVM.ps1` also maps a source `OperatingSystem` value to the matching SCVMM operating system when the batch CSV or CMDB extract provides it.
 
 ## Project workflow
 
@@ -44,7 +44,7 @@ The script is idempotent: if PowerShell is already installed, it exits without c
 
 Default configuration is stored in:
 
-- `extracted/config.psd1`
+- `powershell-migration/config.psd1`
 
 Update at least:
 
@@ -61,7 +61,7 @@ Update at least:
 
 If your batch CSV contains an `OperatingSystem` column, or your CMDB extract contains `OperatingSystem` / `Operating system` alongside `VMName` / `Name`, `step3-MigrateVM.ps1` can normalize that value, map it through `SCVMM.OperatingSystemMap`, and apply the matching SCVMM operating system with `Set-SCVirtualMachine`.
 
-Example configuration in `extracted/config.psd1`, aligned with the mapping currently used in SCVMM:
+Example configuration in `powershell-migration/config.psd1`, aligned with the mapping currently used in SCVMM:
 
 ```powershell
 SCVMM = @{
@@ -88,32 +88,32 @@ The source labels are normalized before lookup (case-insensitive, separators col
 
 ## Command usage
 
-Run from repository root (or from `extracted/` by adapting paths).
+Run from repository root (or from `powershell-migration/` by adapting paths).
 
 ### Main orchestration command
 
 ```powershell
-pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118
+pwsh ./powershell-migration/run-migration.ps1 -Tag HypMig-lot-118
 ```
 
 ### Resume from a specific step
 
 ```powershell
-pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step2
-pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step3
-pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step3 -ForceNetworkConfigOnly
+pwsh ./powershell-migration/run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step2
+pwsh ./powershell-migration/run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step3
+pwsh ./powershell-migration/run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step3 -ForceNetworkConfigOnly
 ```
 
 ### Override recipient group for pre-migration mail
 
 ```powershell
-pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118 -RecipientGroup internal
+pwsh ./powershell-migration/run-migration.ps1 -Tag HypMig-lot-118 -RecipientGroup internal
 ```
 
 ### Use a custom config file
 
 ```powershell
-pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118 -ConfigFile ./extracted/config.psd1
+pwsh ./powershell-migration/run-migration.ps1 -Tag HypMig-lot-118 -ConfigFile ./powershell-migration/config.psd1
 ```
 
 ## Useful standalone commands
@@ -121,19 +121,19 @@ pwsh ./extracted/run-migration.ps1 -Tag HypMig-lot-118 -ConfigFile ./extracted/c
 ### Export VMware uptime data to CSV
 
 ```powershell
-pwsh ./extracted/step0-uptime_extract.ps1
+pwsh ./powershell-migration/step0-uptime_extract.ps1
 ```
 
 Optional parameters:
 
 ```powershell
-pwsh ./extracted/step0-uptime_extract.ps1 -Tag HypMig-lot-118 -OutputCsvPath D:\Scripts\uptime_vm.csv
+pwsh ./powershell-migration/step0-uptime_extract.ps1 -Tag HypMig-lot-118 -OutputCsvPath D:\Scripts\uptime_vm.csv
 ```
 
 ### Send pre-migration email only
 
 ```powershell
-pwsh ./extracted/stepx-premigration_mail.ps1 -tagName HypMig-lot-118 -recipientGroup internal
+pwsh ./powershell-migration/stepx-premigration_mail.ps1 -tagName HypMig-lot-118 -recipientGroup internal
 ```
 
 ## Logs
