@@ -35,29 +35,71 @@ Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $vmList = Import-Csv -Path $CsvFile -Delimiter ";"
 
+$vmStates = @{}
+$timeoutSeconds = 300
+$pollIntervalSeconds = 10
+$startTime = Get-Date
+
 foreach ($vmEntry in $vmList) {
-    Write-MigrationLog "Graceful shutdown of VM: $($vmEntry.VMName)" -LogFile $LogFile
-    $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vmEntry.VMName -ErrorAction SilentlyContinue
+    $vmName = $vmEntry.VMName
+    $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if (-not $vmObj) {
-        Write-MigrationLog "VM not found: $($vmEntry.VMName)" -Level WARNING -LogFile $LogFile
+        Write-MigrationLog "VM not found: $vmName" -Level WARNING -LogFile $LogFile
         continue
     }
-    if ($vmObj.PowerState -ne "PoweredOff") {
-        Shutdown-VMGuest -VM $vmObj -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-        $timeout = 300   # secondes
-        $elapsed = 0
-        do {
-            Start-Sleep -Seconds 10
-            $elapsed += 10
-            $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vmEntry.VMName
-        } while ($vmObj.PowerState -ne "PoweredOff" -and $elapsed -lt $timeout)
 
-        if ($vmObj.PowerState -ne "PoweredOff") {
-            Write-MigrationLog "VM $($vmEntry.VMName) not powered off after ${timeout}s — forced power-off." -Level WARNING -LogFile $LogFile
-            VMware.VimAutomation.Core\Stop-VM -VM $vmEntry.VMName -Confirm:$false -ErrorAction SilentlyContinue
-        }
+    $vmStates[$vmName] = [PSCustomObject]@{
+        Name            = $vmName
+        TimeoutHandled  = $false
+        PoweredOffLogged = $false
     }
-    Write-MigrationLog "VM $($vmEntry.VMName) powered off." -Level SUCCESS -LogFile $LogFile
+
+    if ($vmObj.PowerState -eq "PoweredOff") {
+        Write-MigrationLog "VM $vmName is already powered off." -Level SUCCESS -LogFile $LogFile
+        $vmStates[$vmName].PoweredOffLogged = $true
+        continue
+    }
+
+    Write-MigrationLog "Graceful shutdown requested for VM: $vmName" -LogFile $LogFile
+    Shutdown-VMGuest -VM $vmObj -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+}
+
+if ($vmStates.Count -gt 0) {
+    do {
+        $allPoweredOff = $true
+
+        foreach ($vmName in $vmStates.Keys) {
+            if ($vmStates[$vmName].PoweredOffLogged) {
+                continue
+            }
+
+            $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
+            if (-not $vmObj) {
+                Write-MigrationLog "VM not found during shutdown follow-up: $vmName" -Level WARNING -LogFile $LogFile
+                $vmStates[$vmName].PoweredOffLogged = $true
+                continue
+            }
+
+            if ($vmObj.PowerState -eq "PoweredOff") {
+                Write-MigrationLog "VM $vmName powered off." -Level SUCCESS -LogFile $LogFile
+                $vmStates[$vmName].PoweredOffLogged = $true
+                continue
+            }
+
+            $allPoweredOff = $false
+            $elapsedSeconds = [int]((Get-Date) - $startTime).TotalSeconds
+
+            if ($elapsedSeconds -ge $timeoutSeconds -and -not $vmStates[$vmName].TimeoutHandled) {
+                Write-MigrationLog "VM $vmName not powered off after ${timeoutSeconds}s — forced power-off." -Level WARNING -LogFile $LogFile
+                VMware.VimAutomation.Core\Stop-VM -VM $vmName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+                $vmStates[$vmName].TimeoutHandled = $true
+            }
+        }
+
+        if (-not $allPoweredOff) {
+            Start-Sleep -Seconds $pollIntervalSeconds
+        }
+    } while (-not $allPoweredOff)
 }
 
 Disconnect-VCenter -LogFile $LogFile
