@@ -177,21 +177,39 @@ Disconnect-VCenter -LogFile $LogFile
 Write-MigrationLog "Parallel execution per VM (step3)..." -LogFile $LogFile
 Write-MigrationLog "Targeted VMs: $($vmNames -join ', ')" -LogFile $LogFile
 
-$jobs = foreach ($vmName in $vmNames) {
+$step3MaxParallelJobs = if ($Config.Orchestrator.Step3MaxParallelJobs) { [int]$Config.Orchestrator.Step3MaxParallelJobs } else { 5 }
+$step3JobStartupDelaySec = if ($Config.Orchestrator.Step3JobStartupDelaySec -ge 0) { [int]$Config.Orchestrator.Step3JobStartupDelaySec } else { 2 }
+
+if ($step3MaxParallelJobs -lt 1) {
+    $step3MaxParallelJobs = 1
+}
+
+Write-MigrationLog "Step3 concurrency limit: $step3MaxParallelJobs parallel jobs (startup delay: ${step3JobStartupDelaySec}s)." -LogFile $LogFile
+
+$jobs = @()
+foreach ($vmName in $vmNames) {
+    while (($jobs | Where-Object { $_.State -eq "Running" }).Count -ge $step3MaxParallelJobs) {
+        Wait-Job -Job $jobs -Any | Out-Null
+    }
+
     $vmLogFile       = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
     $vlanId          = $vmVlans[$vmName]
     $operatingSystem = $vmOperatingSystems[$vmName]
     $remark          = $vmRemarks[$vmName]
 
-    Start-Job -Name "migration-$vmName" -ScriptBlock {
-        $ErrorActionPreference = "Stop"
+    $jobs += Start-Job -Name "migration-$vmName" -ScriptBlock {
+            $ErrorActionPreference = "Stop"
 
-        # Avoid interactive security prompts in background jobs when scripts carry a Mark-of-the-Web.
-        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
-        Get-ChildItem -Path $using:PSScriptRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
-            Unblock-File -ErrorAction SilentlyContinue
+            # Avoid interactive security prompts in background jobs when scripts carry a Mark-of-the-Web.
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
+            Get-ChildItem -Path $using:PSScriptRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
+                Unblock-File -ErrorAction SilentlyContinue
 
-        & "$using:PSScriptRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$using:Tag" -VMName $using:vmName -VlanId $using:vlanId -OperatingSystem $using:operatingSystem -Remark $using:remark -ForceNetworkConfigOnly:$using:ForceNetworkConfigOnly -LogFile $using:vmLogFile
+            & "$using:PSScriptRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$using:Tag" -VMName $using:vmName -VlanId $using:vlanId -OperatingSystem $using:operatingSystem -Remark $using:remark -ForceNetworkConfigOnly:$using:ForceNetworkConfigOnly -LogFile $using:vmLogFile
+        }
+
+    if ($step3JobStartupDelaySec -gt 0) {
+        Start-Sleep -Seconds $step3JobStartupDelaySec
     }
 }
 

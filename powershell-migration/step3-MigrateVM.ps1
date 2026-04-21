@@ -444,12 +444,29 @@ function Invoke-SCVMMNetworkAndPostConfig {
     $vmStateBeforeHa = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
     $vmHaState = [bool]$vmStateBeforeHa.IsHighlyAvailable
 
+    $clusterVmRegistrationCommand = Get-Command -Name "Add-ClusterVirtualMachineRole" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
+    if (-not $clusterVmRegistrationCommand) {
+        try {
+            Import-RequiredModule -Name "FailoverClusters" -LogFile $LogFile -UseWindowsPowerShellFallback
+            $clusterVmRegistrationCommand = Get-Command -Name "Add-ClusterVirtualMachineRole" -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+        } catch {
+            Write-MigrationLog "[$Name] FailoverClusters module import failed; high-availability registration will use SCVMM state only. Details: $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
+        }
+    }
+
     if ($vmHaState) {
         Write-MigrationLog "[$Name] VM is already highly available in SCVMM." -Level SUCCESS -LogFile $LogFile
     } else {
         try {
-            Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $TargetVM.Name
-            Write-MigrationLog "[$Name] VM added to cluster $ClusterName; validating high availability state in SCVMM after refresh." -Level SUCCESS -LogFile $LogFile
+            if ($clusterVmRegistrationCommand) {
+                & $clusterVmRegistrationCommand -Cluster $ClusterName -VirtualMachine $TargetVM.Name
+                Write-MigrationLog "[$Name] VM added to cluster $ClusterName; validating high availability state in SCVMM after refresh." -Level SUCCESS -LogFile $LogFile
+            } else {
+                Write-MigrationLog "[$Name] Add-ClusterVirtualMachineRole cmdlet unavailable on this execution host; skipping direct cluster cmdlet call and validating SCVMM high-availability state only." -Level WARNING -LogFile $LogFile
+            }
         } catch {
             if ([string]$_ -match "already exists|already been configured|already highly available|is already part of") {
                 Write-MigrationLog "[$Name] Cluster role already present; skipping duplicate high-availability registration." -Level WARNING -LogFile $LogFile
@@ -462,7 +479,11 @@ function Invoke-SCVMMNetworkAndPostConfig {
         Refresh-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
         $vmStateAfterHa = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
         if (-not $vmStateAfterHa.IsHighlyAvailable) {
-            throw "VM '$Name' is still not highly available in SCVMM after Add-ClusterVirtualMachineRole and refresh."
+            if ($clusterVmRegistrationCommand) {
+                throw "VM '$Name' is still not highly available in SCVMM after Add-ClusterVirtualMachineRole and refresh."
+            }
+
+            throw "VM '$Name' is still not highly available in SCVMM after refresh, and Add-ClusterVirtualMachineRole is unavailable on this execution host. Install/import the FailoverClusters module (with the command available) or run this step from a Failover Clustering management host."
         }
 
         Write-MigrationLog "[$Name] SCVMM confirms high availability is enabled." -Level SUCCESS -LogFile $LogFile
