@@ -95,4 +95,9 @@
         OutputCsv      = "D:\Scripts\uptime_vm.csv"
         LogDir    = "D:\Scripts\Logs"
     }
+
+    Orchestrator = @{
+        Step3MaxParallelJobs    = 5  # Reduce concurrency to avoid session/cmdlet exhaustion on large batches
+        Step3JobStartupDelaySec = 2  # Delay between job starts to smooth PowerShell/SCVMM load spikes
+    }
 }
