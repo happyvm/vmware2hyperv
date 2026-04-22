@@ -26,7 +26,7 @@ If `step3` already restored the VM but failed during SCVMM network/OS/post-confi
   - Veeam Backup & Replication
   - SCVMM / Hyper-V environment
 - Required PowerShell modules available on the execution host (imported by scripts):
-  - `VMware.PowerCLI` / `VMware.VimAutomation.Core`
+  - `VMware.PowerCLI` or `VCF.PowerCLI` (auto-detected) / `VMware.VimAutomation.Core`
   - `Veeam.Backup.PowerShell`
   - `VirtualMachineManager`
 

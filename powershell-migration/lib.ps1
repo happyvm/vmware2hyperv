@@ -111,37 +111,46 @@ function Import-RequiredModule {
         [switch]$UseWindowsPowerShellFallback
     )
 
-    if ($PSVersionTable.PSEdition -eq "Core" -and $UseWindowsPowerShellFallback) {
-        try {
-            Import-Module -Name $Name -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop 3>$null
-            Write-MigrationLog "Module imported via Windows PowerShell compatibility mode: $Name" -Level WARNING -LogFile $LogFile
-            return
-        } catch {
-            Write-MigrationLog "Windows PowerShell compatibility mode import failed for $Name, trying standard import." -Level WARNING -LogFile $LogFile
-        }
+    $candidateNames = if ($Name -eq "VMware.PowerCLI") {
+        @("VMware.PowerCLI", "VCF.PowerCLI")
+    } else {
+        @($Name)
     }
 
-    try {
-        Import-Module -Name $Name -DisableNameChecking -ErrorAction Stop 3>$null
-        Write-MigrationLog "Module imported: $Name" -LogFile $LogFile
-        return
-    } catch {
-        if ($PSVersionTable.PSEdition -eq "Core") {
+    foreach ($candidateName in $candidateNames) {
+        if ($PSVersionTable.PSEdition -eq "Core" -and $UseWindowsPowerShellFallback) {
             try {
-                Import-Module -Name $Name -SkipEditionCheck -DisableNameChecking -ErrorAction Stop 3>$null
-                Write-MigrationLog "Module imported via SkipEditionCheck fallback: $Name" -Level WARNING -LogFile $LogFile
+                Import-Module -Name $candidateName -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop 3>$null
+                Write-MigrationLog "Module imported via Windows PowerShell compatibility mode: $candidateName" -Level WARNING -LogFile $LogFile
                 return
             } catch {
-                $message = "Unable to import module $Name (standard import and fallbacks failed): $_"
-                Write-MigrationLog $message -Level ERROR -LogFile $LogFile
-                throw $message
+                Write-MigrationLog "Windows PowerShell compatibility mode import failed for $candidateName, trying standard import." -Level WARNING -LogFile $LogFile
             }
         }
 
-        $message = "Unable to import module $Name : $_"
-        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
-        throw $message
+        try {
+            Import-Module -Name $candidateName -DisableNameChecking -ErrorAction Stop 3>$null
+            Write-MigrationLog "Module imported: $candidateName" -LogFile $LogFile
+            return
+        } catch {
+            if ($PSVersionTable.PSEdition -eq "Core") {
+                try {
+                    Import-Module -Name $candidateName -SkipEditionCheck -DisableNameChecking -ErrorAction Stop 3>$null
+                    Write-MigrationLog "Module imported via SkipEditionCheck fallback: $candidateName" -Level WARNING -LogFile $LogFile
+                    return
+                } catch {
+                    Write-MigrationLog "Unable to import module $candidateName (standard import and fallbacks failed): $_" -Level WARNING -LogFile $LogFile
+                }
+            } else {
+                Write-MigrationLog "Unable to import module $candidateName : $_" -Level WARNING -LogFile $LogFile
+            }
+        }
     }
+
+    $candidateList = $candidateNames -join ", "
+    $message = "Unable to import module $Name. Tried: $candidateList"
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+    throw $message
 }
 
 # ---------------------------------------------------------------------------
