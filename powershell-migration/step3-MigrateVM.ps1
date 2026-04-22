@@ -410,6 +410,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
 
         $networkMappingsByVlan = @{}
+        $networkMappingsBySourceNetworkName = @{}
         $networkMappingsByVlan[$Vlan] = [pscustomobject]@{
             VMNetwork = $vmNetwork
             VMSubnet = $vmSubnet
@@ -424,6 +425,8 @@ function Invoke-SCVMMNetworkAndPostConfig {
         if ($adapterMappings.Count -gt 0) {
             foreach ($adapterMapping in $adapterMappings) {
                 $mappingVlan = [string]$adapterMapping.VlanId
+                $mappingNetworkName = [string]$adapterMapping.NetworkName
+
                 if (-not $networkMappingsByVlan.ContainsKey($mappingVlan)) {
                     $matchingVMNetwork = Get-SCVMNetwork -VMMServer $server |
                         Where-Object { $_.Name -like "*$mappingVlan*" -or $_.Description -like "*$mappingVlan*" } |
@@ -437,6 +440,35 @@ function Invoke-SCVMMNetworkAndPostConfig {
                             VMNetwork = $matchingVMNetwork
                             VMSubnet = $matchingVMSubnet
                             Vlan = $mappingVlan
+                        }
+                    }
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($mappingNetworkName) -and -not $networkMappingsBySourceNetworkName.ContainsKey($mappingNetworkName)) {
+                    $matchingByNetworkName = Get-SCVMNetwork -VMMServer $server |
+                        Where-Object { $_.Name -eq $mappingNetworkName -or $_.Description -eq $mappingNetworkName } |
+                        Select-Object -First 1
+
+                    if (-not $matchingByNetworkName) {
+                        $matchingByNetworkName = Get-SCVMNetwork -VMMServer $server |
+                            Where-Object { $_.Name -like "*$mappingNetworkName*" -or $_.Description -like "*$mappingNetworkName*" } |
+                            Select-Object -First 1
+                    }
+
+                    if ($matchingByNetworkName) {
+                        $matchingSubnetByNetworkName = Get-SCVMSubnet -VMMServer $server |
+                            Where-Object {
+                                ($_.VMNetwork -and $_.VMNetwork.ID -eq $matchingByNetworkName.ID) -or
+                                ($_.VMNetworkName -and $_.VMNetworkName -eq $matchingByNetworkName.Name)
+                            } |
+                            Select-Object -First 1
+
+                        if ($matchingSubnetByNetworkName) {
+                            $networkMappingsBySourceNetworkName[$mappingNetworkName] = [pscustomobject]@{
+                                VMNetwork = $matchingByNetworkName
+                                VMSubnet = $matchingSubnetByNetworkName
+                                Vlan = if ($mappingVlan -match '^\d+$') { $mappingVlan } else { $Vlan }
+                            }
                         }
                     }
                 }
@@ -457,6 +489,12 @@ function Invoke-SCVMMNetworkAndPostConfig {
                     Select-Object -First 1
                 if ($sourceAdapter -and $networkMappingsByVlan.ContainsKey([string]$sourceAdapter.VlanId)) {
                     $desiredMapping = $networkMappingsByVlan[[string]$sourceAdapter.VlanId]
+                } elseif (
+                    $sourceAdapter -and
+                    -not [string]::IsNullOrWhiteSpace([string]$sourceAdapter.NetworkName) -and
+                    $networkMappingsBySourceNetworkName.ContainsKey([string]$sourceAdapter.NetworkName)
+                ) {
+                    $desiredMapping = $networkMappingsBySourceNetworkName[[string]$sourceAdapter.NetworkName]
                 }
             }
 

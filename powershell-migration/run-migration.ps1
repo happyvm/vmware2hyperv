@@ -102,6 +102,42 @@ function Get-FirstPropertyValue {
     return $null
 }
 
+function Resolve-AdapterVlanId {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Adapter
+    )
+
+    $networkName = [string]$Adapter.NetworkName
+    if ([string]::IsNullOrWhiteSpace($networkName)) {
+        return "Not connected to a network"
+    }
+
+    $distributedPortGroups = @(Get-VDPortgroup -Name $networkName -ErrorAction SilentlyContinue)
+    foreach ($distributedPortGroup in $distributedPortGroups) {
+        if ([string]$distributedPortGroup.VlanConfiguration -match '\d+') {
+            return [string]$matches[0]
+        }
+    }
+
+    $standardPortGroups = @(Get-VirtualPortGroup -Name $networkName -ErrorAction SilentlyContinue)
+    foreach ($standardPortGroup in $standardPortGroups) {
+        if ([string]$standardPortGroup.VLanId -match '^\d+$') {
+            return [string]$standardPortGroup.VLanId
+        }
+    }
+
+    $backing = $Adapter.ExtensionData.Backing
+    if ($backing -and $backing.PSObject.Properties['Port'] -and $backing.Port -and $backing.Port.PortgroupKey) {
+        $portGroupView = Get-View -Id $backing.Port.PortgroupKey -ErrorAction SilentlyContinue
+        if ($portGroupView -and $portGroupView.Config -and [string]$portGroupView.Config.DefaultPortConfig.Vlan -match '\d+') {
+            return [string]$matches[0]
+        }
+    }
+
+    return "PortGroup not found"
+}
+
 $csvRows = Import-Csv -Path $csvFile -Delimiter ";"
 $vmRows = @($csvRows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.VMName) })
 $vmNames = @($vmRows | Select-Object -ExpandProperty VMName | Sort-Object -Unique)
@@ -161,16 +197,7 @@ foreach ($vmName in $vmNames) {
         if ($networkAdapters) {
             foreach ($networkAdapter in $networkAdapters) {
                 $macAddress = [string]$networkAdapter.MacAddress
-                $vlanIdForAdapter = "PortGroup not found"
-
-                if (-not [string]::IsNullOrWhiteSpace([string]$networkAdapter.NetworkName)) {
-                    $DVPortGroup = Get-VDPortgroup -Name $networkAdapter.NetworkName -ErrorAction SilentlyContinue
-                    if ($DVPortGroup -and $DVPortGroup.VlanConfiguration -match "\d+") {
-                        $vlanIdForAdapter = $matches[0]
-                    }
-                } else {
-                    $vlanIdForAdapter = "Not connected to a network"
-                }
+                $vlanIdForAdapter = Resolve-AdapterVlanId -Adapter $networkAdapter
 
                 $adapterMappings += [pscustomobject]@{
                     MacAddress = $macAddress
