@@ -339,7 +339,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 [string]$CurrentVmName
             )
 
-            $adapters = @(Get-SCVirtualNetworkAdapter -VM $CurrentVm)
+            $adapters = @(try { Get-SCVirtualNetworkAdapter -VM $CurrentVm -ErrorAction Stop } catch { @() })
             if ($adapters) {
                 return $adapters
             }
@@ -634,7 +634,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 if ($sourceStaticMac) {
                     $setAdapterParameters['MACAddressType'] = 'Static'
                     $setAdapterParameters['MACAddress'] = $sourceStaticMac
-                    Write-MigrationLog "[$Name] Adapter #$($adapterIndex + 1): SCVMM returned 00:00:00:00:00:00, forcing static MAC from VMware ($sourceStaticMac)." -Level WARNING -LogFile $LogFile
+                    [void]$adapterResolutionWarnings.Add("[$Name] Adapter #$($adapterIndex + 1): SCVMM returned 00:00:00:00:00:00, forcing static MAC from VMware ($sourceStaticMac).")
                 }
             }
 
