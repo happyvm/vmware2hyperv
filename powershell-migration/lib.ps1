@@ -289,13 +289,27 @@ function Send-HtmlMail {
 }
 
 
+
+# ---------------------------------------------------------------------------
+# Invoke-VMwareGetVM : indirection wrapper to simplify mocking VMware cmdlet in tests
+# ---------------------------------------------------------------------------
+function Invoke-VMwareGetVM {
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [object[]]$Arguments
+    )
+
+    return VMware.VimAutomation.Core\Get-VM @Arguments
+}
+
 # ---------------------------------------------------------------------------
 # Get-VMUptime : retrieve uptime data for all powered-on VMs from vCenter
 # ---------------------------------------------------------------------------
 function Get-VMUptime {
     param([string]$LogFile)
 
-    $vms = VMware.VimAutomation.Core\Get-VM | Where-Object { $_.PowerState -eq "PoweredOn" }
+    $vms = Invoke-VMwareGetVM | Where-Object { $_.PowerState -eq "PoweredOn" }
     Write-MigrationLog "Powered-on VMs: $($vms.Count)" -LogFile $LogFile
 
     $results = @()

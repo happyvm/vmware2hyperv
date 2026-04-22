@@ -97,7 +97,7 @@ Describe 'Get-VMUptime' {
             }
         }
 
-        Mock -CommandName 'VMware.VimAutomation.Core\Get-VM' -MockWith { @($fakeVm) }
+        Mock -CommandName 'Invoke-VMwareGetVM' -MockWith { @($fakeVm) }
 
         $result = Get-VMUptime
         $result | Should -HaveCount 1
@@ -121,7 +121,7 @@ Describe 'Get-VMUptime' {
             }
         }
 
-        Mock -CommandName 'VMware.VimAutomation.Core\Get-VM' -MockWith { @($fakeVm) }
+        Mock -CommandName 'Invoke-VMwareGetVM' -MockWith { @($fakeVm) }
 
         $result = Get-VMUptime
         $result[0].Uptime | Should -Be 'Unavailable'
