@@ -27,40 +27,12 @@ Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 $Subject = "VM uptime - $(Get-Date -Format 'dd/MM/yyyy HH:mm')"
 try {
-    $VMs = VMware.VimAutomation.Core\Get-VM | Where-Object { $_.PowerState -eq "PoweredOn" }
-    Write-MigrationLog "Powered-on VMs: $($VMs.Count)" -LogFile $LogFile
+    $Results = Get-VMUptime -LogFile $LogFile
 }
 catch {
     Write-MigrationLog "Failed to retrieve VMs from vCenter '$VCenterServer': $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
     Disconnect-VCenter -LogFile $LogFile
     exit 1
-}
-$Results = @()
-
-foreach ($VM in $VMs) {
-    $GuestInfo = $VM.ExtensionData.Guest
-    $BootTime  = $null
-    $Uptime    = $null
-
-    if ($GuestInfo.ToolsStatus -eq "toolsOk" -and $GuestInfo.BootTime) {
-        $BootTime = $GuestInfo.BootTime
-    } else {
-        $BootTime = $VM.ExtensionData.Runtime.BootTime
-    }
-
-    if ($BootTime) {
-        $UptimeSpan = (Get-Date) - $BootTime
-        $Uptime = "{0} days, {1} hours, {2} minutes" -f $UptimeSpan.Days, $UptimeSpan.Hours, $UptimeSpan.Minutes
-    } else {
-        $Uptime = "Unavailable"
-    }
-
-    $Results += [PSCustomObject]@{
-        VMName   = $VM.Name
-        OS       = $GuestInfo.GuestFullName
-        BootTime = $BootTime
-        Uptime   = $Uptime
-    }
 }
 
 Write-MigrationLog "Generating HTML table" -LogFile $LogFile

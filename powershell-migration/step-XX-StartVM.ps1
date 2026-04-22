@@ -22,63 +22,6 @@ if (-not $LogFile) {
 
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
 
-function Invoke-SCVMMCommand {
-    param(
-        [Parameter(Mandatory = $true)]
-        [scriptblock]$ScriptBlock,
-
-        [object[]]$ArgumentList = @()
-    )
-
-    $compatSession = Get-PSSession -Name 'WinPSCompatSession' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-
-    if ($compatSession) {
-        return Invoke-Command -Session $compatSession -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
-    }
-
-    return & $ScriptBlock @ArgumentList
-}
-
-function Get-FirstPropertyValue {
-    param(
-        [Parameter(Mandatory = $true)]
-        $InputObject,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$PropertyNames
-    )
-
-    foreach ($propertyName in $PropertyNames) {
-        $property = $InputObject.PSObject.Properties[$propertyName]
-        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-            return [string]$property.Value
-        }
-    }
-
-    return $null
-}
-
-function Get-OsGeneration {
-    param(
-        [string]$OperatingSystem
-    )
-
-    if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
-        return $null
-    }
-
-    if ($OperatingSystem -match '2003') { return 2003 }
-    if ($OperatingSystem -match '2008') { return 2008 }
-    if ($OperatingSystem -match '2012') { return 2012 }
-    if ($OperatingSystem -match '2016') { return 2016 }
-    if ($OperatingSystem -match '2019') { return 2019 }
-    if ($OperatingSystem -match '2022') { return 2022 }
-    if ($OperatingSystem -match '2025') { return 2025 }
-
-    return $null
-}
-
 function Get-WinRmSession {
     param(
         [Parameter(Mandatory = $true)]

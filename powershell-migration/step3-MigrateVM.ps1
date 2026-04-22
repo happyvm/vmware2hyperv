@@ -100,23 +100,6 @@ function Invoke-VeeamCommand {
     return & $ScriptBlock @ArgumentList
 }
 
-function Invoke-SCVMMCommand {
-    param(
-        [Parameter(Mandatory = $true)]
-        [scriptblock]$ScriptBlock,
-
-        [object[]]$ArgumentList = @()
-    )
-
-    $compatSession = Get-PSSession -Name 'WinPSCompatSession' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-
-    if ($compatSession) {
-        return Invoke-Command -Session $compatSession -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
-    }
-
-    return & $ScriptBlock @ArgumentList
-}
 
 function Start-SCVMMHostMigration {
     [CmdletBinding(SupportsShouldProcess = $true)]

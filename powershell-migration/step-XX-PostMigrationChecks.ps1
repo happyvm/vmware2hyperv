@@ -32,43 +32,6 @@ if (-not $LogFile) {
 
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
 
-function Invoke-SCVMMCommand {
-    param(
-        [Parameter(Mandatory = $true)]
-        [scriptblock]$ScriptBlock,
-
-        [object[]]$ArgumentList = @()
-    )
-
-    $compatSession = Get-PSSession -Name 'WinPSCompatSession' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-
-    if ($compatSession) {
-        return Invoke-Command -Session $compatSession -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
-    }
-
-    return & $ScriptBlock @ArgumentList
-}
-
-function Get-FirstPropertyValue {
-    param(
-        [Parameter(Mandatory = $true)]
-        $InputObject,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$PropertyNames
-    )
-
-    foreach ($propertyName in $PropertyNames) {
-        $property = $InputObject.PSObject.Properties[$propertyName]
-        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-            return [string]$property.Value
-        }
-    }
-
-    return $null
-}
-
 function Get-BatchVms {
     param(
         [Parameter(Mandatory = $true)]

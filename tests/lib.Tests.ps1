@@ -37,3 +37,93 @@ Describe 'Resolve-OperatingSystemMapping' {
         Resolve-OperatingSystemMapping -OperatingSystem 'CentOS Linux 7' -OperatingSystemMap $null | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Get-FirstPropertyValue' {
+    It 'returns the value of the first matching property' {
+        $obj = [PSCustomObject]@{ OperatingSystem = 'Windows Server 2022'; OS = 'Win' }
+        Get-FirstPropertyValue -InputObject $obj -PropertyNames @('OperatingSystem', 'OS') | Should -Be 'Windows Server 2022'
+    }
+
+    It 'falls back to the second property when the first is absent or empty' {
+        $obj = [PSCustomObject]@{ OperatingSystem = ''; OS = 'Linux' }
+        Get-FirstPropertyValue -InputObject $obj -PropertyNames @('OperatingSystem', 'OS') | Should -Be 'Linux'
+    }
+
+    It 'returns null when no matching property has a value' {
+        $obj = [PSCustomObject]@{ Name = 'VM1' }
+        Get-FirstPropertyValue -InputObject $obj -PropertyNames @('OperatingSystem', 'OS') | Should -BeNullOrEmpty
+    }
+
+    It 'returns null when all candidate properties are whitespace' {
+        $obj = [PSCustomObject]@{ OperatingSystem = '   '; OS = '  ' }
+        Get-FirstPropertyValue -InputObject $obj -PropertyNames @('OperatingSystem', 'OS') | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Get-OsGeneration' {
+    It 'returns the correct year for each supported OS generation' {
+        Get-OsGeneration -OperatingSystem 'Windows Server 2003 R2'      | Should -Be 2003
+        Get-OsGeneration -OperatingSystem 'Windows Server 2008 R2 SP1'  | Should -Be 2008
+        Get-OsGeneration -OperatingSystem 'Windows Server 2012 R2'      | Should -Be 2012
+        Get-OsGeneration -OperatingSystem 'Windows Server 2016'         | Should -Be 2016
+        Get-OsGeneration -OperatingSystem 'Windows Server 2019'         | Should -Be 2019
+        Get-OsGeneration -OperatingSystem 'Windows Server 2022'         | Should -Be 2022
+        Get-OsGeneration -OperatingSystem 'Windows Server 2025'         | Should -Be 2025
+    }
+
+    It 'returns null for unrecognized or missing OS strings' {
+        Get-OsGeneration -OperatingSystem 'Red Hat Enterprise Linux 8' | Should -BeNullOrEmpty
+        Get-OsGeneration -OperatingSystem ''                           | Should -BeNullOrEmpty
+        Get-OsGeneration -OperatingSystem $null                        | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Get-VMUptime' {
+    It 'returns one entry per mocked VM with correct uptime format' {
+        $fakeBootTime = (Get-Date).AddDays(-3).AddHours(-2).AddMinutes(-15)
+
+        $fakeGuest = [PSCustomObject]@{
+            ToolsStatus  = 'toolsOk'
+            BootTime     = $fakeBootTime
+            GuestFullName = 'Windows Server 2019'
+        }
+
+        $fakeVm = [PSCustomObject]@{
+            Name         = 'TESTVM01'
+            PowerState   = 'PoweredOn'
+            ExtensionData = [PSCustomObject]@{
+                Guest   = $fakeGuest
+                Runtime = [PSCustomObject]@{ BootTime = $fakeBootTime }
+            }
+        }
+
+        Mock -CommandName 'VMware.VimAutomation.Core\Get-VM' -MockWith { @($fakeVm) }
+
+        $result = Get-VMUptime
+        $result | Should -HaveCount 1
+        $result[0].VMName  | Should -Be 'TESTVM01'
+        $result[0].Uptime  | Should -Match '^\d+ days, \d+ hours, \d+ minutes$'
+    }
+
+    It 'reports Unavailable when boot time cannot be determined' {
+        $fakeGuest = [PSCustomObject]@{
+            ToolsStatus   = 'toolsNotInstalled'
+            BootTime      = $null
+            GuestFullName = 'Linux'
+        }
+
+        $fakeVm = [PSCustomObject]@{
+            Name         = 'LINUXVM01'
+            PowerState   = 'PoweredOn'
+            ExtensionData = [PSCustomObject]@{
+                Guest   = $fakeGuest
+                Runtime = [PSCustomObject]@{ BootTime = $null }
+            }
+        }
+
+        Mock -CommandName 'VMware.VimAutomation.Core\Get-VM' -MockWith { @($fakeVm) }
+
+        $result = Get-VMUptime
+        $result[0].Uptime | Should -Be 'Unavailable'
+    }
+}
