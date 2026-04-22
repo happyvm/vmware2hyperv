@@ -117,6 +117,14 @@ function Import-RequiredModule {
         @($Name)
     }
 
+    foreach ($candidateName in $candidateNames) {
+        $loadedModule = Get-Module -Name $candidateName -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($loadedModule) {
+            Write-MigrationLog "Module already loaded in current session: $($loadedModule.Name)" -LogFile $LogFile
+            return
+        }
+    }
+
     function Try-ImportModuleCandidate {
         param([string]$CandidateName)
 
