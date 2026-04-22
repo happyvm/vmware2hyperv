@@ -220,6 +220,23 @@ function Get-ActionDisplayText {
     }
 }
 
+function Get-PowerStateDisplayText {
+    param(
+        [Parameter(Mandatory = $true)]
+        $VmItem
+    )
+
+    if (-not $VmItem.VmFound) {
+        return 'VM introuvable'
+    }
+
+    if ($VmItem.Started) {
+        return 'Allumée'
+    }
+
+    return 'Éteinte'
+}
+
 function Start-WinRmRemediationJob {
     param(
         [Parameter(Mandatory = $true)]
@@ -479,6 +496,7 @@ function Show-PendingDashboard {
             ForEach-Object {
                 [pscustomobject]@{
                     'Nom de la VM'                 = $_.VMName
+                    'Power state'                  = Get-PowerStateDisplayText -VmItem $_
                     'OS'                           = if ([string]::IsNullOrWhiteSpace($_.DisplayOperatingSystem)) { 'Inconnu' } else { $_.DisplayOperatingSystem }
                     'Integration services status'  = $_.IntegrationDetails
                     'Actions à mener'              = Get-ActionDisplayText -VmItem $_
@@ -722,23 +740,24 @@ if ($remainingAfterLoop) {
 
 $results = foreach ($vmItem in $vmInventory) {
     [pscustomobject]@{
-        VMName                   = $vmItem.VMName
-        OperatingSystem          = $vmItem.DisplayOperatingSystem
-        OsGeneration             = $vmItem.OsGeneration
-        VmFound                  = $vmItem.VmFound
-        Started                  = $vmItem.Started
-        IntegrationReady         = $vmItem.IntegrationReady
-        IntegrationServicesStatus= $vmItem.IntegrationDetails
-        ActionPlan               = $vmItem.ActionPlan
-        ActionState              = $vmItem.ActionState
-        ActionToTake             = Get-ActionDisplayText -VmItem $vmItem
-        StartError               = $vmItem.StartError
+        VMName                    = $vmItem.VMName
+        PowerState                = Get-PowerStateDisplayText -VmItem $vmItem
+        OperatingSystem           = $vmItem.DisplayOperatingSystem
+        OsGeneration              = $vmItem.OsGeneration
+        VmFound                   = $vmItem.VmFound
+        Started                   = $vmItem.Started
+        IntegrationReady          = $vmItem.IntegrationReady
+        IntegrationServicesStatus = $vmItem.IntegrationDetails
+        ActionPlan                = $vmItem.ActionPlan
+        ActionState               = $vmItem.ActionState
+        ActionToTake              = Get-ActionDisplayText -VmItem $vmItem
+        StartError                = $vmItem.StartError
     }
 }
 
 Write-Information "" -InformationAction Continue
 $results |
-    Select-Object VMName, OperatingSystem, IntegrationServicesStatus, ActionToTake |
+    Select-Object VMName, PowerState, OperatingSystem, IntegrationServicesStatus, ActionToTake |
     Format-Table -AutoSize |
     Out-String -Width 4096 |
     ForEach-Object { Write-Information $_ -InformationAction Continue }
