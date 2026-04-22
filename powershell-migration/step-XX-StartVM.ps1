@@ -232,12 +232,8 @@ if ($Config.RemoteActions.WinRm.Credential) {
     $winRmCredential = $Config.RemoteActions.WinRm.Credential
 }
 
-$results = foreach ($row in $targetRows) {
+$vmInventory = foreach ($row in $targetRows) {
     $vmName = [string]$row.VMName
-    $sourceOs = Get-FirstPropertyValue -InputObject $row -PropertyNames @('OperatingSystem', 'Operating system')
-    $osGeneration = Get-OsGeneration -OperatingSystem $sourceOs
-
-    Write-MigrationLog "[$vmName] Traitement VM (OS source: '$sourceOs')." -LogFile $LogFile
 
     $vmData = Invoke-SCVMMCommand -ScriptBlock {
         param($VmmServerName, $Name)
@@ -266,69 +262,113 @@ $results = foreach ($row in $targetRows) {
     if (-not $vmData.Exists) {
         Write-MigrationLog "[$vmName] VM introuvable dans SCVMM." -Level WARNING -LogFile $LogFile
         [pscustomobject]@{
-            VMName                  = $vmName
-            SourceOperatingSystem   = $sourceOs
-            HyperVConfiguredOS      = $null
-            Started                 = $false
-            WinRM                   = 'N/A'
-            IsoMount                = 'N/A'
-            NextAction              = 'VM non trouvée dans SCVMM'
+            VMName                = $vmName
+            SourceOperatingSystem = $null
+            VmData                = $vmData
+            VmFound               = $false
+            Started               = $false
+            StartError            = $null
         }
         continue
     }
 
-    $started = $vmData.Running
-    if (-not $started) {
-        try {
-            Invoke-SCVMMCommand -ScriptBlock {
-                param($VmmServerName, $Name)
-                $server = Get-SCVMMServer -ComputerName $VmmServerName
-                $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Select-Object -First 1
-                if ($vm) {
-                    Start-SCVirtualMachine -VM $vm -ErrorAction Stop | Out-Null
-                }
-            } -ArgumentList @($Config.SCVMM.Server, $vmName)
-            Start-Sleep -Seconds 5
-            $started = $true
-            Write-MigrationLog "[$vmName] Démarrage demandé dans SCVMM." -Level SUCCESS -LogFile $LogFile
-        } catch {
-            $started = $false
-            Write-MigrationLog "[$vmName] Échec au démarrage: $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "[$vmName] Préparation VM (OS SCVMM: '$($vmData.HypervConfiguredOs)')." -LogFile $LogFile
+
+    [pscustomobject]@{
+        VMName                = $vmName
+        SourceOperatingSystem = [string]$vmData.HypervConfiguredOs
+        ScvmmOperatingSystem  = [string]$vmData.HypervConfiguredOs
+        VmData                = $vmData
+        VmFound               = $true
+        Started               = [bool]$vmData.Running
+        StartError            = $null
+    }
+}
+
+Write-MigrationLog "Démarrage du lotissement: $($vmInventory.Count) VM(s) ciblée(s)." -LogFile $LogFile
+
+foreach ($vmItem in @($vmInventory | Where-Object { $_.VmFound -and -not $_.Started })) {
+    try {
+        Invoke-SCVMMCommand -ScriptBlock {
+            param($VmmServerName, $Name)
+            $server = Get-SCVMMServer -ComputerName $VmmServerName
+            $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Select-Object -First 1
+            if ($vm) {
+                Start-SCVirtualMachine -VM $vm -ErrorAction Stop | Out-Null
+            }
+        } -ArgumentList @($Config.SCVMM.Server, $vmItem.VMName)
+        $vmItem.Started = $true
+        Write-MigrationLog "[$($vmItem.VMName)] Démarrage demandé dans SCVMM." -Level SUCCESS -LogFile $LogFile
+    } catch {
+        $vmItem.Started = $false
+        $vmItem.StartError = $_.Exception.Message
+        Write-MigrationLog "[$($vmItem.VMName)] Échec au démarrage: $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
+    }
+}
+
+if (@($vmInventory | Where-Object { $_.VmFound -and $_.Started }).Count -gt 0) {
+    Start-Sleep -Seconds 5
+}
+
+$results = foreach ($vmItem in $vmInventory) {
+    $vmName = $vmItem.VMName
+    $sourceOs = [string]$vmItem.SourceOperatingSystem
+    $scvmmOs = [string]$vmItem.ScvmmOperatingSystem
+
+    if (-not $vmItem.VmFound) {
+        [pscustomobject]@{
+            VMName                = $vmName
+            SourceOperatingSystem = $sourceOs
+            EffectiveOperatingSystem = $scvmmOs
+            OsGeneration          = $null
+            HyperVConfiguredOS    = $null
+            Started               = $false
+            IntegrationReady      = $false
+            IntegrationDetails    = 'VM non trouvée'
+            WinRM                 = 'N/A'
+            IsoMount              = 'N/A'
+            NextAction            = 'VM non trouvée dans SCVMM'
         }
-    } else {
+        continue
+    }
+
+    $started = [bool]$vmItem.Started
+    if ($started -and -not [string]::IsNullOrWhiteSpace($vmItem.StartError)) {
+        Write-MigrationLog "[$vmName] Démarrage précédemment en erreur puis repris." -Level WARNING -LogFile $LogFile
+    } elseif (-not $started -and -not [string]::IsNullOrWhiteSpace($vmItem.StartError)) {
+        Write-MigrationLog "[$vmName] Poursuite malgré échec de démarrage: $($vmItem.StartError)" -Level WARNING -LogFile $LogFile
+    } elseif ($started -and $vmItem.VmData.Running) {
         Write-MigrationLog "[$vmName] VM déjà démarrée." -LogFile $LogFile
     }
 
+    $vmData = $vmItem.VmData
+    $effectiveOs = [string]$vmData.HypervConfiguredOs
+    $osGeneration = Get-OsGeneration -OperatingSystem $effectiveOs
     $isoMountStatus = 'N/A'
     $winRmStatus = 'N/A'
     $nextAction = 'Aucune'
     $integrationReady = $false
     $integrationDetails = 'Non vérifié'
 
-    if ($osGeneration -and $osGeneration -lt 2012) {
-        $isoPath = $null
-        if ($osGeneration -eq 2003) {
-            $isoPath = [string]$Config.IntegrationServices.IsoByOsFamily.'2003'
-        } elseif ($osGeneration -eq 2008) {
-            $isoPath = [string]$Config.IntegrationServices.IsoByOsFamily.'2008'
-        }
-
-        $isoMountStatus = Mount-IntegrationIso -ServerName $Config.SCVMM.Server -VMName $vmName -IsoPath $isoPath
-        $nextAction = 'OS < 2012 : faire à la main Integration Services + remove hidden devices + remove VMware Tools'
+    if (-not $osGeneration) {
+        $nextAction = 'OS unknown : merci de faire à la main'
     }
-    elseif ($osGeneration -and $osGeneration -ge 2012) {
+    elseif ($osGeneration -eq 2003 -or $osGeneration -eq 2008) {
+        $nextAction = "OS $osGeneration : merci de faire à la main"
+    }
+    elseif ($osGeneration -ge 2012) {
         $scriptLocalPath = [string]$Config.RemoteActions.WinRm.RemoveVmwareToolsScriptLocalPath
         $scriptRemotePath = [string]$Config.RemoteActions.WinRm.RemoveVmwareToolsScriptRemotePath
         $winRmStatus = Invoke-RemoteVmwareToolsRemoval -ComputerName $vmName -LocalScriptPath $scriptLocalPath -RemoteScriptPath $scriptRemotePath -Credential $winRmCredential
 
         if ($winRmStatus -like 'Success-*') {
-            $nextAction = 'VMware Tools removal lancé à distance'
+            $nextAction = "OS $osGeneration : WinRM $($winRmStatus.Replace('Success-', '')) OK"
         } else {
-            $nextAction = 'WinRM indisponible/KO : actions manuelles (Integration Services si nécessaire, remove hidden devices, remove VMware Tools)'
+            $nextAction = "OS $osGeneration : WinRM HTTPS/HTTP KO, merci de faire à la main"
         }
     }
     else {
-        $nextAction = 'OS non identifié : vérifier manuellement Integration Services / VMware Tools'
+        $nextAction = "OS $osGeneration : merci de faire à la main"
     }
 
     for ($iteration = 1; $iteration -le $IntegrationMaxIterations; $iteration++) {
@@ -359,6 +399,8 @@ $results = foreach ($row in $targetRows) {
     [pscustomobject]@{
         VMName                = $vmName
         SourceOperatingSystem = $sourceOs
+        EffectiveOperatingSystem = $effectiveOs
+        OsGeneration          = $osGeneration
         HyperVConfiguredOS    = $vmData.HypervConfiguredOs
         Started               = [bool]$started
         IntegrationReady      = [bool]$integrationReady
@@ -370,7 +412,7 @@ $results = foreach ($row in $targetRows) {
 }
 
 Write-Information "" -InformationAction Continue
-$results | Format-Table -AutoSize VMName, Started, IntegrationReady, SourceOperatingSystem, HyperVConfiguredOS, WinRM, IsoMount, NextAction |
+$results | Format-Table -AutoSize VMName, Started, IntegrationReady, SourceOperatingSystem, EffectiveOperatingSystem, OsGeneration, HyperVConfiguredOS, WinRM, IsoMount, NextAction |
     Out-String -Width 4096 |
     ForEach-Object { Write-Information $_ -InformationAction Continue }
 
