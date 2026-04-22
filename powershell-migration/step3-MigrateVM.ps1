@@ -336,7 +336,8 @@ function Invoke-SCVMMNetworkAndPostConfig {
             param(
                 $CurrentVm,
                 $CurrentServer,
-                [string]$CurrentVmName
+                [string]$CurrentVmName,
+                [switch]$AllowGlobalFallback
             )
 
             $adapters = @()
@@ -347,6 +348,11 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 return $adapters
             }
 
+            if (-not $AllowGlobalFallback) {
+                return @()
+            }
+
+            Write-Verbose "[$CurrentVmName] Debug fallback enabled: enumerating all SCVMM virtual network adapters on '$($CurrentServer.Name)'."
             $allAdapters = @(Get-SCVirtualNetworkAdapter -VMMServer $CurrentServer)
             if (-not $allAdapters) {
                 return @()
@@ -364,24 +370,29 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
 
         $networkAdapters = @()
+        $allowGlobalAdapterFallback = ($DebugPreference -ne [System.Management.Automation.ActionPreference]::SilentlyContinue)
         for ($attempt = 1; $attempt -le $adapterRetryCount; $attempt++) {
             $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
             if (-not $vm) {
                 throw "VM '$Name' no longer available in SCVMM while waiting for the virtual network adapter."
             }
 
-            $networkAdapters = @(Get-ScvmmNetworkAdapters -CurrentVm $vm -CurrentServer $server -CurrentVmName $Name)
+            $networkAdapters = @(Get-ScvmmNetworkAdapters -CurrentVm $vm -CurrentServer $server -CurrentVmName $Name -AllowGlobalFallback:$allowGlobalAdapterFallback)
             if ($networkAdapters.Count -gt 0) {
                 break
             }
 
-            $vmStatusText = @(
-                [string]$vm.Status,
-                [string]$vm.StatusString,
-                [string]$vm.MostRecentTaskUIState
-            ) -join ' '
-            if ($refreshVirtualMachineCommand -and $vmStatusText -match 'incomplete|creating|update|refresh') {
+            if ($refreshVirtualMachineCommand) {
                 & $refreshVirtualMachineCommand -VM $vm | Out-Null
+                $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
+                if (-not $vm) {
+                    throw "VM '$Name' no longer available in SCVMM after refresh while waiting for the virtual network adapter."
+                }
+
+                $networkAdapters = @(Get-ScvmmNetworkAdapters -CurrentVm $vm -CurrentServer $server -CurrentVmName $Name -AllowGlobalFallback:$allowGlobalAdapterFallback)
+                if ($networkAdapters.Count -gt 0) {
+                    break
+                }
             }
 
             Start-Sleep -Seconds $adapterRetryDelaySeconds
