@@ -198,12 +198,20 @@ function Import-RequiredModule {
 function Ensure-RsatHyperVInstalled {
     param([string]$LogFile)
 
+    if ($global:Vmware2HyperV_RsatHyperVValidated) {
+        Write-MigrationLog "Hyper-V RSAT/module availability already validated in current worker session; skipping repeated check." -LogFile $LogFile
+        return
+    }
+
     if ($IsLinux -or $IsMacOS) {
         Write-MigrationLog "RSAT Hyper-V check skipped on non-Windows host." -Level WARNING -LogFile $LogFile
+        $global:Vmware2HyperV_RsatHyperVValidated = $true
         return
     }
 
     if (Get-Module -ListAvailable -Name "Hyper-V") {
+        $global:Vmware2HyperV_RsatHyperVValidated = $true
+        Write-MigrationLog "Hyper-V PowerShell module already available; caching validation result for current worker session." -LogFile $LogFile
         return
     }
 
@@ -235,6 +243,9 @@ function Ensure-RsatHyperVInstalled {
         Write-MigrationLog $message -Level ERROR -LogFile $LogFile
         throw $message
     }
+
+    $global:Vmware2HyperV_RsatHyperVValidated = $true
+    Write-MigrationLog "Hyper-V RSAT/module availability validated and cached for current worker session." -Level SUCCESS -LogFile $LogFile
 }
 
 # ---------------------------------------------------------------------------
