@@ -1,6 +1,7 @@
 param (
     [string]$ConfigFile,
     [string]$CsvFile,
+    [string]$ExtractIpCsvFile,
     [string]$Tag,
     [int]$PollIntervalSeconds = 60,
     [int]$MaxIterations = 0,
@@ -14,6 +15,15 @@ Assert-PathPresent -Path $ConfigFile -Label "Configuration file"
 $Config = Import-PowerShellDataFile $ConfigFile
 if (-not $CsvFile) { $CsvFile = $Config.Paths.CsvFile }
 Assert-PathPresent -Path $CsvFile -Label "Batch CSV"
+if (-not $ExtractIpCsvFile) {
+    if ($Config.Paths.ExtractIpCsv) {
+        $ExtractIpCsvFile = [string]$Config.Paths.ExtractIpCsv
+    } else {
+        $batchFolder = Split-Path -Path $CsvFile -Parent
+        $ExtractIpCsvFile = Join-Path -Path $batchFolder -ChildPath "extract-ip.csv"
+    }
+}
+Assert-PathPresent -Path $ExtractIpCsvFile -Label "Extract IP CSV"
 
 if (-not $LogFile) {
     $batchLabel = if ([string]::IsNullOrWhiteSpace($Tag)) { 'all' } else { $Tag }
@@ -64,6 +74,9 @@ function Get-BatchVms {
         [Parameter(Mandatory = $true)]
         [string]$Path,
 
+        [Parameter(Mandatory = $true)]
+        [hashtable]$ExpectedIpMap,
+
         [string]$BatchTag
     )
 
@@ -75,18 +88,48 @@ function Get-BatchVms {
     }
 
     $vmRows = foreach ($row in $filteredRows) {
-        $expectedIp = Get-FirstPropertyValue -InputObject $row -PropertyNames @(
-            'ExpectedIP', 'ExpectedIp', 'IPAttendue', 'TargetIP', 'TargetIp', 'IP', 'IPAddress', 'IpAddress'
-        )
+        $vmName = [string]$row.VMName
+        $lookupKey = $vmName.ToLowerInvariant()
+        $expectedIp = $null
+        if ($ExpectedIpMap.ContainsKey($lookupKey)) {
+            $expectedIp = [string]$ExpectedIpMap[$lookupKey]
+        }
 
         [pscustomobject]@{
-            VMName     = [string]$row.VMName
+            VMName     = $vmName
             ExpectedIP = $expectedIp
             BatchTag   = [string]$row.Tag
         }
     }
 
     return @($vmRows | Sort-Object -Property VMName -Unique)
+}
+
+function Get-ExpectedIpMap {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $rows = Import-Csv -Path $Path -Delimiter ";"
+    $map = @{}
+
+    foreach ($row in $rows) {
+        $vmName = Get-FirstPropertyValue -InputObject $row -PropertyNames @(
+            'VMName', 'VmName', 'Name', 'NomVM'
+        )
+        $ip = Get-FirstPropertyValue -InputObject $row -PropertyNames @(
+            'ExpectedIP', 'ExpectedIp', 'IPAttendue', 'TargetIP', 'TargetIp', 'IP', 'IPAddress', 'IpAddress'
+        )
+
+        if ([string]::IsNullOrWhiteSpace($vmName) -or [string]::IsNullOrWhiteSpace($ip)) {
+            continue
+        }
+
+        $map[$vmName.ToLowerInvariant()] = $ip
+    }
+
+    return $map
 }
 
 function Test-SCVMMVmHealth {
@@ -201,24 +244,30 @@ function Test-SCVMMVmHealth {
     } -ArgumentList @($ServerName, $VMName, $ExpectedIP, $ExpectedBackupTag)
 }
 
-$batchVms = Get-BatchVms -Path $CsvFile -BatchTag $Tag
+$expectedIpMap = Get-ExpectedIpMap -Path $ExtractIpCsvFile
+$batchVms = Get-BatchVms -Path $CsvFile -ExpectedIpMap $expectedIpMap -BatchTag $Tag
 if (-not $batchVms) {
     $target = if ([string]::IsNullOrWhiteSpace($Tag)) { 'all rows' } else { "tag '$Tag'" }
     Write-MigrationLog "No VM found in CSV for $target." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
+$missingExpectedIp = @($batchVms | Where-Object { [string]::IsNullOrWhiteSpace($_.ExpectedIP) })
+if ($missingExpectedIp) {
+    Write-MigrationLog "$($missingExpectedIp.Count) VM(s) from lotissement CSV have no matching IP in '$ExtractIpCsvFile'." -Level WARNING -LogFile $LogFile
+}
+
 Write-MigrationLog "Starting post-migration checks for $($batchVms.Count) VMs (tag filter: '$Tag')." -LogFile $LogFile
 Write-MigrationLog "Loop settings: PollIntervalSeconds=$PollIntervalSeconds; MaxIterations=$MaxIterations (0=infinite)." -LogFile $LogFile
 
 $iteration = 0
-$allHealthy = $false
+$pendingVms = @($batchVms)
 
-while (-not $allHealthy) {
+while ($pendingVms.Count -gt 0) {
     $iteration++
-    Write-MigrationLog "----- Validation iteration #$iteration -----" -LogFile $LogFile
+    Write-MigrationLog "----- Validation iteration #$iteration (pending: $($pendingVms.Count)) -----" -LogFile $LogFile
 
-    $results = foreach ($vmRow in $batchVms) {
+    $results = foreach ($vmRow in $pendingVms) {
         Test-SCVMMVmHealth -ServerName $Config.SCVMM.Server -VMName $vmRow.VMName -ExpectedIP $vmRow.ExpectedIP -ExpectedBackupTag $Config.Tags.BackupTag
     }
 
@@ -237,9 +286,11 @@ while (-not $allHealthy) {
     })
 
     if (-not $failed) {
-        $allHealthy = $true
         break
     }
+
+    $pendingNames = @($failed | ForEach-Object { $_.VMName })
+    $pendingVms = @($pendingVms | Where-Object { $pendingNames -contains $_.VMName })
 
     Write-MigrationLog "Iteration #$iteration => $($failed.Count) VM(s) still not compliant." -Level WARNING -LogFile $LogFile
     foreach ($entry in $failed) {
