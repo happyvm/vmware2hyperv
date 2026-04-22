@@ -144,6 +144,7 @@ Run this script in parallel with `run-migration.ps1` (or just after) to loop unt
 - VM exists and is running
 - NIC is connected
 - Integration Services appear healthy
+- High Availability is enabled in SCVMM
 - SCVMM backup tag is present (`Tags.BackupTag`)
 - guest IPv4 still matches the expected IP from CSV (`ExpectedIP` / `IP` / `IPAddress` columns)
 

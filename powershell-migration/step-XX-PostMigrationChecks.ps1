@@ -158,6 +158,7 @@ function Test-SCVMMVmHealth {
                 Running                  = $false
                 NetworkConnected         = $false
                 IntegrationServicesReady = $false
+                HighAvailabilityEnabled  = $false
                 BackupTagPresent         = $false
                 IPMatches                = $false
                 CurrentIPs               = @()
@@ -214,6 +215,8 @@ function Test-SCVMMVmHealth {
             }
         }
 
+        $highAvailabilityEnabled = [bool]$vm.IsHighlyAvailable
+
         $currentTag = [string]$vm.Tag
         $backupTagPresent = if ([string]::IsNullOrWhiteSpace($BackupTag)) {
             $true
@@ -226,6 +229,7 @@ function Test-SCVMMVmHealth {
         if (-not $running) { $issues += 'VM non démarrée' }
         if (-not $networkConnected) { $issues += 'NIC non connectée' }
         if (-not $integrationReady) { $issues += 'Integration Services non OK' }
+        if (-not $highAvailabilityEnabled) { $issues += 'High Availability non activée' }
         if (-not $backupTagPresent) { $issues += "Tag backup absent ($BackupTag)" }
         if (-not $ipMatches) { $issues += "IP attendue '$IpExpected' absente" }
 
@@ -235,6 +239,7 @@ function Test-SCVMMVmHealth {
             Running                  = [bool]$running
             NetworkConnected         = [bool]$networkConnected
             IntegrationServicesReady = [bool]$integrationReady
+            HighAvailabilityEnabled  = [bool]$highAvailabilityEnabled
             BackupTagPresent         = [bool]$backupTagPresent
             IPMatches                = [bool]$ipMatches
             CurrentIPs               = @($allIps)
@@ -273,7 +278,7 @@ while ($pendingVms.Count -gt 0) {
 
     $results |
         Sort-Object -Property VMName |
-        Format-Table -AutoSize VMName, ExistsInSCVMM, Running, NetworkConnected, IntegrationServicesReady, BackupTagPresent, IPMatches, Details |
+        Format-Table -AutoSize VMName, ExistsInSCVMM, Running, NetworkConnected, IntegrationServicesReady, HighAvailabilityEnabled, BackupTagPresent, IPMatches, Details |
         Out-String |
         ForEach-Object {
             if (-not [string]::IsNullOrWhiteSpace($_.Trim())) {
@@ -282,7 +287,7 @@ while ($pendingVms.Count -gt 0) {
         }
 
     $failed = @($results | Where-Object {
-        -not ($_.ExistsInSCVMM -and $_.Running -and $_.NetworkConnected -and $_.IntegrationServicesReady -and $_.BackupTagPresent -and $_.IPMatches)
+        -not ($_.ExistsInSCVMM -and $_.Running -and $_.NetworkConnected -and $_.IntegrationServicesReady -and $_.HighAvailabilityEnabled -and $_.BackupTagPresent -and $_.IPMatches)
     })
 
     if (-not $failed) {
