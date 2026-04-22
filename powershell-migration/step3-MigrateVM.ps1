@@ -463,8 +463,12 @@ function Invoke-SCVMMNetworkAndPostConfig {
 
         $mappedAdapters = 0
         $fallbackMappedAdapters = 0
-        foreach ($networkAdapter in $networkAdapters) {
+        $indexedFallbackMappedAdapters = 0
+        $staticMacAppliedAdapters = 0
+        for ($adapterIndex = 0; $adapterIndex -lt $networkAdapters.Count; $adapterIndex++) {
+            $networkAdapter = $networkAdapters[$adapterIndex]
             $desiredMapping = $null
+            $selectedSourceAdapter = $null
             $adapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddressString)
             if (-not $adapterMac) {
                 $adapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddress)
@@ -476,12 +480,35 @@ function Invoke-SCVMMNetworkAndPostConfig {
                     Select-Object -First 1
                 if ($sourceAdapter -and $networkMappingsByVlan.ContainsKey([string]$sourceAdapter.VlanId)) {
                     $desiredMapping = $networkMappingsByVlan[[string]$sourceAdapter.VlanId]
+                    $selectedSourceAdapter = $sourceAdapter
                 } elseif (
                     $sourceAdapter -and
                     -not [string]::IsNullOrWhiteSpace([string]$sourceAdapter.NetworkName) -and
                     $networkMappingsBySourceNetworkName.ContainsKey([string]$sourceAdapter.NetworkName)
                 ) {
                     $desiredMapping = $networkMappingsBySourceNetworkName[[string]$sourceAdapter.NetworkName]
+                    $selectedSourceAdapter = $sourceAdapter
+                }
+            }
+
+            if (-not $desiredMapping) {
+                # Secondary fallback for multi-NIC VMs: try source adapter mapping by adapter index.
+                # This keeps NIC#2 aligned to VLAN#2 when MAC addresses differ between VMware and Hyper-V.
+                if ($adapterMappings.Count -gt $adapterIndex) {
+                    $sourceAdapterByIndex = $adapterMappings[$adapterIndex]
+                    if ($sourceAdapterByIndex -and $networkMappingsByVlan.ContainsKey([string]$sourceAdapterByIndex.VlanId)) {
+                        $desiredMapping = $networkMappingsByVlan[[string]$sourceAdapterByIndex.VlanId]
+                        $selectedSourceAdapter = $sourceAdapterByIndex
+                        $indexedFallbackMappedAdapters++
+                    } elseif (
+                        $sourceAdapterByIndex -and
+                        -not [string]::IsNullOrWhiteSpace([string]$sourceAdapterByIndex.NetworkName) -and
+                        $networkMappingsBySourceNetworkName.ContainsKey([string]$sourceAdapterByIndex.NetworkName)
+                    ) {
+                        $desiredMapping = $networkMappingsBySourceNetworkName[[string]$sourceAdapterByIndex.NetworkName]
+                        $selectedSourceAdapter = $sourceAdapterByIndex
+                        $indexedFallbackMappedAdapters++
+                    }
                 }
             }
 
@@ -492,7 +519,31 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 $fallbackMappedAdapters++
             }
 
-            Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $desiredMapping.VMNetwork -VMSubnet $desiredMapping.VMSubnet -VLanEnabled $true -VLanID $desiredMapping.Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
+            $setAdapterParameters = @{
+                VirtualNetworkAdapter = $networkAdapter
+                VMNetwork             = $desiredMapping.VMNetwork
+                VMSubnet              = $desiredMapping.VMSubnet
+                VLanEnabled           = $true
+                VLanID                = $desiredMapping.Vlan
+                VirtualNetwork        = $LogicalSwitch
+                IPv4AddressType       = 'Dynamic'
+                IPv6AddressType       = 'Dynamic'
+                PortClassification    = $portClass
+            }
+
+            $sourceMacNormalized = Normalize-MacAddress -Value ([string]$selectedSourceAdapter.MacAddress)
+            if (-not [string]::IsNullOrWhiteSpace($sourceMacNormalized)) {
+                $setAdapterCommand = Get-Command -Name 'Set-SCVirtualNetworkAdapter' -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($setAdapterCommand -and
+                    $setAdapterCommand.Parameters.ContainsKey('MACAddressType') -and
+                    $setAdapterCommand.Parameters.ContainsKey('MACAddress')) {
+                    $setAdapterParameters['MACAddressType'] = 'Static'
+                    $setAdapterParameters['MACAddress'] = $sourceMacNormalized
+                    $staticMacAppliedAdapters++
+                }
+            }
+
+            Set-SCVirtualNetworkAdapter @setAdapterParameters | Out-Null
             $mappedAdapters++
         }
 
@@ -501,9 +552,11 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
 
         [pscustomobject]@{
-            AdapterCount         = $networkAdapters.Count
-            MappedAdapterCount   = $mappedAdapters
-            FallbackAdapterCount = $fallbackMappedAdapters
+            AdapterCount              = $networkAdapters.Count
+            MappedAdapterCount        = $mappedAdapters
+            FallbackAdapterCount      = $fallbackMappedAdapters
+            IndexedFallbackCount      = $indexedFallbackMappedAdapters
+            StaticMacAppliedCount     = $staticMacAppliedAdapters
         }
 
         $setVmParameters = @{
@@ -542,8 +595,16 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
     }
 
+    if ($networkResult -and $networkResult.IndexedFallbackCount -gt 0) {
+        Write-MigrationLog "[$Name] $($networkResult.IndexedFallbackCount) adapter(s) were matched by adapter order fallback (multi-NIC MAC mismatch between source and target)." -Level WARNING -LogFile $LogFile
+    }
+
     if ($networkResult -and $networkResult.FallbackAdapterCount -gt 0) {
         Write-MigrationLog "[$Name] $($networkResult.FallbackAdapterCount)/$($networkResult.AdapterCount) adapter(s) had no exact MAC/source-network VLAN match and were kept connected on default VLAN $Vlan." -Level WARNING -LogFile $LogFile
+    }
+
+    if ($networkResult -and $networkResult.StaticMacAppliedCount -gt 0) {
+        Write-MigrationLog "[$Name] Static MAC reapplied from VMware mapping on $($networkResult.StaticMacAppliedCount)/$($networkResult.AdapterCount) adapter(s)." -LogFile $LogFile
     }
 
     Write-MigrationLog "[$Name] Network configured (default VLAN $Vlan, multi-adapter mapping enabled)." -Level SUCCESS -LogFile $LogFile
