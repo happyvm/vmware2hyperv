@@ -115,6 +115,17 @@ function Resolve-AdapterVlanId {
 
     $distributedPortGroups = @(Get-VDPortgroup -Name $networkName -ErrorAction SilentlyContinue)
     foreach ($distributedPortGroup in $distributedPortGroups) {
+        # Prefer direct integer property on the DVS VLAN spec (avoids string-parsing ambiguity)
+        try {
+            $vlanSpec = $distributedPortGroup.ExtensionData.Config.DefaultPortConfig.Vlan
+            if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
+                $rawId = [int]$vlanSpec.VlanId
+                if ($rawId -ge 1 -and $rawId -le 4094) {
+                    return [string]$rawId
+                }
+            }
+        } catch { }
+
         if ([string]$distributedPortGroup.VlanConfiguration -match '\d+') {
             return [string]$matches[0]
         }
@@ -127,12 +138,29 @@ function Resolve-AdapterVlanId {
         }
     }
 
-    $backing = $Adapter.ExtensionData.Backing
+    $backing = $null
+    try { $backing = $Adapter.ExtensionData.Backing } catch { }
     if ($backing -and $backing.PSObject.Properties['Port'] -and $backing.Port -and $backing.Port.PortgroupKey) {
         $portGroupView = Get-View -Id $backing.Port.PortgroupKey -ErrorAction SilentlyContinue
-        if ($portGroupView -and $portGroupView.Config -and [string]$portGroupView.Config.DefaultPortConfig.Vlan -match '\d+') {
-            return [string]$matches[0]
+        if ($portGroupView -and $portGroupView.Config) {
+            try {
+                $vlanSpec = $portGroupView.Config.DefaultPortConfig.Vlan
+                if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
+                    $rawId = [int]$vlanSpec.VlanId
+                    if ($rawId -ge 1 -and $rawId -le 4094) {
+                        return [string]$rawId
+                    }
+                }
+            } catch { }
+            if ([string]$portGroupView.Config.DefaultPortConfig.Vlan -match '\d+') {
+                return [string]$matches[0]
+            }
         }
+    }
+
+    # Last resort: extract VLAN from port group name (e.g. "dvPG-LAN_1816" → "1816")
+    if ($networkName -match '_(\d{1,4})$') {
+        return $matches[1]
     }
 
     return "PortGroup not found"
@@ -197,7 +225,12 @@ foreach ($vmName in $vmNames) {
         if ($networkAdapters) {
             foreach ($networkAdapter in $networkAdapters) {
                 $macAddress = [string]$networkAdapter.MacAddress
-                $vlanIdForAdapter = Resolve-AdapterVlanId -Adapter $networkAdapter
+                $vlanIdForAdapter = "PortGroup not found"
+                try {
+                    $vlanIdForAdapter = Resolve-AdapterVlanId -Adapter $networkAdapter
+                } catch {
+                    Write-MigrationLog "Error resolving VLAN for adapter '$macAddress' on VM '$vmName': $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
+                }
 
                 $adapterMappings += [pscustomobject]@{
                     MacAddress = $macAddress
