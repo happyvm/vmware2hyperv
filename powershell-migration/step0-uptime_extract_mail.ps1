@@ -43,7 +43,7 @@ $HTMLTable += "<table border='1' cellpadding='5' cellspacing='0' style='border-c
 $HTMLTable += "<tr><th>VM Name</th><th>OS</th><th>Boot Time</th><th>Uptime</th></tr>"
 
 foreach ($VM in $Results) {
-    $HTMLTable += "<tr><td>$($VM.VMName)</td><td>$($VM.OS)</td><td>$($VM.BootTime)</td><td>$($VM.Uptime)</td></tr>"
+    $HTMLTable += "<tr><td>$(ConvertTo-HtmlEncoded $VM.VMName)</td><td>$(ConvertTo-HtmlEncoded $VM.OS)</td><td>$($VM.BootTime)</td><td>$($VM.Uptime)</td></tr>"
 }
 
 $HTMLTable += "</table></body></html>"

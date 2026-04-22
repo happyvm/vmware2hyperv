@@ -222,10 +222,23 @@ function Ensure-RsatHyperVInstalled {
         }
     }
 
-    $candidateList = $candidateNames -join ", "
-    $message = "Unable to import module $Name. Tried: $candidateList"
-    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
-    throw $message
+    if (-not (Get-Module -ListAvailable -Name "Hyper-V")) {
+        $message = "Unable to ensure Hyper-V PowerShell module availability after installation attempts."
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+        throw $message
+    }
+}
+
+# ---------------------------------------------------------------------------
+# ConvertTo-HtmlEncoded : HTML-encode a string to prevent injection in mail templates
+# ---------------------------------------------------------------------------
+function ConvertTo-HtmlEncoded {
+    param(
+        [AllowNull()]
+        [string]$Value
+    )
+    if ([string]::IsNullOrEmpty($Value)) { return '' }
+    return [System.Net.WebUtility]::HtmlEncode($Value)
 }
 
 # ---------------------------------------------------------------------------

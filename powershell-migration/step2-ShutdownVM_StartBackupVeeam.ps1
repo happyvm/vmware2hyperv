@@ -131,7 +131,7 @@ if ($vmStates.Count -gt 0) {
 
             if ($elapsedSeconds -ge $timeoutSeconds -and -not $vmStates[$vmName].TimeoutHandled) {
                 Write-MigrationLog "VM $vmName not powered off after ${timeoutSeconds}s — forced power-off." -Level WARNING -LogFile $LogFile
-                VMware.VimAutomation.Core\Stop-VM -VM $vmName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+                VMware.VimAutomation.Core\Stop-VM -VM $vmObj -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
                 $vmStates[$vmName].TimeoutHandled = $true
             }
         }
