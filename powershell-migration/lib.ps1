@@ -221,6 +221,11 @@ function Ensure-RsatHyperVInstalled {
             Write-MigrationLog "Unable to enable Hyper-V PowerShell management feature automatically: $_" -Level WARNING -LogFile $LogFile
         }
     }
+
+    $candidateList = $candidateNames -join ", "
+    $message = "Unable to import module $Name. Tried: $candidateList"
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+    throw $message
 }
 
 # ---------------------------------------------------------------------------
