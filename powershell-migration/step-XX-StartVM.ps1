@@ -234,10 +234,6 @@ if ($Config.RemoteActions.WinRm.Credential) {
 
 $vmInventory = foreach ($row in $targetRows) {
     $vmName = [string]$row.VMName
-    $sourceOs = Get-FirstPropertyValue -InputObject $row -PropertyNames @('OperatingSystem', 'Operating system')
-    $osGeneration = Get-OsGeneration -OperatingSystem $sourceOs
-
-    Write-MigrationLog "[$vmName] Préparation VM (OS source: '$sourceOs')." -LogFile $LogFile
 
     $vmData = Invoke-SCVMMCommand -ScriptBlock {
         param($VmmServerName, $Name)
@@ -267,8 +263,7 @@ $vmInventory = foreach ($row in $targetRows) {
         Write-MigrationLog "[$vmName] VM introuvable dans SCVMM." -Level WARNING -LogFile $LogFile
         [pscustomobject]@{
             VMName                = $vmName
-            SourceOperatingSystem = $sourceOs
-            OsGeneration          = $osGeneration
+            SourceOperatingSystem = $null
             VmData                = $vmData
             VmFound               = $false
             Started               = $false
@@ -277,10 +272,12 @@ $vmInventory = foreach ($row in $targetRows) {
         continue
     }
 
+    Write-MigrationLog "[$vmName] Préparation VM (OS SCVMM: '$($vmData.HypervConfiguredOs)')." -LogFile $LogFile
+
     [pscustomobject]@{
         VMName                = $vmName
-        SourceOperatingSystem = $sourceOs
-        OsGeneration          = $osGeneration
+        SourceOperatingSystem = [string]$vmData.HypervConfiguredOs
+        ScvmmOperatingSystem  = [string]$vmData.HypervConfiguredOs
         VmData                = $vmData
         VmFound               = $true
         Started               = [bool]$vmData.Running
@@ -315,13 +312,15 @@ if (@($vmInventory | Where-Object { $_.VmFound -and $_.Started }).Count -gt 0) {
 
 $results = foreach ($vmItem in $vmInventory) {
     $vmName = $vmItem.VMName
-    $sourceOs = $vmItem.SourceOperatingSystem
-    $osGeneration = $vmItem.OsGeneration
+    $sourceOs = [string]$vmItem.SourceOperatingSystem
+    $scvmmOs = [string]$vmItem.ScvmmOperatingSystem
 
     if (-not $vmItem.VmFound) {
         [pscustomobject]@{
             VMName                = $vmName
             SourceOperatingSystem = $sourceOs
+            EffectiveOperatingSystem = $scvmmOs
+            OsGeneration          = $null
             HyperVConfiguredOS    = $null
             Started               = $false
             IntegrationReady      = $false
@@ -343,6 +342,8 @@ $results = foreach ($vmItem in $vmInventory) {
     }
 
     $vmData = $vmItem.VmData
+    $effectiveOs = [string]$vmData.HypervConfiguredOs
+    $osGeneration = Get-OsGeneration -OperatingSystem $effectiveOs
     $isoMountStatus = 'N/A'
     $winRmStatus = 'N/A'
     $nextAction = 'Aucune'
@@ -398,6 +399,8 @@ $results = foreach ($vmItem in $vmInventory) {
     [pscustomobject]@{
         VMName                = $vmName
         SourceOperatingSystem = $sourceOs
+        EffectiveOperatingSystem = $effectiveOs
+        OsGeneration          = $osGeneration
         HyperVConfiguredOS    = $vmData.HypervConfiguredOs
         Started               = [bool]$started
         IntegrationReady      = [bool]$integrationReady
@@ -409,7 +412,7 @@ $results = foreach ($vmItem in $vmInventory) {
 }
 
 Write-Information "" -InformationAction Continue
-$results | Format-Table -AutoSize VMName, Started, IntegrationReady, SourceOperatingSystem, HyperVConfiguredOS, WinRM, IsoMount, NextAction |
+$results | Format-Table -AutoSize VMName, Started, IntegrationReady, SourceOperatingSystem, EffectiveOperatingSystem, OsGeneration, HyperVConfiguredOS, WinRM, IsoMount, NextAction |
     Out-String -Width 4096 |
     ForEach-Object { Write-Information $_ -InformationAction Continue }
 
