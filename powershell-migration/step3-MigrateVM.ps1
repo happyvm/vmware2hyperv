@@ -7,6 +7,7 @@ param (
 
     [Parameter(Mandatory = $true)]
     [string]$VlanId,
+    [string]$AdapterVlanMapJson,
 
     [string]$OperatingSystem,
     [string]$Remark,
@@ -241,6 +242,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
 
         [Parameter(Mandatory = $true)]
         [string]$Vlan,
+        $AdapterVlanMappings,
 
         [string]$SourceOperatingSystem,
         [string]$SourceRemark,
@@ -251,7 +253,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         [string]$LogFile
     )
 
-    Write-MigrationLog "[$Name] Network configuration (VLAN $Vlan)..." -LogFile $LogFile
+    Write-MigrationLog "[$Name] Network configuration (default VLAN $Vlan)..." -LogFile $LogFile
 
     if ($Vlan -notmatch "^\d+$") {
         Write-MigrationLog "[$Name] Invalid VLAN ID: '$Vlan' — network mapping skipped." -Level WARNING -LogFile $LogFile
@@ -268,26 +270,26 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
     }
 
-    $NetworkMapping = Invoke-SCVMMCommand -ScriptBlock {
-        param($ServerName, $Vlan)
+    $defaultNetworkMapping = Invoke-SCVMMCommand -ScriptBlock {
+        param($ServerName, $CurrentVlan)
         $server = Get-SCVMMServer -ComputerName $ServerName
 
         $matchingVMNetwork = Get-SCVMNetwork -VMMServer $server |
-            Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" } |
+            Where-Object { $_.Name -like "*$CurrentVlan*" -or $_.Description -like "*$CurrentVlan*" } |
             Select-Object -First 1
 
         $matchingVMSubnet = Get-SCVMSubnet -VMMServer $server |
-            Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" } |
+            Where-Object { $_.Name -like "*$CurrentVlan*" -or $_.Description -like "*$CurrentVlan*" } |
             Select-Object -First 1
 
         [pscustomobject]@{
             VMNetworkName = $matchingVMNetwork.Name
-            VMSubnetName  = $matchingVMSubnet.Name
+            VMSubnetName = $matchingVMSubnet.Name
         }
     } -ArgumentList @($ServerName, $Vlan)
 
-    if ([string]::IsNullOrWhiteSpace($NetworkMapping.VMNetworkName) -or [string]::IsNullOrWhiteSpace($NetworkMapping.VMSubnetName)) {
-        Write-MigrationLog "[$Name] No VMNetwork/VMSubnet found for VLAN $Vlan." -Level WARNING -LogFile $LogFile
+    if ([string]::IsNullOrWhiteSpace($defaultNetworkMapping.VMNetworkName) -or [string]::IsNullOrWhiteSpace($defaultNetworkMapping.VMSubnetName)) {
+        Write-MigrationLog "[$Name] No VMNetwork/VMSubnet found for default VLAN $Vlan." -Level WARNING -LogFile $LogFile
         return
     }
 
@@ -315,7 +317,8 @@ function Invoke-SCVMMNetworkAndPostConfig {
             $Vlan,
             $LogicalSwitch,
             $PortClassificationName,
-            $Description
+            $Description,
+            $AdapterVlanMappings
         )
         $server = Get-SCVMMServer -ComputerName $ServerName
         $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
@@ -340,43 +343,53 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $adapterRetryDelaySeconds = 10
         $refreshVirtualMachineCommand = Get-Command -Name 'Read-SCVirtualMachine' -ErrorAction SilentlyContinue | Select-Object -First 1
 
-        function Get-ScvmmNetworkAdapter {
+        function Normalize-MacAddress {
+            param([AllowNull()][string]$Value)
+
+            if ([string]::IsNullOrWhiteSpace($Value)) {
+                return $null
+            }
+
+            return ($Value -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+        }
+
+        function Get-ScvmmNetworkAdapters {
             param(
                 $CurrentVm,
                 $CurrentServer,
                 [string]$CurrentVmName
             )
 
-            $adapter = Get-SCVirtualNetworkAdapter -VM $CurrentVm | Select-Object -First 1
-            if ($adapter) {
-                return $adapter
+            $adapters = @(Get-SCVirtualNetworkAdapter -VM $CurrentVm)
+            if ($adapters) {
+                return $adapters
             }
 
             $allAdapters = @(Get-SCVirtualNetworkAdapter -VMMServer $CurrentServer)
             if (-not $allAdapters) {
-                return $null
+                return @()
             }
 
-            $matchingAdapter = $allAdapters |
+            $matchingAdapters = @($allAdapters |
                 Where-Object {
                     ($_.VM -and $_.VM.ID -eq $CurrentVm.ID) -or
                     ($_.VMId -and $_.VMId -eq $CurrentVm.ID) -or
                     ($_.VMName -and $_.VMName -eq $CurrentVmName) -or
                     ($_.VM -and $_.VM.Name -eq $CurrentVmName)
-                } |
-                Select-Object -First 1
+                })
 
-            return $matchingAdapter
+            return $matchingAdapters
         }
 
+        $networkAdapters = @()
         for ($attempt = 1; $attempt -le $adapterRetryCount; $attempt++) {
             $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
             if (-not $vm) {
                 throw "VM '$Name' no longer available in SCVMM while waiting for the virtual network adapter."
             }
 
-            $networkAdapter = Get-ScvmmNetworkAdapter -CurrentVm $vm -CurrentServer $server -CurrentVmName $Name
-            if ($networkAdapter) {
+            $networkAdapters = @(Get-ScvmmNetworkAdapters -CurrentVm $vm -CurrentServer $server -CurrentVmName $Name)
+            if ($networkAdapters.Count -gt 0) {
                 break
             }
 
@@ -392,11 +405,73 @@ function Invoke-SCVMMNetworkAndPostConfig {
             Start-Sleep -Seconds $adapterRetryDelaySeconds
         }
 
-        if (-not $networkAdapter) {
+        if ($networkAdapters.Count -eq 0) {
             throw "No SCVMM virtual network adapter found for VM '$Name' after waiting $($adapterRetryCount * $adapterRetryDelaySeconds) seconds. SCVMM may still show the VM in an incomplete configuration state; refresh the VM in SCVMM and retry."
         }
 
-        Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $vmNetwork -VMSubnet $vmSubnet -VLanEnabled $true -VLanID $Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
+        $networkMappingsByVlan = @{}
+        $networkMappingsByVlan[$Vlan] = [pscustomobject]@{
+            VMNetwork = $vmNetwork
+            VMSubnet = $vmSubnet
+            Vlan = $Vlan
+        }
+
+        $adapterMappings = @()
+        if ($AdapterVlanMappings) {
+            $adapterMappings = @($AdapterVlanMappings | Where-Object { $_.VlanId -match '^\d+$' })
+        }
+
+        if ($adapterMappings.Count -gt 0) {
+            foreach ($adapterMapping in $adapterMappings) {
+                $mappingVlan = [string]$adapterMapping.VlanId
+                if (-not $networkMappingsByVlan.ContainsKey($mappingVlan)) {
+                    $matchingVMNetwork = Get-SCVMNetwork -VMMServer $server |
+                        Where-Object { $_.Name -like "*$mappingVlan*" -or $_.Description -like "*$mappingVlan*" } |
+                        Select-Object -First 1
+                    $matchingVMSubnet = Get-SCVMSubnet -VMMServer $server |
+                        Where-Object { $_.Name -like "*$mappingVlan*" -or $_.Description -like "*$mappingVlan*" } |
+                        Select-Object -First 1
+
+                    if ($matchingVMNetwork -and $matchingVMSubnet) {
+                        $networkMappingsByVlan[$mappingVlan] = [pscustomobject]@{
+                            VMNetwork = $matchingVMNetwork
+                            VMSubnet = $matchingVMSubnet
+                            Vlan = $mappingVlan
+                        }
+                    }
+                }
+            }
+        }
+
+        $mappedAdapters = 0
+        foreach ($networkAdapter in $networkAdapters) {
+            $desiredMapping = $null
+            $adapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddressString)
+            if (-not $adapterMac) {
+                $adapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddress)
+            }
+
+            if ($adapterMappings.Count -gt 0 -and $adapterMac) {
+                $sourceAdapter = $adapterMappings |
+                    Where-Object { (Normalize-MacAddress -Value ([string]$_.MacAddress)) -eq $adapterMac } |
+                    Select-Object -First 1
+                if ($sourceAdapter -and $networkMappingsByVlan.ContainsKey([string]$sourceAdapter.VlanId)) {
+                    $desiredMapping = $networkMappingsByVlan[[string]$sourceAdapter.VlanId]
+                }
+            }
+
+            if (-not $desiredMapping) {
+                $desiredMapping = $networkMappingsByVlan[$Vlan]
+            }
+
+            Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $desiredMapping.VMNetwork -VMSubnet $desiredMapping.VMSubnet -VLanEnabled $true -VLanID $desiredMapping.Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
+            $mappedAdapters++
+        }
+
+        if ($mappedAdapters -eq 0) {
+            throw "No virtual network adapter could be configured for VM '$Name'."
+        }
+
         $setVmParameters = @{
             VM                             = $vm
             EnableOperatingSystemShutdown  = $true
@@ -414,12 +489,13 @@ function Invoke-SCVMMNetworkAndPostConfig {
             } -ArgumentList @(
         $Name,
         $ServerName,
-        $NetworkMapping.VMNetworkName,
-        $NetworkMapping.VMSubnetName,
+        $defaultNetworkMapping.VMNetworkName,
+        $defaultNetworkMapping.VMSubnetName,
         $Vlan,
         $Config.SCVMM.Network.LogicalSwitchName,
         $Config.SCVMM.Network.PortClassificationName,
-        $SourceRemark
+        $SourceRemark,
+        $AdapterVlanMappings
             )
             break
         } catch {
@@ -432,7 +508,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
     }
 
-    Write-MigrationLog "[$Name] Network configured (VLAN $Vlan, VMNetwork $($NetworkMapping.VMNetworkName))." -Level SUCCESS -LogFile $LogFile
+    Write-MigrationLog "[$Name] Network configured (default VLAN $Vlan, multi-adapter mapping enabled)." -Level SUCCESS -LogFile $LogFile
     Write-MigrationLog "[$Name] Integration Services configured." -LogFile $LogFile
     if (-not [string]::IsNullOrWhiteSpace($SourceRemark)) {
         Write-MigrationLog "[$Name] SCVMM description updated from VMware remark." -LogFile $LogFile
@@ -870,10 +946,23 @@ if ($ForceNetworkConfigOnly) {
     Write-MigrationLog "[$VMName] ForceNetworkConfigOnly enabled: skipping Instant Recovery/finalization and replaying only network/OS/post-configuration actions." -Level WARNING -LogFile $LogFile
 }
 
+$adapterVlanMappings = @()
+if (-not [string]::IsNullOrWhiteSpace($AdapterVlanMapJson)) {
+    try {
+        $parsedMappings = ConvertFrom-Json -InputObject $AdapterVlanMapJson -ErrorAction Stop
+        if ($parsedMappings) {
+            $adapterVlanMappings = @($parsedMappings)
+        }
+    } catch {
+        Write-MigrationLog "[$VMName] Unable to parse adapter VLAN mapping payload. Falling back to default VLAN '$VlanId'. Details: $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
+    }
+}
+
 Invoke-SCVMMNetworkAndPostConfig `
     -Name $VMName `
     -ServerName $VMMServerName `
     -Vlan $VlanId `
+    -AdapterVlanMappings $adapterVlanMappings `
     -SourceOperatingSystem $OperatingSystem `
     -SourceRemark $Remark `
     -Config $Config `
