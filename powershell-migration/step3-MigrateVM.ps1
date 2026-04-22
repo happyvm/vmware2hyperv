@@ -499,7 +499,9 @@ function Invoke-SCVMMNetworkAndPostConfig {
             }
 
             if (-not $desiredMapping) {
-                $desiredMapping = $networkMappingsByVlan[$Vlan]
+                Write-MigrationLog "[$Name] No VLAN mapping found for adapter MAC '$($networkAdapter.MACAddressString)' — disconnecting adapter." -Level WARNING -LogFile $LogFile
+                Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -NoConnection | Out-Null
+                continue
             }
 
             Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $desiredMapping.VMNetwork -VMSubnet $desiredMapping.VMSubnet -VLanEnabled $true -VLanID $desiredMapping.Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
@@ -507,7 +509,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
 
         if ($mappedAdapters -eq 0) {
-            throw "No virtual network adapter could be configured for VM '$Name'."
+            Write-MigrationLog "[$Name] No virtual network adapter could be mapped to a VLAN — all adapters have been disconnected." -Level WARNING -LogFile $LogFile
         }
 
         $setVmParameters = @{

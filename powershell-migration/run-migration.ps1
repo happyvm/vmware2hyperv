@@ -221,7 +221,12 @@ foreach ($vmName in $vmNames) {
     } else {
         $vlanId = "VM not found"
     }
-    Write-MigrationLog "VLAN $vmName : $vlanId" -LogFile $LogFile
+    if ($adapterMappings.Count -gt 0) {
+        $vlanSummary = ($adapterMappings | ForEach-Object { "$($_.VlanId)" }) -join ", "
+        Write-MigrationLog "VLAN $vmName : $vlanSummary" -LogFile $LogFile
+    } else {
+        Write-MigrationLog "VLAN $vmName : $vlanId" -LogFile $LogFile
+    }
     $vmVlans[$vmName] = $vlanId
     $vmAdapterVlans[$vmName] = $adapterMappings
     $vmRemarks[$vmName] = $remark
