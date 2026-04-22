@@ -610,26 +610,52 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 }
             }
 
+            $usedDefaultVlanFallback = $false
             if (-not $desiredMapping) {
                 $desiredMapping = $networkMappingsByVlan[$Vlan]
+                $usedDefaultVlanFallback = $true
                 $fallbackMappedAdapters++
             }
 
-            if ($desiredMapping -and $desiredMapping.Ambiguous) {
+            if ($usedDefaultVlanFallback) {
                 $sourceMacText = if ($selectedSourceAdapter) { [string]$selectedSourceAdapter.MacAddress } else { '<unknown>' }
-                $sourceNetworkText = if ($selectedSourceAdapter) { [string]$selectedSourceAdapter.NetworkName } else { '<default-vlan>' }
+                $sourceNetworkText = if ($selectedSourceAdapter) { [string]$selectedSourceAdapter.NetworkName } else { '<unknown>' }
+                $sourceVlanText = if ($selectedSourceAdapter -and [string]$selectedSourceAdapter.VlanId -match '^\d+$') { [string]$selectedSourceAdapter.VlanId } else { '<unknown>' }
+                $selectedVmNetworkText = [string]$desiredMapping.VMNetwork.Name
+                $reasonText = if ($sourceVlanText -ne '<unknown>') {
+                    "No candidate found for source VLAN '$sourceVlanText'; mapped to default VLAN $Vlan."
+                } else {
+                    "No source adapter information; mapped to default VLAN $Vlan."
+                }
+                [void]$adapterResolutionWarnings.Add(
+                    "[$Name] Adapter #$($adapterIndex + 1) fallback mapping used.`n" +
+                    "SourceMac='$sourceMacText'`n" +
+                    "SourceNetwork='$sourceNetworkText'`n" +
+                    "SourceVlan='$sourceVlanText'`n" +
+                    "Candidates='<none>'`n" +
+                    "Selected='$selectedVmNetworkText' (default VLAN $Vlan)`n" +
+                    "Reason='$reasonText'"
+                )
+            } elseif ($desiredMapping.Ambiguous) {
+                $sourceMacText = if ($selectedSourceAdapter) { [string]$selectedSourceAdapter.MacAddress } else { '<unknown>' }
+                $sourceNetworkText = if ($selectedSourceAdapter) { [string]$selectedSourceAdapter.NetworkName } else { '<unknown>' }
                 $sourceVlanText = if ($selectedSourceAdapter -and $selectedSourceAdapter.VlanId) { [string]$selectedSourceAdapter.VlanId } else { [string]$desiredMapping.Vlan }
                 $candidateNetworksText = if ($desiredMapping.CandidateVMNetworkNames) { $desiredMapping.CandidateVMNetworkNames -join ', ' } else { '<none>' }
-                $candidateSubnetsText = if ($desiredMapping.CandidateVMSubnetNames) { $desiredMapping.CandidateVMSubnetNames -join ', ' } else { '<none>' }
                 $selectedVmNetworkText = [string]$desiredMapping.VMNetwork.Name
-                $selectedVmSubnetText = [string]$desiredMapping.VMSubnet.Name
                 $resolutionReason = switch ([string]$desiredMapping.ResolutionMode) {
                     'source-network-name' { 'Ambiguous source-network-name match; first deterministic candidate selected.' }
                     'vlan' { 'Ambiguous VLAN match; first deterministic candidate selected.' }
                     default { 'Ambiguous default VLAN mapping; first deterministic candidate selected.' }
                 }
-
-                [void]$adapterResolutionWarnings.Add("[$Name] Adapter #$($adapterIndex + 1) ambiguous mapping. SourceMac='$sourceMacText'; SourceNetwork='$sourceNetworkText'; SourceVlan='$sourceVlanText'; SelectedVMNetwork='$selectedVmNetworkText'; SelectedVMSubnet='$selectedVmSubnetText'; CandidateVMNetworks='$candidateNetworksText'; CandidateVMSubnets='$candidateSubnetsText'; Reason='$resolutionReason'")
+                [void]$adapterResolutionWarnings.Add(
+                    "[$Name] Adapter #$($adapterIndex + 1) fallback mapping used.`n" +
+                    "SourceMac='$sourceMacText'`n" +
+                    "SourceNetwork='$sourceNetworkText'`n" +
+                    "SourceVlan='$sourceVlanText'`n" +
+                    "Candidates='$candidateNetworksText'`n" +
+                    "Selected='$selectedVmNetworkText'`n" +
+                    "Reason='$resolutionReason'"
+                )
             }
 
             $setAdapterParameters = @{
