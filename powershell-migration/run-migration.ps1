@@ -116,6 +116,7 @@ Import-RequiredModule -Name "VMware.VimAutomation.Core" -LogFile $LogFile -UseWi
 Connect-VCenter -Server $Config.VCenter.Server -LogFile $LogFile
 
 $vmVlans = @{}
+$vmAdapterVlans = @{}
 $vmOperatingSystems = @{}
 $vmRemarks = @{}
 
@@ -153,20 +154,49 @@ foreach ($row in $vmRows) {
 foreach ($vmName in $vmNames) {
     $VMObject = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
     $remark = $null
+    $adapterMappings = @()
     if ($VMObject) {
         $remark = [string]$VMObject.ExtensionData.Summary.Config.Annotation
-        $NetworkAdapter = Get-NetworkAdapter -VM $VMObject -ErrorAction SilentlyContinue
-        if ($NetworkAdapter -and $NetworkAdapter.NetworkName) {
-            $DVPortGroup = Get-VDPortgroup -Name $NetworkAdapter.NetworkName -ErrorAction SilentlyContinue
-            $vlanId = if ($DVPortGroup -and $DVPortGroup.VlanConfiguration -match "\d+") { $matches[0] } else { "PortGroup not found" }
+        $networkAdapters = @(Get-NetworkAdapter -VM $VMObject -ErrorAction SilentlyContinue)
+        if ($networkAdapters) {
+            foreach ($networkAdapter in $networkAdapters) {
+                $macAddress = [string]$networkAdapter.MacAddress
+                $vlanIdForAdapter = "PortGroup not found"
+
+                if (-not [string]::IsNullOrWhiteSpace([string]$networkAdapter.NetworkName)) {
+                    $DVPortGroup = Get-VDPortgroup -Name $networkAdapter.NetworkName -ErrorAction SilentlyContinue
+                    if ($DVPortGroup -and $DVPortGroup.VlanConfiguration -match "\d+") {
+                        $vlanIdForAdapter = $matches[0]
+                    }
+                } else {
+                    $vlanIdForAdapter = "Not connected to a network"
+                }
+
+                $adapterMappings += [pscustomobject]@{
+                    MacAddress = $macAddress
+                    NetworkName = [string]$networkAdapter.NetworkName
+                    VlanId = [string]$vlanIdForAdapter
+                }
+            }
+
+            $firstNumericVlan = $adapterMappings |
+                Where-Object { $_.VlanId -match '^\d+$' } |
+                Select-Object -First 1 -ExpandProperty VlanId
+
+            if (-not [string]::IsNullOrWhiteSpace($firstNumericVlan)) {
+                $vlanId = $firstNumericVlan
+            } else {
+                $vlanId = [string]($adapterMappings | Select-Object -First 1 -ExpandProperty VlanId)
+            }
         } else {
-            $vlanId = if ($NetworkAdapter) { "Not connected to a network" } else { "No network adapter" }
+            $vlanId = "No network adapter"
         }
     } else {
         $vlanId = "VM not found"
     }
     Write-MigrationLog "VLAN $vmName : $vlanId" -LogFile $LogFile
     $vmVlans[$vmName] = $vlanId
+    $vmAdapterVlans[$vmName] = $adapterMappings
     $vmRemarks[$vmName] = $remark
 }
 
@@ -194,6 +224,7 @@ foreach ($vmName in $vmNames) {
 
     $vmLogFile       = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
     $vlanId          = $vmVlans[$vmName]
+    $adapterVlanMapJson = ConvertTo-Json -InputObject $vmAdapterVlans[$vmName] -Depth 4 -Compress
     $operatingSystem = $vmOperatingSystems[$vmName]
     $remark          = $vmRemarks[$vmName]
 
@@ -205,7 +236,7 @@ foreach ($vmName in $vmNames) {
             Get-ChildItem -Path $using:PSScriptRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
                 Unblock-File -ErrorAction SilentlyContinue
 
-            & "$using:PSScriptRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$using:Tag" -VMName $using:vmName -VlanId $using:vlanId -OperatingSystem $using:operatingSystem -Remark $using:remark -ForceNetworkConfigOnly:$using:ForceNetworkConfigOnly -LogFile $using:vmLogFile
+            & "$using:PSScriptRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$using:Tag" -VMName $using:vmName -VlanId $using:vlanId -AdapterVlanMapJson $using:adapterVlanMapJson -OperatingSystem $using:operatingSystem -Remark $using:remark -ForceNetworkConfigOnly:$using:ForceNetworkConfigOnly -LogFile $using:vmLogFile
         }
 
     if ($step3JobStartupDelaySec -gt 0) {
