@@ -48,6 +48,44 @@ function Get-SCVMMVmInventory {
         Invoke-SCVMMCommand -ScriptBlock {
             param($VmmServerName, $Names)
 
+            function Get-IntegrationStatusSummary {
+                param($Vm)
+
+                $primarySignals = @(
+                    [string]$Vm.IntegrationServicesState,
+                    [string]$Vm.GuestAgentStatus,
+                    [string]$Vm.VMAddition
+                ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+                $secondarySignals = @(
+                    [string]$Vm.HeartbeatStatus
+                ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+                $summary = $null
+                if ($primarySignals) {
+                    $summary = ($primarySignals | Select-Object -Unique) -join ' | '
+                } elseif ($secondarySignals) {
+                    $summary = ($secondarySignals | Select-Object -Unique) -join ' | '
+                }
+
+                if ([string]::IsNullOrWhiteSpace($summary)) {
+                    $summary = 'Not detected'
+                }
+
+                $ready = $false
+                if ($summary -match 'OK|Operational|Up|Ready|Responding|Actif|Fonctionnel|Installed|Enabled|Version') {
+                    $ready = $true
+                }
+                if ($summary -match 'Not.?Detected|Disabled|Stopped|Error|Unknown|Unavailable|N.?A|Inconnu|Arrêté|Missing|Non détecté') {
+                    $ready = $false
+                }
+
+                return [pscustomobject]@{
+                    Ready   = [bool]$ready
+                    Summary = [string]$summary
+                }
+            }
+
             $server = Get-SCVMMServer -ComputerName $VmmServerName
 
             foreach ($name in $Names) {
@@ -75,29 +113,7 @@ function Get-SCVMMVmInventory {
                 ) -join ' '
 
                 $running = $statusRaw -match 'Running|Power.*On|En cours d.?exécution|Démarré'
-
-                $integrationSignals = @(
-                    [string]$vm.HeartbeatStatus,
-                    [string]$vm.HeartbeatEnabled,
-                    [string]$vm.GuestAgentStatus,
-                    [string]$vm.IntegrationServicesState,
-                    [string]$vm.VMAddition,
-                    [string]$vm.VirtualMachineState
-                ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-
-                $integrationText = if ($integrationSignals) {
-                    $integrationSignals -join ' | '
-                } else {
-                    'Signal absent'
-                }
-
-                $integrationReady = $false
-                if ($integrationText -match 'OK|Running|Operational|Up|Ready|Responding|Actif|Fonctionnel') {
-                    $integrationReady = $true
-                }
-                if ($integrationText -match 'Not|Disabled|Stopped|Error|Unknown|Unavailable|N.?A|Inconnu|Arrêté') {
-                    $integrationReady = $false
-                }
+                $integrationStatus = Get-IntegrationStatusSummary -Vm $vm
 
                 [pscustomobject]@{
                     VMName               = $name
@@ -107,8 +123,8 @@ function Get-SCVMMVmInventory {
                     Status               = [string]$vm.Status
                     StatusString         = [string]$vm.StatusString
                     VMHostComputerName   = [string]$vm.VMHost.ComputerName
-                    IntegrationReady     = [bool]$integrationReady
-                    IntegrationDetails   = $integrationText
+                    IntegrationReady     = [bool]$integrationStatus.Ready
+                    IntegrationDetails   = [string]$integrationStatus.Summary
                 }
             }
         } -ArgumentList @($ServerName, $names)
