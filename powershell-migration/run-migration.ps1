@@ -83,25 +83,6 @@ if ($startIndex -le 1) {
 $csvFile = $Config.Paths.CsvFile
 Assert-PathPresent -Path $csvFile -Label "batch CSV" -LogFile $LogFile
 
-function Get-FirstPropertyValue {
-    param(
-        [Parameter(Mandatory = $true)]
-        $InputObject,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$PropertyNames
-    )
-
-    foreach ($propertyName in $PropertyNames) {
-        $property = $InputObject.PSObject.Properties[$propertyName]
-        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-            return [string]$property.Value
-        }
-    }
-
-    return $null
-}
-
 function Resolve-AdapterVlanId {
     param(
         [Parameter(Mandatory = $true)]

@@ -277,6 +277,110 @@ function Send-HtmlMail {
 
 
 # ---------------------------------------------------------------------------
+# Get-VMUptime : retrieve uptime data for all powered-on VMs from vCenter
+# ---------------------------------------------------------------------------
+function Get-VMUptime {
+    param([string]$LogFile)
+
+    $vms = VMware.VimAutomation.Core\Get-VM | Where-Object { $_.PowerState -eq "PoweredOn" }
+    Write-MigrationLog "Powered-on VMs: $($vms.Count)" -LogFile $LogFile
+
+    $results = @()
+    foreach ($vm in $vms) {
+        $guestInfo = $vm.ExtensionData.Guest
+        $bootTime  = $null
+
+        if ($guestInfo.ToolsStatus -eq "toolsOk" -and $guestInfo.BootTime) {
+            $bootTime = $guestInfo.BootTime
+        } else {
+            $bootTime = $vm.ExtensionData.Runtime.BootTime
+        }
+
+        $uptime = if ($bootTime) {
+            $uptimeSpan = (Get-Date) - $bootTime
+            "{0} days, {1} hours, {2} minutes" -f $uptimeSpan.Days, $uptimeSpan.Hours, $uptimeSpan.Minutes
+        } else {
+            "Unavailable"
+        }
+
+        $results += [PSCustomObject]@{
+            VMName   = $vm.Name
+            OS       = $guestInfo.GuestFullName
+            BootTime = $bootTime
+            Uptime   = $uptime
+        }
+    }
+
+    return $results
+}
+
+# ---------------------------------------------------------------------------
+# Invoke-SCVMMCommand : proxy for SCVMM cmdlets (routes through WinPS compat session if present)
+# ---------------------------------------------------------------------------
+function Invoke-SCVMMCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+
+        [object[]]$ArgumentList = @()
+    )
+
+    $compatSession = Get-PSSession -Name 'WinPSCompatSession' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
+    if ($compatSession) {
+        return Invoke-Command -Session $compatSession -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+    }
+
+    return & $ScriptBlock @ArgumentList
+}
+
+# ---------------------------------------------------------------------------
+# Get-FirstPropertyValue : return the first non-empty value from a list of candidate property names
+# ---------------------------------------------------------------------------
+function Get-FirstPropertyValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        $InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$PropertyNames
+    )
+
+    foreach ($propertyName in $PropertyNames) {
+        $property = $InputObject.PSObject.Properties[$propertyName]
+        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+
+    return $null
+}
+
+# ---------------------------------------------------------------------------
+# Get-OsGeneration : extract OS release year (2003-2025) from an OS name string
+# ---------------------------------------------------------------------------
+function Get-OsGeneration {
+    param(
+        [string]$OperatingSystem
+    )
+
+    if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
+        return $null
+    }
+
+    if ($OperatingSystem -match '2003') { return 2003 }
+    if ($OperatingSystem -match '2008') { return 2008 }
+    if ($OperatingSystem -match '2012') { return 2012 }
+    if ($OperatingSystem -match '2016') { return 2016 }
+    if ($OperatingSystem -match '2019') { return 2019 }
+    if ($OperatingSystem -match '2022') { return 2022 }
+    if ($OperatingSystem -match '2025') { return 2025 }
+
+    return $null
+}
+
+# ---------------------------------------------------------------------------
 # ConvertTo-NormalizedOperatingSystemName : normalize OS labels before mapping to SCVMM operating systems
 # ---------------------------------------------------------------------------
 function ConvertTo-NormalizedOperatingSystemName {
