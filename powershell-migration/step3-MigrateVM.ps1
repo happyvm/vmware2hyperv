@@ -339,6 +339,24 @@ function Invoke-SCVMMNetworkAndPostConfig {
             return ($Value -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
         }
 
+        function Test-IsZeroMacAddress {
+            param([AllowNull()][string]$Value)
+
+            $normalized = Normalize-MacAddress -Value $Value
+            return ($normalized -and $normalized -eq '000000000000')
+        }
+
+        function Convert-ToScvmmStaticMacAddress {
+            param([AllowNull()][string]$Value)
+
+            $normalized = Normalize-MacAddress -Value $Value
+            if (-not $normalized -or $normalized.Length -ne 12) {
+                return $null
+            }
+
+            return (($normalized -split '(.{2})' | Where-Object { $_ }) -join '-')
+        }
+
         function Get-ScvmmNetworkAdapters {
             param(
                 $CurrentVm,
@@ -479,7 +497,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 $adapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddress)
             }
 
-            if (-not $adapterMac) {
+            if (-not $adapterMac -or (Test-IsZeroMacAddress -Value $adapterMac)) {
                 continue
             }
 
@@ -578,10 +596,20 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 PortClassification    = $portClass
             }
 
-            # IMPORTANT:
-            # Do NOT force MAC addresses here.
-            # Veeam Instant Recovery already preserves them (-PreserveMACs $true).
-            # MAC must only be used as a lookup key for NIC/VLAN mapping.
+            $targetAdapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddressString)
+            if (-not $targetAdapterMac) {
+                $targetAdapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddress)
+            }
+
+            if ((Test-IsZeroMacAddress -Value $targetAdapterMac) -and $selectedSourceAdapter) {
+                $sourceStaticMac = Convert-ToScvmmStaticMacAddress -Value ([string]$selectedSourceAdapter.MacAddress)
+                if ($sourceStaticMac) {
+                    $setAdapterParameters['MACAddressType'] = 'Static'
+                    $setAdapterParameters['MACAddress'] = $sourceStaticMac
+                    Write-MigrationLog "[$Name] Adapter #$($adapterIndex + 1): SCVMM returned 00:00:00:00:00:00, forcing static MAC from VMware ($sourceStaticMac)." -Level WARNING -LogFile $LogFile
+                }
+            }
+
             Set-SCVirtualNetworkAdapter @setAdapterParameters | Out-Null
             $mappedAdapters++
         }
