@@ -115,7 +115,13 @@ Assert-PathPresent -Path $csvFile -Label "batch CSV" -LogFile $LogFile
 function Resolve-AdapterVlanId {
     param(
         [Parameter(Mandatory = $true)]
-        $Adapter
+        $Adapter,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$DistributedPortGroupCache,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$StandardPortGroupCache
     )
 
     $networkName = [string]$Adapter.NetworkName
@@ -123,7 +129,10 @@ function Resolve-AdapterVlanId {
         return "Not connected to a network"
     }
 
-    $distributedPortGroups = @(Get-VDPortgroup -Name $networkName -ErrorAction SilentlyContinue)
+    if (-not $DistributedPortGroupCache.ContainsKey($networkName)) {
+        $DistributedPortGroupCache[$networkName] = @(Get-VDPortgroup -Name $networkName -ErrorAction SilentlyContinue)
+    }
+    $distributedPortGroups = @($DistributedPortGroupCache[$networkName])
     foreach ($distributedPortGroup in $distributedPortGroups) {
         # Prefer direct integer property on the DVS VLAN spec (avoids string-parsing ambiguity)
         try {
@@ -141,7 +150,10 @@ function Resolve-AdapterVlanId {
         }
     }
 
-    $standardPortGroups = @(Get-VirtualPortGroup -Name $networkName -ErrorAction SilentlyContinue)
+    if (-not $StandardPortGroupCache.ContainsKey($networkName)) {
+        $StandardPortGroupCache[$networkName] = @(Get-VirtualPortGroup -Name $networkName -ErrorAction SilentlyContinue)
+    }
+    $standardPortGroups = @($StandardPortGroupCache[$networkName])
     foreach ($standardPortGroup in $standardPortGroups) {
         if ([string]$standardPortGroup.VLanId -match '^\d+$') {
             return [string]$standardPortGroup.VLanId
@@ -193,6 +205,8 @@ $vmVlans = @{}
 $vmAdapterVlans = @{}
 $vmOperatingSystems = @{}
 $vmRemarks = @{}
+$distributedPortGroupCache = @{}
+$standardPortGroupCache = @{}
 
 $cmdbPath = $Config.Paths.CmdbExtractCsv
 $cmdbOperatingSystems = @{}
@@ -225,19 +239,59 @@ foreach ($row in $vmRows) {
     }
 }
 
+$vmObjectsByName = @{}
+$batchVmObjects = @(VMware.VimAutomation.Core\Get-VM -Name $vmNames -ErrorAction SilentlyContinue)
+foreach ($vmObject in $batchVmObjects) {
+    if ($vmObject -and -not $vmObjectsByName.ContainsKey($vmObject.Name)) {
+        $vmObjectsByName[$vmObject.Name] = $vmObject
+    }
+}
+
+$networkAdaptersByVmName = @{}
+if ($batchVmObjects.Count -gt 0) {
+    $allNetworkAdapters = @(Get-NetworkAdapter -VM $batchVmObjects -ErrorAction SilentlyContinue)
+    foreach ($networkAdapter in $allNetworkAdapters) {
+        $adapterVmName = $null
+        if ($networkAdapter.PSObject.Properties['Parent'] -and $networkAdapter.Parent) {
+            $adapterVmName = [string]$networkAdapter.Parent.Name
+        }
+        if ([string]::IsNullOrWhiteSpace($adapterVmName) -and $networkAdapter.PSObject.Properties['VM'] -and $networkAdapter.VM) {
+            $adapterVmName = [string]$networkAdapter.VM.Name
+        }
+        if ([string]::IsNullOrWhiteSpace($adapterVmName)) {
+            continue
+        }
+
+        if (-not $networkAdaptersByVmName.ContainsKey($adapterVmName)) {
+            $networkAdaptersByVmName[$adapterVmName] = New-Object System.Collections.ArrayList
+        }
+        [void]$networkAdaptersByVmName[$adapterVmName].Add($networkAdapter)
+    }
+}
+
 foreach ($vmName in $vmNames) {
-    $VMObject = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    $VMObject = $null
+    if ($vmObjectsByName.ContainsKey($vmName)) {
+        $VMObject = $vmObjectsByName[$vmName]
+    }
     $remark = $null
     $adapterMappings = @()
     if ($VMObject) {
         $remark = [string]$VMObject.ExtensionData.Summary.Config.Annotation
-        $networkAdapters = @(Get-NetworkAdapter -VM $VMObject -ErrorAction SilentlyContinue)
+        $networkAdapters = if ($networkAdaptersByVmName.ContainsKey($vmName)) {
+            @($networkAdaptersByVmName[$vmName])
+        } else {
+            @()
+        }
         if ($networkAdapters) {
             foreach ($networkAdapter in $networkAdapters) {
                 $macAddress = [string]$networkAdapter.MacAddress
                 $vlanIdForAdapter = "PortGroup not found"
                 try {
-                    $vlanIdForAdapter = Resolve-AdapterVlanId -Adapter $networkAdapter
+                    $vlanIdForAdapter = Resolve-AdapterVlanId `
+                        -Adapter $networkAdapter `
+                        -DistributedPortGroupCache $distributedPortGroupCache `
+                        -StandardPortGroupCache $standardPortGroupCache
                 } catch {
                     Write-MigrationLog "Error resolving VLAN for adapter '$macAddress' on VM '$vmName': $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
                 }
