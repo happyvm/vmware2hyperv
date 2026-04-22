@@ -340,9 +340,9 @@ function Invoke-SCVMMNetworkAndPostConfig {
             )
 
             $adapters = @()
-            try {
-                $adapters = @(Get-SCVirtualNetworkAdapter -VM $CurrentVm -ErrorAction Stop)
-            } catch { }
+            if ($CurrentVm -and $CurrentVm.GetType().FullName -notlike 'Deserialized.*') {
+                $adapters = @(Get-SCVirtualNetworkAdapter -VM $CurrentVm -ErrorAction SilentlyContinue)
+            }
             if ($adapters) {
                 return $adapters
             }
