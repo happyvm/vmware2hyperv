@@ -43,9 +43,8 @@ function Write-TaskStateFile {
 Write-MigrationLog "[$WorkerName] Persistent step3 worker starting. Queue root: $QueueRoot" -LogFile $LogFile
 
 try {
-    Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
     Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
-    Write-MigrationLog "[$WorkerName] Veeam and SCVMM modules warmed up." -Level SUCCESS -LogFile $LogFile
+    Write-MigrationLog "[$WorkerName] SCVMM module warmed up. Veeam will be loaded lazily only for non-network-only tasks." -Level SUCCESS -LogFile $LogFile
 } catch {
     Write-MigrationLog "[$WorkerName] Worker initialization failed: $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
     throw
