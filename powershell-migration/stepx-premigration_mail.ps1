@@ -37,7 +37,7 @@ if (-not $recipients.ContainsKey($recipientGroup)) {
 $mailTo      = $recipients[$recipientGroup]
 $mailSubject = "VM Migration of $tagName tag"
 
-if (-not (Get-Module -Name VMware.PowerCLI)) {
+if (-not (Get-Module -Name VMware.PowerCLI, VCF.PowerCLI)) {
     Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 }
 
