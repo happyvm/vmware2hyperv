@@ -279,7 +279,9 @@ function Invoke-SCVMMNetworkAndPostConfig {
     $TargetVM = Invoke-SCVMMCommand -ScriptBlock {
         param($Name, $ServerName)
         $server = Get-SCVMMServer -ComputerName $ServerName
-        Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" }
+        Get-SCVirtualMachine -Name $Name -VMMServer $server |
+            Where-Object { $_.VirtualizationPlatform -eq "HyperV" } |
+            Select-Object -First 1
     } -ArgumentList @($Name, $ServerName)
     if (!$TargetVM) {
         Write-MigrationLog "[$Name] VM not found in SCVMM." -Level WARNING -LogFile $LogFile
@@ -289,9 +291,10 @@ function Invoke-SCVMMNetworkAndPostConfig {
     $networkConfigRetryDelaySeconds = 30
     $networkConfigRetryCount = 2
 
+    $networkResult = $null
     for ($networkConfigAttempt = 1; $networkConfigAttempt -le $networkConfigRetryCount; $networkConfigAttempt++) {
         try {
-            Invoke-SCVMMCommand -ScriptBlock {
+            $networkResult = Invoke-SCVMMCommand -ScriptBlock {
         param(
             $Name,
             $ServerName,
@@ -459,6 +462,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
 
         $mappedAdapters = 0
+        $fallbackMappedAdapters = 0
         foreach ($networkAdapter in $networkAdapters) {
             $desiredMapping = $null
             $adapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddressString)
@@ -482,9 +486,10 @@ function Invoke-SCVMMNetworkAndPostConfig {
             }
 
             if (-not $desiredMapping) {
-                Write-MigrationLog "[$Name] No VLAN mapping found for adapter MAC '$($networkAdapter.MACAddressString)' — disconnecting adapter." -Level WARNING -LogFile $LogFile
-                Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -NoConnection | Out-Null
-                continue
+                # Safety fallback for multi-NIC VMs: keep adapter connected on default VLAN
+                # instead of disconnecting it when MAC/source network matching is unavailable.
+                $desiredMapping = $networkMappingsByVlan[$Vlan]
+                $fallbackMappedAdapters++
             }
 
             Set-SCVirtualNetworkAdapter -VirtualNetworkAdapter $networkAdapter -VMNetwork $desiredMapping.VMNetwork -VMSubnet $desiredMapping.VMSubnet -VLanEnabled $true -VLanID $desiredMapping.Vlan -VirtualNetwork $LogicalSwitch -IPv4AddressType Dynamic -IPv6AddressType Dynamic -PortClassification $portClass | Out-Null
@@ -492,7 +497,13 @@ function Invoke-SCVMMNetworkAndPostConfig {
         }
 
         if ($mappedAdapters -eq 0) {
-            Write-MigrationLog "[$Name] No virtual network adapter could be mapped to a VLAN — all adapters have been disconnected." -Level WARNING -LogFile $LogFile
+            throw "No virtual network adapter could be mapped to a VLAN."
+        }
+
+        [pscustomobject]@{
+            AdapterCount         = $networkAdapters.Count
+            MappedAdapterCount   = $mappedAdapters
+            FallbackAdapterCount = $fallbackMappedAdapters
         }
 
         $setVmParameters = @{
@@ -529,6 +540,10 @@ function Invoke-SCVMMNetworkAndPostConfig {
             Write-MigrationLog "[$Name] SCVMM network/post-configuration attempt $networkConfigAttempt failed (`"$($_.Exception.Message)`"). Waiting $networkConfigRetryDelaySeconds seconds before retry (suspected transient SCVMM refresh/state delay)." -Level WARNING -LogFile $LogFile
             Start-Sleep -Seconds $networkConfigRetryDelaySeconds
         }
+    }
+
+    if ($networkResult -and $networkResult.FallbackAdapterCount -gt 0) {
+        Write-MigrationLog "[$Name] $($networkResult.FallbackAdapterCount)/$($networkResult.AdapterCount) adapter(s) had no exact MAC/source-network VLAN match and were kept connected on default VLAN $Vlan." -Level WARNING -LogFile $LogFile
     }
 
     Write-MigrationLog "[$Name] Network configured (default VLAN $Vlan, multi-adapter mapping enabled)." -Level SUCCESS -LogFile $LogFile
