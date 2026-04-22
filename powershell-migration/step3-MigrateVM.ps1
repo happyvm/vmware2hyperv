@@ -283,18 +283,138 @@ function Invoke-SCVMMNetworkAndPostConfig {
             $LogicalSwitch,
             $PortClassificationName,
             $Description,
-            $AdapterVlanMappings
+            $AdapterVlanMappings,
+            $InventoryCacheTtlMinutes,
+            $ForceInventoryRefresh
         )
+
+        function Get-ScvmmInventoryCache {
+            param(
+                [Parameter(Mandatory = $true)]
+                $Server,
+                [int]$CacheTtlMinutes = 10,
+                [switch]$ForceRefresh
+            )
+
+            if (-not $script:ScvmmInventoryCacheByServer) {
+                $script:ScvmmInventoryCacheByServer = @{}
+            }
+
+            $serverKey = [string]$Server.Name
+            if ([string]::IsNullOrWhiteSpace($serverKey)) {
+                $serverKey = [string]$Server.ComputerName
+            }
+            $serverKey = $serverKey.ToLowerInvariant()
+
+            $existingCache = $script:ScvmmInventoryCacheByServer[$serverKey]
+            $cacheAgeMinutes = if ($existingCache) {
+                ((Get-Date).ToUniversalTime() - $existingCache.LoadedAtUtc).TotalMinutes
+            } else {
+                [double]::PositiveInfinity
+            }
+            $isExpired = ($cacheAgeMinutes -ge [Math]::Max(1, $CacheTtlMinutes))
+
+            if ($ForceRefresh -or -not $existingCache -or $isExpired) {
+                $allVMNetworks = @(Get-SCVMNetwork -VMMServer $Server | Sort-Object Name)
+                $allVMSubnets = @(Get-SCVMSubnet -VMMServer $Server | Sort-Object Name)
+                $allPortClassifications = @(Get-SCPortClassification -VMMServer $Server)
+
+                $vmNetworksByVlan = @{}
+                foreach ($network in $allVMNetworks) {
+                    $candidates = @([string]$network.Name, [string]$network.Description)
+                    foreach ($candidateText in $candidates) {
+                        if ([string]::IsNullOrWhiteSpace($candidateText)) { continue }
+                        foreach ($match in [regex]::Matches($candidateText, '\d+')) {
+                            $vlanKey = [string]$match.Value
+                            if (-not $vmNetworksByVlan.ContainsKey($vlanKey)) {
+                                $vmNetworksByVlan[$vlanKey] = New-Object System.Collections.ArrayList
+                            }
+                            [void]$vmNetworksByVlan[$vlanKey].Add($network)
+                        }
+                    }
+                }
+
+                $vmSubnetsByVlan = @{}
+                foreach ($subnet in $allVMSubnets) {
+                    $candidates = @([string]$subnet.Name, [string]$subnet.Description)
+                    foreach ($candidateText in $candidates) {
+                        if ([string]::IsNullOrWhiteSpace($candidateText)) { continue }
+                        foreach ($match in [regex]::Matches($candidateText, '\d+')) {
+                            $vlanKey = [string]$match.Value
+                            if (-not $vmSubnetsByVlan.ContainsKey($vlanKey)) {
+                                $vmSubnetsByVlan[$vlanKey] = New-Object System.Collections.ArrayList
+                            }
+                            [void]$vmSubnetsByVlan[$vlanKey].Add($subnet)
+                        }
+                    }
+                }
+
+                $vmNetworksByLookupName = @{}
+                foreach ($network in $allVMNetworks) {
+                    foreach ($nameKey in @([string]$network.Name, [string]$network.Description)) {
+                        if ([string]::IsNullOrWhiteSpace($nameKey)) { continue }
+                        $normalizedName = $nameKey.Trim().ToLowerInvariant()
+                        if (-not $vmNetworksByLookupName.ContainsKey($normalizedName)) {
+                            $vmNetworksByLookupName[$normalizedName] = New-Object System.Collections.ArrayList
+                        }
+                        [void]$vmNetworksByLookupName[$normalizedName].Add($network)
+                    }
+                }
+
+                $vmSubnetsByVmNetworkId = @{}
+                foreach ($subnet in $allVMSubnets) {
+                    $networkId = $null
+                    if ($subnet.VMNetwork -and $subnet.VMNetwork.ID) {
+                        $networkId = [string]$subnet.VMNetwork.ID
+                    } elseif ($subnet.VMNetworkID) {
+                        $networkId = [string]$subnet.VMNetworkID
+                    }
+
+                    if (-not [string]::IsNullOrWhiteSpace($networkId)) {
+                        if (-not $vmSubnetsByVmNetworkId.ContainsKey($networkId)) {
+                            $vmSubnetsByVmNetworkId[$networkId] = New-Object System.Collections.ArrayList
+                        }
+                        [void]$vmSubnetsByVmNetworkId[$networkId].Add($subnet)
+                    }
+                }
+
+                $portClassByName = @{}
+                foreach ($portClassEntry in $allPortClassifications) {
+                    $portClassName = [string]$portClassEntry.Name
+                    if (-not [string]::IsNullOrWhiteSpace($portClassName)) {
+                        $portClassByName[$portClassName.Trim().ToLowerInvariant()] = $portClassEntry
+                    }
+                }
+
+                $existingCache = [pscustomobject]@{
+                    LoadedAtUtc            = (Get-Date).ToUniversalTime()
+                    AllVMNetworks          = $allVMNetworks
+                    AllVMSubnets           = $allVMSubnets
+                    VMNetworksByVlan       = $vmNetworksByVlan
+                    VMSubnetsByVlan        = $vmSubnetsByVlan
+                    VMNetworksByLookupName = $vmNetworksByLookupName
+                    VMSubnetsByVmNetworkId = $vmSubnetsByVmNetworkId
+                    PortClassByName        = $portClassByName
+                }
+
+                $script:ScvmmInventoryCacheByServer[$serverKey] = $existingCache
+            }
+
+            return $existingCache
+        }
+
         $server = Get-SCVMMServer -ComputerName $ServerName
         $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
         if (-not $vm) {
             throw "VM '$Name' not found in SCVMM while applying network configuration."
         }
 
-        $allVMNetworks = @(Get-SCVMNetwork -VMMServer $server | Sort-Object Name)
-        $allVMSubnets = @(Get-SCVMSubnet -VMMServer $server | Sort-Object Name)
+        $inventoryCache = Get-ScvmmInventoryCache -Server $server -CacheTtlMinutes $InventoryCacheTtlMinutes -ForceRefresh:$ForceInventoryRefresh
 
-        $portClass = Get-SCPortClassification -VMMServer $server | Where-Object { $_.Name -eq $PortClassificationName } | Select-Object -First 1
+        $allVMNetworks = @($inventoryCache.AllVMNetworks)
+        $allVMSubnets = @($inventoryCache.AllVMSubnets)
+
+        $portClass = $inventoryCache.PortClassByName[[string]$PortClassificationName.Trim().ToLowerInvariant()]
         if (-not $portClass) {
             throw "Port classification '$PortClassificationName' not found in SCVMM."
         }
@@ -402,8 +522,16 @@ function Invoke-SCVMMNetworkAndPostConfig {
             throw "No SCVMM virtual network adapter found for VM '$Name' after waiting $($adapterRetryCount * $adapterRetryDelaySeconds) seconds. SCVMM may still show the VM in an incomplete configuration state; refresh the VM in SCVMM and retry."
         }
 
-        $matchingDefaultNetworks = @($allVMNetworks | Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" })
-        $matchingDefaultSubnets = @($allVMSubnets | Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" })
+        $matchingDefaultNetworks = if ($inventoryCache.VMNetworksByVlan.ContainsKey([string]$Vlan)) {
+            @($inventoryCache.VMNetworksByVlan[[string]$Vlan])
+        } else {
+            @($allVMNetworks | Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" })
+        }
+        $matchingDefaultSubnets = if ($inventoryCache.VMSubnetsByVlan.ContainsKey([string]$Vlan)) {
+            @($inventoryCache.VMSubnetsByVlan[[string]$Vlan])
+        } else {
+            @($allVMSubnets | Where-Object { $_.Name -like "*$Vlan*" -or $_.Description -like "*$Vlan*" })
+        }
         if ($matchingDefaultNetworks.Count -eq 0 -or $matchingDefaultSubnets.Count -eq 0) {
             throw "No VMNetwork/VMSubnet found for default VLAN $Vlan."
         }
@@ -430,8 +558,16 @@ function Invoke-SCVMMNetworkAndPostConfig {
             $mappingNetworkName = [string]$adapterMapping.NetworkName
 
             if (-not $networkMappingsByVlan.ContainsKey($mappingVlan)) {
-                $matchingNetworks = @($allVMNetworks | Where-Object { $_.Name -like "*$mappingVlan*" -or $_.Description -like "*$mappingVlan*" })
-                $matchingSubnets  = @($allVMSubnets  | Where-Object { $_.Name -like "*$mappingVlan*" -or $_.Description -like "*$mappingVlan*" })
+                $matchingNetworks = if ($inventoryCache.VMNetworksByVlan.ContainsKey([string]$mappingVlan)) {
+                    @($inventoryCache.VMNetworksByVlan[[string]$mappingVlan])
+                } else {
+                    @($allVMNetworks | Where-Object { $_.Name -like "*$mappingVlan*" -or $_.Description -like "*$mappingVlan*" })
+                }
+                $matchingSubnets  = if ($inventoryCache.VMSubnetsByVlan.ContainsKey([string]$mappingVlan)) {
+                    @($inventoryCache.VMSubnetsByVlan[[string]$mappingVlan])
+                } else {
+                    @($allVMSubnets  | Where-Object { $_.Name -like "*$mappingVlan*" -or $_.Description -like "*$mappingVlan*" })
+                }
                 if ($matchingNetworks.Count -gt 0 -and $matchingSubnets.Count -gt 0) {
                     $networkMappingsByVlan[$mappingVlan] = [pscustomobject]@{
                         VMNetwork               = $matchingNetworks | Select-Object -First 1
@@ -446,16 +582,25 @@ function Invoke-SCVMMNetworkAndPostConfig {
             }
 
             if (-not [string]::IsNullOrWhiteSpace($mappingNetworkName) -and -not $networkMappingsBySourceNetworkName.ContainsKey($mappingNetworkName)) {
-                $matchingByName = @($allVMNetworks | Where-Object { $_.Name -eq $mappingNetworkName -or $_.Description -eq $mappingNetworkName })
+                $lookupKey = $mappingNetworkName.Trim().ToLowerInvariant()
+                $matchingByName = if ($inventoryCache.VMNetworksByLookupName.ContainsKey($lookupKey)) {
+                    @($inventoryCache.VMNetworksByLookupName[$lookupKey])
+                } else {
+                    @($allVMNetworks | Where-Object { $_.Name -eq $mappingNetworkName -or $_.Description -eq $mappingNetworkName })
+                }
                 if (-not $matchingByName) {
                     $matchingByName = @($allVMNetworks | Where-Object { $_.Name -like "*$mappingNetworkName*" -or $_.Description -like "*$mappingNetworkName*" })
                 }
                 if ($matchingByName.Count -gt 0) {
                     $selectedByName = $matchingByName | Select-Object -First 1
-                    $matchingSubnetByName = @($allVMSubnets | Where-Object {
-                        ($_.VMNetwork -and $_.VMNetwork.ID -eq $selectedByName.ID) -or
-                        ($_.VMNetworkName -and $_.VMNetworkName -eq $selectedByName.Name)
-                    })
+                    $matchingSubnetByName = if ($selectedByName.ID -and $inventoryCache.VMSubnetsByVmNetworkId.ContainsKey([string]$selectedByName.ID)) {
+                        @($inventoryCache.VMSubnetsByVmNetworkId[[string]$selectedByName.ID])
+                    } else {
+                        @($allVMSubnets | Where-Object {
+                            ($_.VMNetwork -and $_.VMNetwork.ID -eq $selectedByName.ID) -or
+                            ($_.VMNetworkName -and $_.VMNetworkName -eq $selectedByName.Name)
+                        })
+                    }
                     if ($matchingSubnetByName.Count -gt 0) {
                         $networkMappingsBySourceNetworkName[$mappingNetworkName] = [pscustomobject]@{
                             VMNetwork               = $selectedByName
@@ -690,7 +835,9 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $Config.SCVMM.Network.LogicalSwitchName,
         $Config.SCVMM.Network.PortClassificationName,
         $SourceRemark,
-        $AdapterVlanMappings
+        $AdapterVlanMappings,
+        (if ($Config.SCVMM.Network.InventoryCacheTtlMinutes -is [int]) { $Config.SCVMM.Network.InventoryCacheTtlMinutes } else { 10 }),
+        ($networkConfigAttempt -gt 1)
             )
             break
         } catch {
