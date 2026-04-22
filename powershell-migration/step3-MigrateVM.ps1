@@ -836,7 +836,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $Config.SCVMM.Network.PortClassificationName,
         $SourceRemark,
         $AdapterVlanMappings,
-        (if ($Config.SCVMM.Network.InventoryCacheTtlMinutes -is [int]) { $Config.SCVMM.Network.InventoryCacheTtlMinutes } else { 10 }),
+        $(if ($Config.SCVMM.Network.InventoryCacheTtlMinutes -is [int]) { $Config.SCVMM.Network.InventoryCacheTtlMinutes } else { 10 }),
         ($networkConfigAttempt -gt 1)
             )
             break
