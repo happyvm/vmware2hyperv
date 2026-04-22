@@ -166,6 +166,23 @@ pwsh ./powershell-migration/step-XX-PostMigrationChecks.ps1 -CsvFile D:\Scripts\
 
 `-MaxIterations 0` means infinite loop until every VM is compliant.
 
+### Start migrated VMs + Integration Services / VMware Tools actions
+
+Use `step-XX-StartVM.ps1` to:
+
+- start each VM from `lotissement.csv` (optionally filtered by `-Tag`);
+- list VM state + SCVMM configured operating system;
+- mount an Integration Services ISO for Windows Server 2003/2008 (paths from `IntegrationServices.IsoByOsFamily` in config);
+- try WinRM HTTPS then HTTP on Windows Server 2012+ VMs to upload and execute a VMware Tools removal script;
+- loop on Integration Services health checks (SCVMM signals) until ready or timeout.
+
+```powershell
+pwsh ./powershell-migration/step-XX-StartVM.ps1 -Tag HypMig-lot-118
+```
+
+If OS is below 2012, or WinRM is unavailable for 2012+, the script reports that integration/manual cleanup actions must be done by hand.
+You can tune integration checks with `StartVm.IntegrationPollIntervalSeconds` and `StartVm.IntegrationMaxIterations` in config (or via script parameters).
+
 ## Logs
 
 Each script writes timestamped logs to the path configured in `Paths.LogDir`.

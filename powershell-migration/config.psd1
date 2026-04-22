@@ -97,6 +97,29 @@
         LogDir    = "D:\Scripts\Logs"
     }
 
+    IntegrationServices = @{
+        IsoByOsFamily = @{
+            "2003" = "D:\ISOs\hyperv-integration-services-2003.iso"
+            "2008" = "D:\ISOs\hyperv-integration-services-2008.iso"
+        }
+    }
+
+    RemoteActions = @{
+        WinRm = @{
+            # Optional credential for New-PSSession; if omitted, the current user context is used.
+            Credential = $null
+
+            # Script uploaded then executed remotely for Windows Server 2012+.
+            RemoveVmwareToolsScriptLocalPath  = "D:\Scripts\vmwaretools-integrationservices\install-integration-services.bat"
+            RemoveVmwareToolsScriptRemotePath = "C:\Temp\remove-vmware-tools.bat"
+        }
+    }
+
+    StartVm = @{
+        IntegrationPollIntervalSeconds = 30
+        IntegrationMaxIterations       = 10
+    }
+
     Orchestrator = @{
         Step3MaxParallelJobs    = 5  # Reduce concurrency to avoid session/cmdlet exhaustion on large batches
         Step3JobStartupDelaySec = 2  # Delay between job starts to smooth PowerShell/SCVMM load spikes
