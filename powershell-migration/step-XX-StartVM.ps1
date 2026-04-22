@@ -87,7 +87,6 @@ function Get-SCVMMVmInventory {
             }
 
             $server = Get-SCVMMServer -ComputerName $VmmServerName
-            $refreshedHostNames = New-Object 'System.Collections.Generic.HashSet[string]'
 
             foreach ($name in $Names) {
                 $vm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
@@ -105,15 +104,6 @@ function Get-SCVMMVmInventory {
                         IntegrationDetails   = 'VM introuvable'
                     }
                     continue
-                }
-
-                $hostName = [string]$vm.VMHost.ComputerName
-                if (-not [string]::IsNullOrWhiteSpace($hostName) -and -not $refreshedHostNames.Contains($hostName)) {
-                    try {
-                        Read-SCVMHost -VMHost $vm.VMHost -ErrorAction Stop | Out-Null
-                        $null = $refreshedHostNames.Add($hostName)
-                    } catch {
-                    }
                 }
 
                 try {
