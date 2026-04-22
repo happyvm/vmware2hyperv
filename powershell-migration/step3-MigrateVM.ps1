@@ -79,8 +79,12 @@ if (-not $ClusterStorage){ $ClusterStorage = $Config.HyperV.ClusterStorage }
 if (-not $BackupTag)     { $BackupTag     = $Config.Tags.BackupTag }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step3-migrate-$VMName-$(Get-Date -Format 'yyyyMMdd').log" }
 
-Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
+if (-not $ForceNetworkConfigOnly) {
+    Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
+} else {
+    Write-MigrationLog "[$VMName] ForceNetworkConfigOnly enabled: skipping Veeam module import." -LogFile $LogFile
+}
 
 function Invoke-VeeamCommand {
     param(
