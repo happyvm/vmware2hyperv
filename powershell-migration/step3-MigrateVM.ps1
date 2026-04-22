@@ -339,7 +339,10 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 [string]$CurrentVmName
             )
 
-            $adapters = @(try { Get-SCVirtualNetworkAdapter -VM $CurrentVm -ErrorAction Stop } catch { @() })
+            $adapters = @()
+            try {
+                $adapters = @(Get-SCVirtualNetworkAdapter -VM $CurrentVm -ErrorAction Stop)
+            } catch { }
             if ($adapters) {
                 return $adapters
             }
