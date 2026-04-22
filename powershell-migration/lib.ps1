@@ -117,33 +117,108 @@ function Import-RequiredModule {
         @($Name)
     }
 
-    foreach ($candidateName in $candidateNames) {
+    function Try-ImportModuleCandidate {
+        param([string]$CandidateName)
+
         if ($PSVersionTable.PSEdition -eq "Core" -and $UseWindowsPowerShellFallback) {
             try {
-                Import-Module -Name $candidateName -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop 3>$null
-                Write-MigrationLog "Module imported via Windows PowerShell compatibility mode: $candidateName" -Level WARNING -LogFile $LogFile
-                return
+                Import-Module -Name $CandidateName -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop 3>$null
+                Write-MigrationLog "Module imported via Windows PowerShell compatibility mode: $CandidateName" -Level WARNING -LogFile $LogFile
+                return $true
             } catch {
-                Write-MigrationLog "Windows PowerShell compatibility mode import failed for $candidateName, trying standard import." -Level WARNING -LogFile $LogFile
+                Write-MigrationLog "Windows PowerShell compatibility mode import failed for $CandidateName, trying standard import." -Level WARNING -LogFile $LogFile
             }
         }
 
         try {
-            Import-Module -Name $candidateName -DisableNameChecking -ErrorAction Stop 3>$null
-            Write-MigrationLog "Module imported: $candidateName" -LogFile $LogFile
-            return
+            Import-Module -Name $CandidateName -DisableNameChecking -ErrorAction Stop 3>$null
+            Write-MigrationLog "Module imported: $CandidateName" -LogFile $LogFile
+            return $true
         } catch {
             if ($PSVersionTable.PSEdition -eq "Core") {
                 try {
-                    Import-Module -Name $candidateName -SkipEditionCheck -DisableNameChecking -ErrorAction Stop 3>$null
-                    Write-MigrationLog "Module imported via SkipEditionCheck fallback: $candidateName" -Level WARNING -LogFile $LogFile
-                    return
+                    Import-Module -Name $CandidateName -SkipEditionCheck -DisableNameChecking -ErrorAction Stop 3>$null
+                    Write-MigrationLog "Module imported via SkipEditionCheck fallback: $CandidateName" -Level WARNING -LogFile $LogFile
+                    return $true
                 } catch {
-                    Write-MigrationLog "Unable to import module $candidateName (standard import and fallbacks failed): $_" -Level WARNING -LogFile $LogFile
+                    Write-MigrationLog "Unable to import module $CandidateName (standard import and fallbacks failed): $_" -Level WARNING -LogFile $LogFile
                 }
             } else {
-                Write-MigrationLog "Unable to import module $candidateName : $_" -Level WARNING -LogFile $LogFile
+                Write-MigrationLog "Unable to import module $CandidateName : $_" -Level WARNING -LogFile $LogFile
             }
+        }
+
+        return $false
+    }
+
+    foreach ($candidateName in $candidateNames) {
+        if (Try-ImportModuleCandidate -CandidateName $candidateName) {
+            return
+        }
+    }
+
+    if ($Name -eq "VMware.PowerCLI") {
+        foreach ($candidateName in $candidateNames) {
+            if (Get-Module -ListAvailable -Name $candidateName) {
+                continue
+            }
+
+            try {
+                Install-Module -Name $candidateName -Scope CurrentUser -AllowClobber -Force -ErrorAction Stop
+                Write-MigrationLog "PowerCLI module installed for current user: $candidateName" -Level SUCCESS -LogFile $LogFile
+            } catch {
+                Write-MigrationLog "Automatic install failed for $candidateName: $_" -Level WARNING -LogFile $LogFile
+            }
+        }
+
+        foreach ($candidateName in $candidateNames) {
+            if (Try-ImportModuleCandidate -CandidateName $candidateName) {
+                return
+            }
+        }
+    }
+
+    $candidateList = $candidateNames -join ", "
+    $message = "Unable to import module $Name. Tried: $candidateList"
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+    throw $message
+}
+
+# ---------------------------------------------------------------------------
+# Ensure-RsatHyperVInstalled : install Hyper-V RSAT management tools when available
+# ---------------------------------------------------------------------------
+function Ensure-RsatHyperVInstalled {
+    param([string]$LogFile)
+
+    if ($IsLinux -or $IsMacOS) {
+        Write-MigrationLog "RSAT Hyper-V check skipped on non-Windows host." -Level WARNING -LogFile $LogFile
+        return
+    }
+
+    if (Get-Module -ListAvailable -Name "Hyper-V") {
+        return
+    }
+
+    try {
+        $rsatCapabilities = Get-WindowsCapability -Online -ErrorAction Stop |
+            Where-Object { $_.Name -match 'Rsat\..*Hyper.?V.*Tools' }
+
+        foreach ($capability in $rsatCapabilities) {
+            if ($capability.State -ne "Installed") {
+                Add-WindowsCapability -Online -Name $capability.Name -ErrorAction Stop | Out-Null
+                Write-MigrationLog "Installed Windows capability: $($capability.Name)" -Level SUCCESS -LogFile $LogFile
+            }
+        }
+    } catch {
+        Write-MigrationLog "Unable to install RSAT Hyper-V capability via Add-WindowsCapability: $_" -Level WARNING -LogFile $LogFile
+    }
+
+    if (-not (Get-Module -ListAvailable -Name "Hyper-V")) {
+        try {
+            Enable-WindowsOptionalFeature -Online -FeatureName "Microsoft-Hyper-V-Management-PowerShell" -All -NoRestart -ErrorAction Stop | Out-Null
+            Write-MigrationLog "Enabled optional feature Microsoft-Hyper-V-Management-PowerShell." -Level SUCCESS -LogFile $LogFile
+        } catch {
+            Write-MigrationLog "Unable to enable Hyper-V PowerShell management feature automatically: $_" -Level WARNING -LogFile $LogFile
         }
     }
 

@@ -29,6 +29,11 @@ If `step3` already restored the VM but failed during SCVMM network/OS/post-confi
   - `VMware.PowerCLI` or `VCF.PowerCLI` (auto-detected) / `VMware.VimAutomation.Core`
   - `Veeam.Backup.PowerShell`
   - `VirtualMachineManager`
+  - Hyper-V management cmdlets (`Hyper-V` module / RSAT Hyper-V tools on Windows hosts used for Live Migration)
+
+> Notes:
+> - If `VMware.PowerCLI`/`VCF.PowerCLI` is missing, scripts now attempt automatic installation in `CurrentUser` scope before failing.
+> - During migration validation, scripts try to install/enable RSAT Hyper-V management tooling automatically when `Move-VM` is unavailable.
 
 ### Bootstrap PowerShell on Ubuntu
 
