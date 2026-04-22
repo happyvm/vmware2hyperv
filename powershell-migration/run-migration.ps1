@@ -60,6 +60,35 @@ function Invoke-OrchestratorStep {
     }
 }
 
+function Ensure-DirectoryPresent {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -Path $Path)) {
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
+}
+
+function Convert-ToSafeFileName {
+    param(
+        [AllowNull()]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return "unnamed"
+    }
+
+    $safeValue = $Value
+    foreach ($invalidChar in [System.IO.Path]::GetInvalidFileNameChars()) {
+        $safeValue = $safeValue.Replace([string]$invalidChar, "-")
+    }
+
+    return $safeValue
+}
+
 if ($startIndex -le 0) {
     Invoke-OrchestratorStep -Step "step1" -Action {
         & "$PSScriptRoot\step1-TagResources_CreateVeeamJob.ps1" -Tag $Tag -LogFile $LogFile
@@ -78,7 +107,7 @@ if ($startIndex -le 1) {
     Write-MigrationLog "Manual validation confirmed — launching step3." -LogFile $LogFile
 }
 
-# ── Retrieving VMware VLANs (single connection, before parallel processing) ──
+# ── Retrieving VMware VLANs (single connection, before worker dispatch) ──
 
 $csvFile = $Config.Paths.CsvFile
 Assert-PathPresent -Path $csvFile -Label "batch CSV" -LogFile $LogFile
@@ -214,9 +243,9 @@ foreach ($vmName in $vmNames) {
                 }
 
                 $adapterMappings += [pscustomobject]@{
-                    MacAddress = $macAddress
+                    MacAddress  = $macAddress
                     NetworkName = [string]$networkAdapter.NetworkName
-                    VlanId = [string]$vlanIdForAdapter
+                    VlanId      = [string]$vlanIdForAdapter
                 }
             }
 
@@ -235,12 +264,14 @@ foreach ($vmName in $vmNames) {
     } else {
         $vlanId = "VM not found"
     }
+
     if ($adapterMappings.Count -gt 0) {
         $vlanSummary = ($adapterMappings | ForEach-Object { "$($_.VlanId)" }) -join ", "
         Write-MigrationLog "VLAN $vmName : $vlanSummary" -LogFile $LogFile
     } else {
         Write-MigrationLog "VLAN $vmName : $vlanId" -LogFile $LogFile
     }
+
     $vmVlans[$vmName] = $vlanId
     $vmAdapterVlans[$vmName] = $adapterMappings
     $vmRemarks[$vmName] = $remark
@@ -248,66 +279,176 @@ foreach ($vmName in $vmNames) {
 
 Disconnect-VCenter -LogFile $LogFile
 
-# ── Parallel execution per VM ────────────────────────────────────────────────
+# ── Worker-based execution per VM (step3) ───────────────────────────────────
 
-Write-MigrationLog "Parallel execution per VM (step3)..." -LogFile $LogFile
+Write-MigrationLog "Worker-based execution per VM (step3)..." -LogFile $LogFile
 Write-MigrationLog "Targeted VMs: $($vmNames -join ', ')" -LogFile $LogFile
 
-$step3MaxParallelJobs = if ($Config.Orchestrator.Step3MaxParallelJobs) { [int]$Config.Orchestrator.Step3MaxParallelJobs } else { 5 }
-$step3JobStartupDelaySec = if ($Config.Orchestrator.Step3JobStartupDelaySec -ge 0) { [int]$Config.Orchestrator.Step3JobStartupDelaySec } else { 2 }
+$step3WorkerCount = if ($Config.Orchestrator.Step3MaxParallelJobs) { [int]$Config.Orchestrator.Step3MaxParallelJobs } else { 5 }
+$step3WorkerStartupDelaySec = if ($Config.Orchestrator.Step3JobStartupDelaySec -ge 0) { [int]$Config.Orchestrator.Step3JobStartupDelaySec } else { 2 }
 
-if ($step3MaxParallelJobs -lt 1) {
-    $step3MaxParallelJobs = 1
+if ($step3WorkerCount -lt 1) {
+    $step3WorkerCount = 1
 }
 
-Write-MigrationLog "Step3 concurrency limit: $step3MaxParallelJobs parallel jobs (startup delay: ${step3JobStartupDelaySec}s)." -LogFile $LogFile
+if ($step3WorkerCount -gt $vmNames.Count) {
+    $step3WorkerCount = $vmNames.Count
+}
 
-$jobs = @()
+$workerScriptPath = "$PSScriptRoot\worker-step3.ps1"
+Assert-PathPresent -Path $workerScriptPath -Label "step3 worker script" -LogFile $LogFile
+
+Write-MigrationLog "Step3 worker pool size: $step3WorkerCount persistent worker(s) (startup delay: ${step3WorkerStartupDelaySec}s)." -LogFile $LogFile
+
+# Remove Mark-of-the-Web once, before starting persistent workers.
+Get-ChildItem -Path $PSScriptRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
+    Unblock-File -ErrorAction SilentlyContinue
+
+$queueRoot = Join-Path $Config.Paths.LogDir ("step3-worker-queue-{0}-{1}" -f (Convert-ToSafeFileName -Value $Tag), (Get-Date -Format 'yyyyMMdd-HHmmss'))
+$pendingDir = Join-Path $queueRoot "pending"
+$processingDir = Join-Path $queueRoot "processing"
+$doneDir = Join-Path $queueRoot "done"
+$failedDir = Join-Path $queueRoot "failed"
+
+Ensure-DirectoryPresent -Path $queueRoot
+Ensure-DirectoryPresent -Path $pendingDir
+Ensure-DirectoryPresent -Path $processingDir
+Ensure-DirectoryPresent -Path $doneDir
+Ensure-DirectoryPresent -Path $failedDir
+
+Write-MigrationLog "Step3 queue root: $queueRoot" -LogFile $LogFile
+
+$taskIndex = 0
 foreach ($vmName in $vmNames) {
-    while (($jobs | Where-Object { $_.State -eq "Running" }).Count -ge $step3MaxParallelJobs) {
-        Wait-Job -Job $jobs -Any | Out-Null
-    }
-
-    $vmLogFile       = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
-    $vlanId          = $vmVlans[$vmName]
+    $taskIndex++
     $adapterVlanMapJson = ConvertTo-Json -InputObject $vmAdapterVlans[$vmName] -Depth 4 -Compress
-    $operatingSystem = $vmOperatingSystems[$vmName]
-    $remark          = $vmRemarks[$vmName]
+    $vmLogFile = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $taskFileName = "{0:D4}-{1}.json" -f $taskIndex, (Convert-ToSafeFileName -Value $vmName)
+    $taskFilePath = Join-Path $pendingDir $taskFileName
 
-    $jobs += Start-Job -Name "migration-$vmName" -ScriptBlock {
-            $ErrorActionPreference = "Stop"
+    $taskPayload = [ordered]@{
+        TaskId                 = "{0:D4}" -f $taskIndex
+        Tag                    = $Tag
+        BackupJobName          = "Backup-$Tag"
+        VMName                 = $vmName
+        VlanId                 = $vmVlans[$vmName]
+        AdapterVlanMapJson     = $adapterVlanMapJson
+        OperatingSystem        = $vmOperatingSystems[$vmName]
+        Remark                 = $vmRemarks[$vmName]
+        ForceNetworkConfigOnly = [bool]$ForceNetworkConfigOnly
+        VmLogFile              = $vmLogFile
+        CreatedAt              = (Get-Date).ToString("o")
+    }
 
-            # Avoid interactive security prompts in background jobs when scripts carry a Mark-of-the-Web.
-            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
-            Get-ChildItem -Path $using:PSScriptRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
-                Unblock-File -ErrorAction SilentlyContinue
+    $taskPayload | ConvertTo-Json -Depth 8 | Set-Content -Path $taskFilePath -Encoding utf8
+}
 
-            & "$using:PSScriptRoot\step3-MigrateVM.ps1" -BackupJobName "Backup-$using:Tag" -VMName $using:vmName -VlanId $using:vlanId -AdapterVlanMapJson $using:adapterVlanMapJson -OperatingSystem $using:operatingSystem -Remark $using:remark -ForceNetworkConfigOnly:$using:ForceNetworkConfigOnly -LogFile $using:vmLogFile
-        }
+$dispatchCompleteFlag = Join-Path $queueRoot "dispatch.complete"
+New-Item -ItemType File -Path $dispatchCompleteFlag -Force | Out-Null
+Write-MigrationLog "Queued $taskIndex step3 task(s) for persistent workers." -LogFile $LogFile
 
-    if ($step3JobStartupDelaySec -gt 0) {
-        Start-Sleep -Seconds $step3JobStartupDelaySec
+$pwshCommand = Get-Command -Name "pwsh" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $pwshCommand) {
+    $message = "PowerShell 7 executable 'pwsh' not found; unable to start persistent step3 workers."
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+    throw $message
+}
+
+$workerProcesses = @()
+for ($workerIndex = 1; $workerIndex -le $step3WorkerCount; $workerIndex++) {
+    $workerName = "step3-worker-{0:D2}" -f $workerIndex
+    $workerLogFile = "$($Config.Paths.LogDir)\$workerName-$Tag-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $workerArguments = @(
+        "-NoProfile"
+        "-File"
+        $workerScriptPath
+        "-QueueRoot"
+        $queueRoot
+        "-WorkerName"
+        $workerName
+        "-LogFile"
+        $workerLogFile
+    )
+
+    $workerProcess = Start-Process -FilePath $pwshCommand.Source -ArgumentList $workerArguments -PassThru
+    $workerProcesses += [pscustomobject]@{
+        Name    = $workerName
+        Process = $workerProcess
+        LogFile = $workerLogFile
+    }
+
+    Write-MigrationLog "Started persistent step3 worker '$workerName' (PID=$($workerProcess.Id))." -LogFile $LogFile
+
+    if ($step3WorkerStartupDelaySec -gt 0) {
+        Start-Sleep -Seconds $step3WorkerStartupDelaySec
     }
 }
 
-Wait-Job -Job $jobs | Out-Null
+$workerMonitorPollIntervalSeconds = 5
+$lastProgressSnapshot = $null
 
-foreach ($job in $jobs) {
-    $jobOutput = Receive-Job -Job $job
-    if ($jobOutput) {
-        $jobOutput | ForEach-Object { Write-MigrationLog "[$($job.Name)] $_" -LogFile $LogFile }
+do {
+    $pendingCount = @(Get-ChildItem -Path $pendingDir -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
+    $processingCount = @(Get-ChildItem -Path $processingDir -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
+    $doneCount = @(Get-ChildItem -Path $doneDir -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
+    $failedCount = @(Get-ChildItem -Path $failedDir -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
+
+    $progressSnapshot = "$pendingCount|$processingCount|$doneCount|$failedCount"
+    if ($progressSnapshot -ne $lastProgressSnapshot) {
+        Write-MigrationLog "Step3 queue status: pending=$pendingCount, processing=$processingCount, done=$doneCount, failed=$failedCount." -LogFile $LogFile
+        $lastProgressSnapshot = $progressSnapshot
     }
+
+    foreach ($workerEntry in $workerProcesses) {
+        $workerEntry.Process.Refresh()
+    }
+
+    $runningWorkers = @($workerProcesses | Where-Object { -not $_.Process.HasExited })
+    if ($runningWorkers.Count -eq 0) {
+        break
+    }
+
+    Start-Sleep -Seconds $workerMonitorPollIntervalSeconds
+} while ($true)
+
+foreach ($workerEntry in $workerProcesses) {
+    $workerEntry.Process.Refresh()
+    Write-MigrationLog "Worker '$($workerEntry.Name)' exited with code $($workerEntry.Process.ExitCode). Log: $($workerEntry.LogFile)" -LogFile $LogFile
 }
 
-$failedJobs = $jobs | Where-Object { $_.State -ne "Completed" }
-if ($failedJobs) {
-    $failedNames = $failedJobs.Name -join ", "
-    Write-MigrationLog "Parallel execution incomplete. Failed jobs: $failedNames" -Level ERROR -LogFile $LogFile
-    Remove-Job -Job $jobs -Force
+$finalPendingCount = @(Get-ChildItem -Path $pendingDir -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
+$finalProcessingCount = @(Get-ChildItem -Path $processingDir -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
+$finalDoneCount = @(Get-ChildItem -Path $doneDir -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
+$finalFailedCount = @(Get-ChildItem -Path $failedDir -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
+
+Write-MigrationLog "Final step3 queue status: pending=$finalPendingCount, processing=$finalProcessingCount, done=$finalDoneCount, failed=$finalFailedCount." -LogFile $LogFile
+
+if ($finalPendingCount -gt 0 -or $finalProcessingCount -gt 0) {
+    $message = "Worker execution stopped before the queue fully drained (pending=$finalPendingCount, processing=$finalProcessingCount)."
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
     exit 1
 }
 
-Remove-Job -Job $jobs -Force
+if ($finalFailedCount -gt 0) {
+    $failedTasks = @(Get-ChildItem -Path $failedDir -Filter "*.json" -File -ErrorAction SilentlyContinue |
+        Sort-Object Name |
+        ForEach-Object {
+            try {
+                $failedTask = Get-Content -Path $_.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                if ($failedTask -and $failedTask.VMName) {
+                    [string]$failedTask.VMName
+                } else {
+                    $_.BaseName
+                }
+            } catch {
+                $_.BaseName
+            }
+        })
+
+    $failedVmList = if ($failedTasks) { $failedTasks -join ", " } else { "<unknown>" }
+    Write-MigrationLog "Worker-based step3 execution reported failures for: $failedVmList" -Level ERROR -LogFile $LogFile
+    exit 1
+}
 
 Write-MigrationLog "======================================================" -LogFile $LogFile
 Write-MigrationLog "Migration of batch $Tag completed successfully." -Level SUCCESS -LogFile $LogFile
