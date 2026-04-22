@@ -43,12 +43,12 @@ $csvTags = $csvData |
     ForEach-Object { $_.Trim() } |
     Sort-Object -Unique
 
-# VMware cleanup: remove any VM currently carrying one of the tags defined in the CSV.
-# This avoids keeping stale/migrated VMs on the VMware side before re-applying the desired CSV state.
+# VMware cleanup: remove tag assignments from any VM currently carrying one of the tags defined in the CSV.
+# This ensures we reset the batching scope before re-applying the desired CSV state.
 foreach ($csvTag in $csvTags) {
     $existingCsvTag = Get-Tag -Name $csvTag -ErrorAction SilentlyContinue
     if (-not $existingCsvTag) {
-        Write-MigrationLog "Cleanup: tag '$csvTag' does not exist yet in VMware. Nothing to delete for this tag." -LogFile $LogFile
+        Write-MigrationLog "Cleanup: tag '$csvTag' does not exist yet in VMware. Nothing to remove for this tag." -LogFile $LogFile
         continue
     }
 
@@ -67,9 +67,9 @@ foreach ($csvTag in $csvTags) {
             continue
         }
 
-        Write-MigrationLog "Cleanup: deleting VMware VM '$($taggedVm.Name)' because it has CSV tag '$csvTag'." -Level WARNING -LogFile $LogFile
-        Remove-VM -VM $taggedVm -DeletePermanently -Confirm:$false -ErrorAction Stop
-        Write-MigrationLog "Cleanup: VMware VM '$($taggedVm.Name)' deleted." -Level SUCCESS -LogFile $LogFile
+        Write-MigrationLog "Cleanup: removing CSV tag '$csvTag' from VMware VM '$($taggedVm.Name)'." -Level WARNING -LogFile $LogFile
+        Remove-TagAssignment -TagAssignment $assignment -Confirm:$false -ErrorAction Stop
+        Write-MigrationLog "Cleanup: tag '$csvTag' removed from VMware VM '$($taggedVm.Name)'." -Level SUCCESS -LogFile $LogFile
     }
 }
 
