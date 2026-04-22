@@ -494,6 +494,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $vmStateBeforeMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
         Write-MigrationLog "[$Name] Preparing host migration validation. Current host: '$($vmStateBeforeMove.HostName)'." -LogFile $LogFile
 
+        Ensure-RsatHyperVInstalled -LogFile $LogFile
         $hyperVMoveCommand = Get-Command -Name "Move-VM" -Module "Hyper-V" -ErrorAction SilentlyContinue |
             Select-Object -First 1
 
