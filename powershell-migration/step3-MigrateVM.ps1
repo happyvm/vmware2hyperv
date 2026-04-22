@@ -751,8 +751,9 @@ $VBRSCVMM = Invoke-VeeamCommand -ScriptBlock {
 } -ArgumentList @($SCVMMServer)
 
 if (!$VBRSCVMM) {
-    Write-MigrationLog "[$VMName] SCVMM $SCVMMServer is not registered in Veeam." -Level ERROR -LogFile $LogFile
-    exit 1
+    $msg = "[$VMName] SCVMM $SCVMMServer is not registered in Veeam."
+    Write-MigrationLog $msg -Level ERROR -LogFile $LogFile
+    throw $msg
 }
 
 $Backup = Invoke-VeeamCommand -ScriptBlock {
@@ -762,8 +763,9 @@ $Backup = Invoke-VeeamCommand -ScriptBlock {
 } -ArgumentList @($BackupJobName)
 
 if (!$Backup) {
-    Write-MigrationLog "[$VMName] Backup job '$BackupJobName' not found in Veeam." -Level ERROR -LogFile $LogFile
-    exit 1
+    $msg = "[$VMName] Backup job '$BackupJobName' not found in Veeam."
+    Write-MigrationLog $msg -Level ERROR -LogFile $LogFile
+    throw $msg
 }
 
 try {
@@ -881,8 +883,9 @@ $IRSession = Invoke-VeeamCommand -ScriptBlock {
 } -ArgumentList @($VMName)
 
 if (!$IRSession) {
-    Write-MigrationLog "[$VMName] No active Instant Recovery session." -Level ERROR -LogFile $LogFile
-    exit 1
+    $msg = "[$VMName] No active Instant Recovery session."
+    Write-MigrationLog $msg -Level ERROR -LogFile $LogFile
+    throw $msg
 }
 
 $vmInScvmm = Invoke-SCVMMCommand -ScriptBlock {
@@ -891,8 +894,9 @@ $vmInScvmm = Invoke-SCVMMCommand -ScriptBlock {
     Get-SCVirtualMachine -Name $Name -VMMServer $server
 } -ArgumentList @($VMName, $VMMServerName)
 if (!$vmInScvmm) {
-    Write-MigrationLog "[$VMName] VM missing from SCVMM, finalization impossible." -Level ERROR -LogFile $LogFile
-    exit 1
+    $msg = "[$VMName] VM missing from SCVMM, finalization impossible."
+    Write-MigrationLog $msg -Level ERROR -LogFile $LogFile
+    throw $msg
 }
 
 Write-MigrationLog "[$VMName] Finalizing Instant Recovery..." -LogFile $LogFile

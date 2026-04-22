@@ -89,8 +89,8 @@ $htmlBody = @"
 "@
 
 foreach ($vm in $vms) {
-    $status = if ($vm.PowerState -eq "PoweredOn") { "Up&Running" } else { "Shutdown" }
-    $htmlBody += "<tr><td>$($vm.Name)</td><td>$status</td></tr>"
+    $status = if ($vm.PowerState -eq "PoweredOn") { "Up&amp;Running" } else { "Shutdown" }
+    $htmlBody += "<tr><td>$(ConvertTo-HtmlEncoded $vm.Name)</td><td>$status</td></tr>"
 }
 
 $htmlBody += "</table></body></html>"
