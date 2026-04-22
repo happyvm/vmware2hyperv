@@ -796,28 +796,22 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $vmStateBeforeMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
         Write-MigrationLog "[$Name] Preparing host migration validation. Current host: '$($vmStateBeforeMove.HostName)'." -LogFile $LogFile
 
-        Ensure-RsatHyperVInstalled -LogFile $LogFile
-        $hyperVMoveCommand = Get-Command -Name "Move-VM" -Module "Hyper-V" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+        try {
+            Start-SCVMMHostMigration -Name $Name -ServerName $ServerName -DestinationHost $DestinationHost
+            Write-MigrationLog "[$Name] LiveMigration to $DestinationHost requested via SCVMM." -Level SUCCESS -LogFile $LogFile
+        } catch {
+            Write-MigrationLog "[$Name] SCVMM migration failed; retrying via Hyper-V Move-VM. Details: $_" -Level WARNING -LogFile $LogFile
 
-        if ($hyperVMoveCommand) {
-            try {
+            Ensure-RsatHyperVInstalled -LogFile $LogFile
+            $hyperVMoveCommand = Get-Command -Name "Move-VM" -Module "Hyper-V" -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+
+            if ($hyperVMoveCommand) {
                 & $hyperVMoveCommand -Name $TargetVM.Name -DestinationHost $DestinationHost -ErrorAction Stop
                 Write-MigrationLog "[$Name] LiveMigration to $DestinationHost performed via Hyper-V module." -Level SUCCESS -LogFile $LogFile
-            } catch {
-                if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {
-                    Write-MigrationLog "[$Name] Hyper-V Move-VM failed due to local platform limits; retrying migration via SCVMM." -Level WARNING -LogFile $LogFile
-                    Start-SCVMMHostMigration -Name $Name -ServerName $ServerName -DestinationHost $DestinationHost
-                    Write-MigrationLog "[$Name] LiveMigration to $DestinationHost requested via SCVMM after Hyper-V failure." -Level SUCCESS -LogFile $LogFile
-                } else {
-                    throw
-                }
+            } else {
+                throw "LiveMigration failed: SCVMM move failed and Hyper-V Move-VM cmdlet is unavailable on this runner."
             }
-        } else {
-            Write-MigrationLog "[$Name] Hyper-V Move-VM cmdlet unavailable on runner, trying SCVMM move." -Level WARNING -LogFile $LogFile
-            Start-SCVMMHostMigration -Name $Name -ServerName $ServerName -DestinationHost $DestinationHost
-
-            Write-MigrationLog "[$Name] LiveMigration to $DestinationHost requested via SCVMM." -Level SUCCESS -LogFile $LogFile
         }
 
         $destinationHostNormalized = Normalize-HostName -Name $DestinationHost
