@@ -261,23 +261,33 @@ function Invoke-SCVMMNetworkAndPostConfig {
         param($ServerName, $CurrentVlan)
         $server = Get-SCVMMServer -ComputerName $ServerName
 
-        $matchingVMNetwork = Get-SCVMNetwork -VMMServer $server |
+        $matchingVMNetworks = @(Get-SCVMNetwork -VMMServer $server |
             Where-Object { $_.Name -like "*$CurrentVlan*" -or $_.Description -like "*$CurrentVlan*" } |
-            Select-Object -First 1
+            Sort-Object Name)
 
-        $matchingVMSubnet = Get-SCVMSubnet -VMMServer $server |
+        $matchingVMSubnets = @(Get-SCVMSubnet -VMMServer $server |
             Where-Object { $_.Name -like "*$CurrentVlan*" -or $_.Description -like "*$CurrentVlan*" } |
-            Select-Object -First 1
+            Sort-Object Name)
+
+        $selectedVMNetwork = $matchingVMNetworks | Select-Object -First 1
+        $selectedVMSubnet = $matchingVMSubnets | Select-Object -First 1
 
         [pscustomobject]@{
-            VMNetworkName = $matchingVMNetwork.Name
-            VMSubnetName = $matchingVMSubnet.Name
+            VMNetworkName            = [string]$selectedVMNetwork.Name
+            VMSubnetName             = [string]$selectedVMSubnet.Name
+            Ambiguous                = ($matchingVMNetworks.Count -gt 1 -or $matchingVMSubnets.Count -gt 1)
+            CandidateVMNetworkNames  = @($matchingVMNetworks | ForEach-Object { [string]$_.Name })
+            CandidateVMSubnetNames   = @($matchingVMSubnets | ForEach-Object { [string]$_.Name })
         }
     } -ArgumentList @($ServerName, $Vlan)
 
     if ([string]::IsNullOrWhiteSpace($defaultNetworkMapping.VMNetworkName) -or [string]::IsNullOrWhiteSpace($defaultNetworkMapping.VMSubnetName)) {
         Write-MigrationLog "[$Name] No VMNetwork/VMSubnet found for default VLAN $Vlan." -Level WARNING -LogFile $LogFile
         return
+    }
+
+    if ($defaultNetworkMapping.Ambiguous) {
+        Write-MigrationLog "[$Name] Default VLAN mapping for VLAN $Vlan is ambiguous. Selecting first deterministic candidate: VMNetwork='$($defaultNetworkMapping.VMNetworkName)', VMSubnet='$($defaultNetworkMapping.VMSubnetName)'. Candidates VMNetwork='$($defaultNetworkMapping.CandidateVMNetworkNames -join ', ')'; VMSubnet='$($defaultNetworkMapping.CandidateVMSubnetNames -join ', ')'." -Level WARNING -LogFile $LogFile
     }
 
     $TargetVM = Invoke-SCVMMCommand -ScriptBlock {
@@ -308,7 +318,10 @@ function Invoke-SCVMMNetworkAndPostConfig {
             $LogicalSwitch,
             $PortClassificationName,
             $Description,
-            $AdapterVlanMappings
+            $AdapterVlanMappings,
+            $DefaultMappingAmbiguous,
+            $DefaultMappingCandidateVMNetworkNames,
+            $DefaultMappingCandidateVMSubnetNames
         )
         $server = Get-SCVMMServer -ComputerName $ServerName
         $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq "HyperV" } | Select-Object -First 1
@@ -423,6 +436,10 @@ function Invoke-SCVMMNetworkAndPostConfig {
             VMNetwork = $vmNetwork
             VMSubnet = $vmSubnet
             Vlan = $Vlan
+            Ambiguous = [bool]$DefaultMappingAmbiguous
+            CandidateVMNetworkNames = @($DefaultMappingCandidateVMNetworkNames)
+            CandidateVMSubnetNames = @($DefaultMappingCandidateVMSubnetNames)
+            ResolutionMode = 'default-vlan'
         }
 
         $adapterMappings = @()
@@ -436,46 +453,55 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 $mappingNetworkName = [string]$adapterMapping.NetworkName
 
                 if (-not $networkMappingsByVlan.ContainsKey($mappingVlan)) {
-                    $matchingVMNetwork = Get-SCVMNetwork -VMMServer $server |
+                    $matchingVMNetworks = @(Get-SCVMNetwork -VMMServer $server |
                         Where-Object { $_.Name -like "*$mappingVlan*" -or $_.Description -like "*$mappingVlan*" } |
-                        Select-Object -First 1
-                    $matchingVMSubnet = Get-SCVMSubnet -VMMServer $server |
+                        Sort-Object Name)
+                    $matchingVMSubnets = @(Get-SCVMSubnet -VMMServer $server |
                         Where-Object { $_.Name -like "*$mappingVlan*" -or $_.Description -like "*$mappingVlan*" } |
-                        Select-Object -First 1
+                        Sort-Object Name)
 
-                    if ($matchingVMNetwork -and $matchingVMSubnet) {
+                    if ($matchingVMNetworks.Count -gt 0 -and $matchingVMSubnets.Count -gt 0) {
                         $networkMappingsByVlan[$mappingVlan] = [pscustomobject]@{
-                            VMNetwork = $matchingVMNetwork
-                            VMSubnet = $matchingVMSubnet
+                            VMNetwork = $matchingVMNetworks | Select-Object -First 1
+                            VMSubnet = $matchingVMSubnets | Select-Object -First 1
                             Vlan = $mappingVlan
+                            Ambiguous = ($matchingVMNetworks.Count -gt 1 -or $matchingVMSubnets.Count -gt 1)
+                            CandidateVMNetworkNames = @($matchingVMNetworks | ForEach-Object { [string]$_.Name })
+                            CandidateVMSubnetNames = @($matchingVMSubnets | ForEach-Object { [string]$_.Name })
+                            ResolutionMode = 'vlan'
                         }
                     }
                 }
 
                 if (-not [string]::IsNullOrWhiteSpace($mappingNetworkName) -and -not $networkMappingsBySourceNetworkName.ContainsKey($mappingNetworkName)) {
-                    $matchingByNetworkName = Get-SCVMNetwork -VMMServer $server |
+                    $matchingByNetworkName = @(Get-SCVMNetwork -VMMServer $server |
                         Where-Object { $_.Name -eq $mappingNetworkName -or $_.Description -eq $mappingNetworkName } |
-                        Select-Object -First 1
+                        Sort-Object Name)
 
                     if (-not $matchingByNetworkName) {
-                        $matchingByNetworkName = Get-SCVMNetwork -VMMServer $server |
+                        $matchingByNetworkName = @(Get-SCVMNetwork -VMMServer $server |
                             Where-Object { $_.Name -like "*$mappingNetworkName*" -or $_.Description -like "*$mappingNetworkName*" } |
-                            Select-Object -First 1
+                            Sort-Object Name)
                     }
 
-                    if ($matchingByNetworkName) {
-                        $matchingSubnetByNetworkName = Get-SCVMSubnet -VMMServer $server |
+                    if ($matchingByNetworkName.Count -gt 0) {
+                        $selectedNetworkByName = $matchingByNetworkName | Select-Object -First 1
+                        $matchingSubnetByNetworkName = @(Get-SCVMSubnet -VMMServer $server |
                             Where-Object {
-                                ($_.VMNetwork -and $_.VMNetwork.ID -eq $matchingByNetworkName.ID) -or
-                                ($_.VMNetworkName -and $_.VMNetworkName -eq $matchingByNetworkName.Name)
+                                ($_.VMNetwork -and $_.VMNetwork.ID -eq $selectedNetworkByName.ID) -or
+                                ($_.VMNetworkName -and $_.VMNetworkName -eq $selectedNetworkByName.Name)
                             } |
-                            Select-Object -First 1
+                            Sort-Object Name)
 
-                        if ($matchingSubnetByNetworkName) {
+                        if ($matchingSubnetByNetworkName.Count -gt 0) {
                             $networkMappingsBySourceNetworkName[$mappingNetworkName] = [pscustomobject]@{
-                                VMNetwork = $matchingByNetworkName
-                                VMSubnet = $matchingSubnetByNetworkName
+                                VMNetwork = $selectedNetworkByName
+                                VMSubnet = $matchingSubnetByNetworkName | Select-Object -First 1
                                 Vlan = if ($mappingVlan -match '^\d+$') { $mappingVlan } else { $Vlan }
+                                Ambiguous = ($matchingByNetworkName.Count -gt 1 -or $matchingSubnetByNetworkName.Count -gt 1)
+                                CandidateVMNetworkNames = @($matchingByNetworkName | ForEach-Object { [string]$_.Name })
+                                CandidateVMSubnetNames = @($matchingSubnetByNetworkName | ForEach-Object { [string]$_.Name })
+                                ResolutionMode = 'source-network-name'
                             }
                         }
                     }
@@ -487,6 +513,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $fallbackMappedAdapters = 0
         $indexedFallbackMappedAdapters = 0
         $macMatchedAdapters = 0
+        $adapterResolutionWarnings = New-Object 'System.Collections.Generic.List[string]'
 
         $macMatchesByTargetIndex = @{}
         $indexFallbackByTargetIndex = @{}
@@ -588,6 +615,23 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 $fallbackMappedAdapters++
             }
 
+            if ($desiredMapping -and $desiredMapping.Ambiguous) {
+                $sourceMacText = if ($selectedSourceAdapter) { [string]$selectedSourceAdapter.MacAddress } else { '<unknown>' }
+                $sourceNetworkText = if ($selectedSourceAdapter) { [string]$selectedSourceAdapter.NetworkName } else { '<default-vlan>' }
+                $sourceVlanText = if ($selectedSourceAdapter -and $selectedSourceAdapter.VlanId) { [string]$selectedSourceAdapter.VlanId } else { [string]$desiredMapping.Vlan }
+                $candidateNetworksText = if ($desiredMapping.CandidateVMNetworkNames) { $desiredMapping.CandidateVMNetworkNames -join ', ' } else { '<none>' }
+                $candidateSubnetsText = if ($desiredMapping.CandidateVMSubnetNames) { $desiredMapping.CandidateVMSubnetNames -join ', ' } else { '<none>' }
+                $selectedVmNetworkText = [string]$desiredMapping.VMNetwork.Name
+                $selectedVmSubnetText = [string]$desiredMapping.VMSubnet.Name
+                $resolutionReason = switch ([string]$desiredMapping.ResolutionMode) {
+                    'source-network-name' { 'Ambiguous source-network-name match; first deterministic candidate selected.' }
+                    'vlan' { 'Ambiguous VLAN match; first deterministic candidate selected.' }
+                    default { 'Ambiguous default VLAN mapping; first deterministic candidate selected.' }
+                }
+
+                [void]$adapterResolutionWarnings.Add("[$Name] Adapter #$($adapterIndex + 1) ambiguous mapping. SourceMac='$sourceMacText'; SourceNetwork='$sourceNetworkText'; SourceVlan='$sourceVlanText'; SelectedVMNetwork='$selectedVmNetworkText'; SelectedVMSubnet='$selectedVmSubnetText'; CandidateVMNetworks='$candidateNetworksText'; CandidateVMSubnets='$candidateSubnetsText'; Reason='$resolutionReason'")
+            }
+
             $setAdapterParameters = @{
                 VirtualNetworkAdapter = $networkAdapter
                 VMNetwork             = $desiredMapping.VMNetwork
@@ -628,6 +672,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
             MacMatchedAdapterCount    = $macMatchedAdapters
             FallbackAdapterCount      = $fallbackMappedAdapters
             IndexedFallbackCount      = $indexedFallbackMappedAdapters
+            AdapterWarnings           = @($adapterResolutionWarnings)
         }
 
         $setVmParameters = @{
@@ -653,7 +698,10 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $Config.SCVMM.Network.LogicalSwitchName,
         $Config.SCVMM.Network.PortClassificationName,
         $SourceRemark,
-        $AdapterVlanMappings
+        $AdapterVlanMappings,
+        [bool]$defaultNetworkMapping.Ambiguous,
+        @($defaultNetworkMapping.CandidateVMNetworkNames),
+        @($defaultNetworkMapping.CandidateVMSubnetNames)
             )
             break
         } catch {
@@ -676,6 +724,14 @@ function Invoke-SCVMMNetworkAndPostConfig {
 
     if ($networkResult -and $networkResult.FallbackAdapterCount -gt 0) {
         Write-MigrationLog "[$Name] $($networkResult.FallbackAdapterCount)/$($networkResult.AdapterCount) adapter(s) had no exact match and were kept on default VLAN $Vlan." -Level WARNING -LogFile $LogFile
+    }
+
+    if ($networkResult -and $networkResult.AdapterWarnings) {
+        foreach ($adapterWarning in @($networkResult.AdapterWarnings)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$adapterWarning)) {
+                Write-MigrationLog $adapterWarning -Level WARNING -LogFile $LogFile
+            }
+        }
     }
 
     Write-MigrationLog "[$Name] Network configured (default VLAN $Vlan, multi-adapter mapping enabled)." -Level SUCCESS -LogFile $LogFile
