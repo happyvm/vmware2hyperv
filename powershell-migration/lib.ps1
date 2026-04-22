@@ -167,7 +167,7 @@ function Import-RequiredModule {
                 Install-Module -Name $candidateName -Scope CurrentUser -AllowClobber -Force -ErrorAction Stop
                 Write-MigrationLog "PowerCLI module installed for current user: $candidateName" -Level SUCCESS -LogFile $LogFile
             } catch {
-                Write-MigrationLog "Automatic install failed for $candidateName: $_" -Level WARNING -LogFile $LogFile
+                Write-MigrationLog "Automatic install failed for ${candidateName}: $_" -Level WARNING -LogFile $LogFile
             }
         }
 
