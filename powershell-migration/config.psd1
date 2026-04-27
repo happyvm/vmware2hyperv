@@ -10,6 +10,10 @@
         Network = @{
             PortClassificationName = "PC_VMNetwork"
             LogicalSwitchName      = "LS_SET_VMNetwork"
+            # Optional allowlists to limit SCVMM network/subnet discovery to configured objects only.
+            # Leave empty arrays to keep the previous discovery behavior.
+            AllowedVmNetworkNames  = @()
+            AllowedVmSubnetNames   = @()
         }
 
         # Source OS labels (for example from the batch CSV / CMDB) mapped to exact SCVMM OS names

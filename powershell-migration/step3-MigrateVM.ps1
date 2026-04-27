@@ -292,6 +292,8 @@ function Invoke-SCVMMNetworkAndPostConfig {
             $PortClassificationName,
             $Description,
             $AdapterVlanMappings,
+            $AllowedVmNetworkNames,
+            $AllowedVmSubnetNames,
             $InventoryCacheTtlMinutes,
             $ForceInventoryRefresh
         )
@@ -325,6 +327,32 @@ function Invoke-SCVMMNetworkAndPostConfig {
             if ($ForceRefresh -or -not $existingCache -or $isExpired) {
                 $allVMNetworks = @(Get-SCVMNetwork -VMMServer $Server | Sort-Object Name)
                 $allVMSubnets = @(Get-SCVMSubnet -VMMServer $Server | Sort-Object Name)
+
+                if ($AllowedVmNetworkNames -and $AllowedVmNetworkNames.Count -gt 0) {
+                    $allowedVmNetworkNameSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($allowedNetworkName in $AllowedVmNetworkNames) {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$allowedNetworkName)) {
+                            [void]$allowedVmNetworkNameSet.Add([string]$allowedNetworkName)
+                        }
+                    }
+
+                    $allVMNetworks = @($allVMNetworks | Where-Object {
+                        $allowedVmNetworkNameSet.Contains([string]$_.Name)
+                    })
+                }
+
+                if ($AllowedVmSubnetNames -and $AllowedVmSubnetNames.Count -gt 0) {
+                    $allowedVmSubnetNameSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($allowedSubnetName in $AllowedVmSubnetNames) {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$allowedSubnetName)) {
+                            [void]$allowedVmSubnetNameSet.Add([string]$allowedSubnetName)
+                        }
+                    }
+
+                    $allVMSubnets = @($allVMSubnets | Where-Object {
+                        $allowedVmSubnetNameSet.Contains([string]$_.Name)
+                    })
+                }
                 $allPortClassifications = @(Get-SCPortClassification -VMMServer $Server)
 
                 $vmNetworksByVlan = @{}
@@ -844,6 +872,8 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $Config.SCVMM.Network.PortClassificationName,
         $SourceRemark,
         $AdapterVlanMappings,
+        @($Config.SCVMM.Network.AllowedVmNetworkNames),
+        @($Config.SCVMM.Network.AllowedVmSubnetNames),
         $(if ($Config.SCVMM.Network.InventoryCacheTtlMinutes -is [int]) { $Config.SCVMM.Network.InventoryCacheTtlMinutes } else { 10 }),
         ($networkConfigAttempt -gt 1)
             )
@@ -1297,7 +1327,12 @@ try {
                 break
             }
 
-            if ($finalizationCheck.Result -eq "Failed" -or $finalizationCheck.Result -eq "Warning") {
+            if ($finalizationCheck.Result -eq "Warning") {
+                Write-MigrationLog "[$VMName] Restore session '$($finalizationCheck.Name)' ended with result 'Warning'. Continuing with SCVMM network/post-configuration and keeping execution non-blocking." -Level WARNING -LogFile $LogFile
+                break
+            }
+
+            if ($finalizationCheck.Result -eq "Failed") {
                 throw "Restore session '$($finalizationCheck.Name)' ended with result '$($finalizationCheck.Result)'."
             }
         }
