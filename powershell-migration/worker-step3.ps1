@@ -40,6 +40,29 @@ function Write-TaskStateFile {
     $TaskObject | ConvertTo-Json -Depth 10 | Set-Content -Path $Path -Encoding utf8
 }
 
+function Get-NetworkConfigurationState {
+    param(
+        [AllowNull()]
+        [string]$VmLogFile
+    )
+
+    if ([string]::IsNullOrWhiteSpace($VmLogFile) -or -not (Test-Path -Path $VmLogFile)) {
+        return "Unknown"
+    }
+
+    $successMatch = Select-String -Path $VmLogFile -Pattern "Network configured (default VLAN" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
+    if ($successMatch) {
+        return "Configured"
+    }
+
+    $warningMatch = Select-String -Path $VmLogFile -Pattern "fallback mapping used" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
+    if ($warningMatch) {
+        return "ConfiguredWithWarning"
+    }
+
+    return "NotDetected"
+}
+
 Write-MigrationLog "[$WorkerName] Persistent step3 worker starting. Queue root: $QueueRoot" -LogFile $LogFile
 
 try {
@@ -105,12 +128,14 @@ while ($true) {
             -AdapterVlanMapJson ([string]$task.AdapterVlanMapJson) `
             -OperatingSystem ([string]$task.OperatingSystem) `
             -Remark ([string]$task.Remark) `
+            -SkipInstantRecoveryStart:$([bool]$task.SkipInstantRecoveryStart) `
             -ForceNetworkConfigOnly:$([bool]$task.ForceNetworkConfigOnly) `
             -LogFile ([string]$task.VmLogFile)
 
         $task | Add-Member -NotePropertyName Status -NotePropertyValue "Success" -Force
         $task | Add-Member -NotePropertyName CompletedAt -NotePropertyValue (Get-Date).ToString("o") -Force
         $task | Add-Member -NotePropertyName ErrorMessage -NotePropertyValue $null -Force
+        $task | Add-Member -NotePropertyName NetworkConfigurationState -NotePropertyValue (Get-NetworkConfigurationState -VmLogFile ([string]$task.VmLogFile)) -Force
 
         Write-TaskStateFile -Path (Join-Path $doneDir $nextTask.Name) -TaskObject $task
         Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
@@ -120,6 +145,7 @@ while ($true) {
         $task | Add-Member -NotePropertyName CompletedAt -NotePropertyValue (Get-Date).ToString("o") -Force
         $task | Add-Member -NotePropertyName ErrorMessage -NotePropertyValue $_.Exception.Message -Force
         $task | Add-Member -NotePropertyName ErrorRecord -NotePropertyValue ([string]$_) -Force
+        $task | Add-Member -NotePropertyName NetworkConfigurationState -NotePropertyValue (Get-NetworkConfigurationState -VmLogFile ([string]$task.VmLogFile)) -Force
 
         Write-TaskStateFile -Path (Join-Path $failedDir $nextTask.Name) -TaskObject $task
         Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue

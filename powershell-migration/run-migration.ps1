@@ -21,7 +21,16 @@ param (
     [string]$ConfigFile,
 
     # Re-run only the network/OS/post-configuration part of step3
-    [switch]$ForceNetworkConfigOnly
+    [switch]$ForceNetworkConfigOnly,
+
+    # Restrict step3 execution to a single VM (incident recovery mode)
+    [string]$Step3VmName,
+
+    # Incident recovery mode for a single VM:
+    # - FullStep3: re-run complete step3
+    # - CommitAndNetwork: re-run only instant recovery commit + network/post-config
+    [ValidateSet("Standard", "FullStep3", "CommitAndNetwork")]
+    [string]$Step3RecoveryMode = "Standard"
 )
 
 . "$PSScriptRoot\lib.ps1"
@@ -35,6 +44,8 @@ Write-MigrationLog "======================================================" -Log
 Write-MigrationLog "Starting migration for batch: $Tag" -LogFile $LogFile
 Write-MigrationLog "Starting step: $StartFrom" -LogFile $LogFile
 Write-MigrationLog "Force network-only replay: $ForceNetworkConfigOnly" -LogFile $LogFile
+Write-MigrationLog "Step3 VM filter: $Step3VmName" -LogFile $LogFile
+Write-MigrationLog "Step3 recovery mode: $Step3RecoveryMode" -LogFile $LogFile
 Write-MigrationLog "======================================================" -LogFile $LogFile
 
 $steps = @("step1", "step2", "step3")
@@ -192,6 +203,15 @@ $csvRows = Import-Csv -Path $csvFile -Delimiter ";"
 $vmRows = @($csvRows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.VMName) })
 $vmNames = @($vmRows | Select-Object -ExpandProperty VMName | Sort-Object -Unique)
 
+if ($Step3RecoveryMode -ne "Standard" -and [string]::IsNullOrWhiteSpace($Step3VmName)) {
+    throw "Step3RecoveryMode '$Step3RecoveryMode' requires -Step3VmName."
+}
+
+if (-not [string]::IsNullOrWhiteSpace($Step3VmName)) {
+    $vmRows = @($vmRows | Where-Object { $_.VMName -eq $Step3VmName })
+    $vmNames = @($vmRows | Select-Object -ExpandProperty VMName | Sort-Object -Unique)
+}
+
 if (-not $vmNames) {
     Write-MigrationLog "No VM found in CSV." -Level ERROR -LogFile $LogFile
     exit 1
@@ -333,9 +353,62 @@ foreach ($vmName in $vmNames) {
 
 Disconnect-VCenter -LogFile $LogFile
 
-# ── Worker-based execution per VM (step3) ───────────────────────────────────
+$runInstantRecoveryStartOutsideWorkers = $false
+$workerForceNetworkOnly = [bool]$ForceNetworkConfigOnly
+$workerSkipInstantRecoveryStart = $false
 
-Write-MigrationLog "Worker-based execution per VM (step3)..." -LogFile $LogFile
+switch ($Step3RecoveryMode) {
+    "Standard" {
+        if (-not $ForceNetworkConfigOnly) {
+            $runInstantRecoveryStartOutsideWorkers = $true
+            $workerSkipInstantRecoveryStart = $true
+        }
+    }
+    "FullStep3" {
+        if ($ForceNetworkConfigOnly) {
+            throw "Step3RecoveryMode 'FullStep3' is incompatible with -ForceNetworkConfigOnly."
+        }
+
+        $runInstantRecoveryStartOutsideWorkers = $true
+        $workerForceNetworkOnly = $false
+        $workerSkipInstantRecoveryStart = $true
+    }
+    "CommitAndNetwork" {
+        if ($ForceNetworkConfigOnly) {
+            throw "Step3RecoveryMode 'CommitAndNetwork' is incompatible with -ForceNetworkConfigOnly."
+        }
+
+        $runInstantRecoveryStartOutsideWorkers = $false
+        $workerForceNetworkOnly = $false
+        $workerSkipInstantRecoveryStart = $true
+    }
+}
+
+# ── Instant Recovery outside workers (step3) ─────────────────────────────────
+
+if ($runInstantRecoveryStartOutsideWorkers) {
+    Write-MigrationLog "Step3 phase 1/2: launching Instant Recovery start outside workers (commit/bascule remains in workers)." -LogFile $LogFile
+
+    foreach ($vmName in $vmNames) {
+        $vmLogFile = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+        $adapterVlanMapJson = ConvertTo-Json -InputObject $vmAdapterVlans[$vmName] -Depth 4 -Compress
+
+        & "$PSScriptRoot\step3-MigrateVM.ps1" `
+            -BackupJobName "Backup-$Tag" `
+            -VMName $vmName `
+            -VlanId $vmVlans[$vmName] `
+            -AdapterVlanMapJson $adapterVlanMapJson `
+            -OperatingSystem $vmOperatingSystems[$vmName] `
+            -Remark $vmRemarks[$vmName] `
+            -SkipInstantRecoveryFinalization `
+            -SkipNetworkAndPostConfig `
+            -LogFile $vmLogFile
+    }
+}
+
+# ── Worker-based commit+bascule and network/post-configuration execution (step3) ─────────
+
+Write-MigrationLog "Step3 phase 2/2: worker-based execution per VM for commit/bascule and network/post-configuration..." -LogFile $LogFile
 Write-MigrationLog "Targeted VMs: $($vmNames -join ', ')" -LogFile $LogFile
 
 $step3WorkerCount = if ($Config.Orchestrator.Step3MaxParallelJobs) { [int]$Config.Orchestrator.Step3MaxParallelJobs } else { 5 }
@@ -389,7 +462,8 @@ foreach ($vmName in $vmNames) {
         AdapterVlanMapJson     = $adapterVlanMapJson
         OperatingSystem        = $vmOperatingSystems[$vmName]
         Remark                 = $vmRemarks[$vmName]
-        ForceNetworkConfigOnly = [bool]$ForceNetworkConfigOnly
+        ForceNetworkConfigOnly = $workerForceNetworkOnly
+        SkipInstantRecoveryStart = $workerSkipInstantRecoveryStart
         VmLogFile              = $vmLogFile
         CreatedAt              = (Get-Date).ToString("o")
     }
@@ -476,6 +550,34 @@ $finalDoneCount = @(Get-ChildItem -Path $doneDir -Filter "*.json" -File -ErrorAc
 $finalFailedCount = @(Get-ChildItem -Path $failedDir -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
 
 Write-MigrationLog "Final step3 queue status: pending=$finalPendingCount, processing=$finalProcessingCount, done=$finalDoneCount, failed=$finalFailedCount." -LogFile $LogFile
+
+$networkStateSummary = @{}
+$completedTaskFiles = @(Get-ChildItem -Path $doneDir -Filter "*.json" -File -ErrorAction SilentlyContinue) +
+    @(Get-ChildItem -Path $failedDir -Filter "*.json" -File -ErrorAction SilentlyContinue)
+foreach ($taskFile in $completedTaskFiles) {
+    try {
+        $taskState = Get-Content -Path $taskFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $networkState = [string]$taskState.NetworkConfigurationState
+        if ([string]::IsNullOrWhiteSpace($networkState)) {
+            $networkState = "Unknown"
+        }
+
+        if (-not $networkStateSummary.ContainsKey($networkState)) {
+            $networkStateSummary[$networkState] = 0
+        }
+        $networkStateSummary[$networkState]++
+    } catch {
+        if (-not $networkStateSummary.ContainsKey("Unknown")) {
+            $networkStateSummary["Unknown"] = 0
+        }
+        $networkStateSummary["Unknown"]++
+    }
+}
+
+if ($networkStateSummary.Count -gt 0) {
+    $summaryText = ($networkStateSummary.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ", "
+    Write-MigrationLog "Step3 worker network configuration state summary: $summaryText" -LogFile $LogFile
+}
 
 if ($finalPendingCount -gt 0 -or $finalProcessingCount -gt 0) {
     $message = "Worker execution stopped before the queue fully drained (pending=$finalPendingCount, processing=$finalProcessingCount)."

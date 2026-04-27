@@ -20,6 +20,9 @@ param (
     [int]$WaitingTimeoutSeconds = 1800,
     [int]$WaitingPollIntervalSeconds = 15,
     [switch]$ForceNetworkConfigOnly,
+    [switch]$SkipInstantRecoveryStart,
+    [switch]$SkipInstantRecoveryFinalization,
+    [switch]$SkipNetworkAndPostConfig,
     [string]$LogFile
 )
 
@@ -79,11 +82,16 @@ if (-not $ClusterStorage){ $ClusterStorage = $Config.HyperV.ClusterStorage }
 if (-not $BackupTag)     { $BackupTag     = $Config.Tags.BackupTag }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step3-migrate-$VMName-$(Get-Date -Format 'yyyyMMdd').log" }
 
+if ($ForceNetworkConfigOnly) {
+    $SkipInstantRecoveryStart = $true
+    $SkipInstantRecoveryFinalization = $true
+}
+
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
-if (-not $ForceNetworkConfigOnly) {
+if (-not $SkipInstantRecoveryStart -or -not $SkipInstantRecoveryFinalization) {
     Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
 } else {
-    Write-MigrationLog "[$VMName] ForceNetworkConfigOnly enabled: skipping Veeam module import." -LogFile $LogFile
+    Write-MigrationLog "[$VMName] Instant Recovery start/finalization disabled: skipping Veeam module import." -LogFile $LogFile
 }
 
 function Invoke-VeeamCommand {
@@ -1074,7 +1082,9 @@ try {
 
 # ── Instant Recovery: start ─────────────────────────────────────────────
 
-if (-not $ForceNetworkConfigOnly) {
+if (-not $SkipInstantRecoveryStart -or -not $SkipInstantRecoveryFinalization) {
+
+if (-not $SkipInstantRecoveryStart) {
 
 Write-MigrationLog "[$VMName] Checking SCVMM in Veeam..." -LogFile $LogFile
 $VBRSCVMM = Invoke-VeeamCommand -ScriptBlock {
@@ -1206,8 +1216,13 @@ try {
     Write-MigrationLog "[$VMName] Instant Recovery error: $_" -Level ERROR -LogFile $LogFile
     throw
 }
+} else {
+    Write-MigrationLog "[$VMName] SkipInstantRecoveryStart enabled: skipping Instant Recovery start/wait phase." -Level WARNING -LogFile $LogFile
+}
 
 # ── Instant Recovery: finalization ─────────────────────────────────────────
+
+if (-not $SkipInstantRecoveryFinalization) {
 
 $IRSession = Invoke-VeeamCommand -ScriptBlock {
     param($Vm)
@@ -1298,12 +1313,24 @@ try {
     Write-MigrationLog "[$VMName] Finalization error: $_" -Level ERROR -LogFile $LogFile
     throw
 }
+} else {
+    Write-MigrationLog "[$VMName] SkipInstantRecoveryFinalization enabled: skipping Instant Recovery commit/finalization phase." -Level WARNING -LogFile $LogFile
+}
+} else {
+    Write-MigrationLog "[$VMName] SkipInstantRecoveryStart enabled: skipping Instant Recovery start/wait phase." -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "[$VMName] SkipInstantRecoveryFinalization enabled: skipping Instant Recovery commit/finalization phase." -Level WARNING -LogFile $LogFile
 }
 
 # ── Network mapping ────────────────────────────────────────────────────────────
 
 if ($ForceNetworkConfigOnly) {
     Write-MigrationLog "[$VMName] ForceNetworkConfigOnly enabled: skipping Instant Recovery/finalization and replaying only network/OS/post-configuration actions." -Level WARNING -LogFile $LogFile
+}
+
+if ($SkipNetworkAndPostConfig) {
+    Write-MigrationLog "[$VMName] SkipNetworkAndPostConfig enabled: Instant Recovery phase completed; network/post-configuration skipped." -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "[$VMName] Migration completed (Instant Recovery only mode)." -Level SUCCESS -LogFile $LogFile
+    return
 }
 
 $adapterVlanMappings = @()
