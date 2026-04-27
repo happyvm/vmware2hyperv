@@ -128,16 +128,6 @@ function Import-RequiredModule {
     function Try-ImportModuleCandidate {
         param([string]$CandidateName)
 
-        if ($PSVersionTable.PSEdition -eq "Core" -and $UseWindowsPowerShellFallback) {
-            try {
-                Import-Module -Name $CandidateName -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop 3>$null
-                Write-MigrationLog "Module imported via Windows PowerShell compatibility mode: $CandidateName" -Level WARNING -LogFile $LogFile
-                return $true
-            } catch {
-                Write-MigrationLog "Windows PowerShell compatibility mode import failed for $CandidateName, trying standard import." -Level WARNING -LogFile $LogFile
-            }
-        }
-
         try {
             Import-Module -Name $CandidateName -DisableNameChecking -ErrorAction Stop 3>$null
             Write-MigrationLog "Module imported: $CandidateName" -LogFile $LogFile
@@ -149,7 +139,17 @@ function Import-RequiredModule {
                     Write-MigrationLog "Module imported via SkipEditionCheck fallback: $CandidateName" -Level WARNING -LogFile $LogFile
                     return $true
                 } catch {
-                    Write-MigrationLog "Unable to import module $CandidateName (standard import and fallbacks failed): $_" -Level WARNING -LogFile $LogFile
+                    if ($UseWindowsPowerShellFallback) {
+                        try {
+                            Import-Module -Name $CandidateName -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop 3>$null
+                            Write-MigrationLog "Module imported via Windows PowerShell compatibility mode: $CandidateName" -Level WARNING -LogFile $LogFile
+                            return $true
+                        } catch {
+                            Write-MigrationLog "Unable to import module $CandidateName (standard import, SkipEditionCheck, and Windows PowerShell compatibility mode failed): $_" -Level WARNING -LogFile $LogFile
+                        }
+                    } else {
+                        Write-MigrationLog "Unable to import module $CandidateName (standard import and SkipEditionCheck failed): $_" -Level WARNING -LogFile $LogFile
+                    }
                 }
             } else {
                 Write-MigrationLog "Unable to import module $CandidateName : $_" -Level WARNING -LogFile $LogFile
