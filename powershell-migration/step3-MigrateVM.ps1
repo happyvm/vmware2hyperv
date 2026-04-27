@@ -306,6 +306,55 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 [switch]$ForceRefresh
             )
 
+            function Test-ScvmmObjectMatchesLogicalSwitch {
+                param(
+                    $InputObject,
+                    [string]$LogicalSwitchName
+                )
+
+                if (-not $InputObject -or [string]::IsNullOrWhiteSpace($LogicalSwitchName)) {
+                    return $false
+                }
+
+                $target = $LogicalSwitchName.Trim().ToLowerInvariant()
+                $candidateValues = New-Object System.Collections.ArrayList
+
+                foreach ($propertyName in @(
+                    "LogicalSwitchName",
+                    "LogicalSwitch",
+                    "VMLogicalSwitchName",
+                    "VMLogicalSwitch",
+                    "VirtualNetwork",
+                    "VirtualNetworkName"
+                )) {
+                    if ($InputObject.PSObject.Properties[$propertyName]) {
+                        $propertyValue = $InputObject.$propertyName
+                        if ($propertyValue -is [System.Collections.IEnumerable] -and -not ($propertyValue -is [string])) {
+                            foreach ($entry in $propertyValue) {
+                                if ($entry -and $entry.PSObject -and $entry.PSObject.Properties["Name"]) {
+                                    [void]$candidateValues.Add([string]$entry.Name)
+                                }
+                                [void]$candidateValues.Add([string]$entry)
+                            }
+                        } else {
+                            if ($propertyValue -and $propertyValue.PSObject -and $propertyValue.PSObject.Properties["Name"]) {
+                                [void]$candidateValues.Add([string]$propertyValue.Name)
+                            }
+                            [void]$candidateValues.Add([string]$propertyValue)
+                        }
+                    }
+                }
+
+                foreach ($candidate in $candidateValues) {
+                    if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                    if ($candidate.Trim().ToLowerInvariant() -eq $target) {
+                        return $true
+                    }
+                }
+
+                return $false
+            }
+
             if (-not $script:ScvmmInventoryCacheByServer) {
                 $script:ScvmmInventoryCacheByServer = @{}
             }
@@ -352,6 +401,52 @@ function Invoke-SCVMMNetworkAndPostConfig {
                     $allVMSubnets = @($allVMSubnets | Where-Object {
                         $allowedVmSubnetNameSet.Contains([string]$_.Name)
                     })
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace([string]$LogicalSwitch)) {
+                    $targetLogicalSwitchName = [string]$LogicalSwitch
+                    $allVMNetworks = @($allVMNetworks | Where-Object {
+                        Test-ScvmmObjectMatchesLogicalSwitch -InputObject $_ -LogicalSwitchName $targetLogicalSwitchName
+                    })
+
+                    $vmNetworkIdSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    $vmNetworkNameSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($networkEntry in $allVMNetworks) {
+                        if ($networkEntry.ID) {
+                            [void]$vmNetworkIdSet.Add([string]$networkEntry.ID)
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace([string]$networkEntry.Name)) {
+                            [void]$vmNetworkNameSet.Add([string]$networkEntry.Name)
+                        }
+                    }
+
+                    $allVMSubnets = @($allVMSubnets | Where-Object {
+                        $subnet = $_
+
+                        $subnetVmNetworkId = $null
+                        if ($subnet.VMNetwork -and $subnet.VMNetwork.ID) {
+                            $subnetVmNetworkId = [string]$subnet.VMNetwork.ID
+                        } elseif ($subnet.VMNetworkID) {
+                            $subnetVmNetworkId = [string]$subnet.VMNetworkID
+                        }
+
+                        if (-not [string]::IsNullOrWhiteSpace($subnetVmNetworkId) -and $vmNetworkIdSet.Contains($subnetVmNetworkId)) {
+                            return $true
+                        }
+
+                        if ($subnet.VMNetworkName -and $vmNetworkNameSet.Contains([string]$subnet.VMNetworkName)) {
+                            return $true
+                        }
+
+                        return (Test-ScvmmObjectMatchesLogicalSwitch -InputObject $subnet -LogicalSwitchName $targetLogicalSwitchName)
+                    })
+
+                    if ($allVMNetworks.Count -eq 0) {
+                        throw "No SCVMM VMNetwork matches configured logical switch '$targetLogicalSwitchName'."
+                    }
+                    if ($allVMSubnets.Count -eq 0) {
+                        throw "No SCVMM VMSubnet matches configured logical switch '$targetLogicalSwitchName'."
+                    }
                 }
                 $allPortClassifications = @(Get-SCPortClassification -VMMServer $Server)
 
