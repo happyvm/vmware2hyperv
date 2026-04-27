@@ -292,6 +292,8 @@ function Invoke-SCVMMNetworkAndPostConfig {
             $PortClassificationName,
             $Description,
             $AdapterVlanMappings,
+            $AllowedVmNetworkNames,
+            $AllowedVmSubnetNames,
             $InventoryCacheTtlMinutes,
             $ForceInventoryRefresh
         )
@@ -303,6 +305,55 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 [int]$CacheTtlMinutes = 10,
                 [switch]$ForceRefresh
             )
+
+            function Test-ScvmmObjectMatchesLogicalSwitch {
+                param(
+                    $InputObject,
+                    [string]$LogicalSwitchName
+                )
+
+                if (-not $InputObject -or [string]::IsNullOrWhiteSpace($LogicalSwitchName)) {
+                    return $false
+                }
+
+                $target = $LogicalSwitchName.Trim().ToLowerInvariant()
+                $candidateValues = New-Object System.Collections.ArrayList
+
+                foreach ($propertyName in @(
+                    "LogicalSwitchName",
+                    "LogicalSwitch",
+                    "VMLogicalSwitchName",
+                    "VMLogicalSwitch",
+                    "VirtualNetwork",
+                    "VirtualNetworkName"
+                )) {
+                    if ($InputObject.PSObject.Properties[$propertyName]) {
+                        $propertyValue = $InputObject.$propertyName
+                        if ($propertyValue -is [System.Collections.IEnumerable] -and -not ($propertyValue -is [string])) {
+                            foreach ($entry in $propertyValue) {
+                                if ($entry -and $entry.PSObject -and $entry.PSObject.Properties["Name"]) {
+                                    [void]$candidateValues.Add([string]$entry.Name)
+                                }
+                                [void]$candidateValues.Add([string]$entry)
+                            }
+                        } else {
+                            if ($propertyValue -and $propertyValue.PSObject -and $propertyValue.PSObject.Properties["Name"]) {
+                                [void]$candidateValues.Add([string]$propertyValue.Name)
+                            }
+                            [void]$candidateValues.Add([string]$propertyValue)
+                        }
+                    }
+                }
+
+                foreach ($candidate in $candidateValues) {
+                    if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                    if ($candidate.Trim().ToLowerInvariant() -eq $target) {
+                        return $true
+                    }
+                }
+
+                return $false
+            }
 
             if (-not $script:ScvmmInventoryCacheByServer) {
                 $script:ScvmmInventoryCacheByServer = @{}
@@ -325,6 +376,78 @@ function Invoke-SCVMMNetworkAndPostConfig {
             if ($ForceRefresh -or -not $existingCache -or $isExpired) {
                 $allVMNetworks = @(Get-SCVMNetwork -VMMServer $Server | Sort-Object Name)
                 $allVMSubnets = @(Get-SCVMSubnet -VMMServer $Server | Sort-Object Name)
+
+                if ($AllowedVmNetworkNames -and $AllowedVmNetworkNames.Count -gt 0) {
+                    $allowedVmNetworkNameSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($allowedNetworkName in $AllowedVmNetworkNames) {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$allowedNetworkName)) {
+                            [void]$allowedVmNetworkNameSet.Add([string]$allowedNetworkName)
+                        }
+                    }
+
+                    $allVMNetworks = @($allVMNetworks | Where-Object {
+                        $allowedVmNetworkNameSet.Contains([string]$_.Name)
+                    })
+                }
+
+                if ($AllowedVmSubnetNames -and $AllowedVmSubnetNames.Count -gt 0) {
+                    $allowedVmSubnetNameSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($allowedSubnetName in $AllowedVmSubnetNames) {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$allowedSubnetName)) {
+                            [void]$allowedVmSubnetNameSet.Add([string]$allowedSubnetName)
+                        }
+                    }
+
+                    $allVMSubnets = @($allVMSubnets | Where-Object {
+                        $allowedVmSubnetNameSet.Contains([string]$_.Name)
+                    })
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace([string]$LogicalSwitch)) {
+                    $targetLogicalSwitchName = [string]$LogicalSwitch
+                    $allVMNetworks = @($allVMNetworks | Where-Object {
+                        Test-ScvmmObjectMatchesLogicalSwitch -InputObject $_ -LogicalSwitchName $targetLogicalSwitchName
+                    })
+
+                    $vmNetworkIdSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    $vmNetworkNameSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($networkEntry in $allVMNetworks) {
+                        if ($networkEntry.ID) {
+                            [void]$vmNetworkIdSet.Add([string]$networkEntry.ID)
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace([string]$networkEntry.Name)) {
+                            [void]$vmNetworkNameSet.Add([string]$networkEntry.Name)
+                        }
+                    }
+
+                    $allVMSubnets = @($allVMSubnets | Where-Object {
+                        $subnet = $_
+
+                        $subnetVmNetworkId = $null
+                        if ($subnet.VMNetwork -and $subnet.VMNetwork.ID) {
+                            $subnetVmNetworkId = [string]$subnet.VMNetwork.ID
+                        } elseif ($subnet.VMNetworkID) {
+                            $subnetVmNetworkId = [string]$subnet.VMNetworkID
+                        }
+
+                        if (-not [string]::IsNullOrWhiteSpace($subnetVmNetworkId) -and $vmNetworkIdSet.Contains($subnetVmNetworkId)) {
+                            return $true
+                        }
+
+                        if ($subnet.VMNetworkName -and $vmNetworkNameSet.Contains([string]$subnet.VMNetworkName)) {
+                            return $true
+                        }
+
+                        return (Test-ScvmmObjectMatchesLogicalSwitch -InputObject $subnet -LogicalSwitchName $targetLogicalSwitchName)
+                    })
+
+                    if ($allVMNetworks.Count -eq 0) {
+                        throw "No SCVMM VMNetwork matches configured logical switch '$targetLogicalSwitchName'."
+                    }
+                    if ($allVMSubnets.Count -eq 0) {
+                        throw "No SCVMM VMSubnet matches configured logical switch '$targetLogicalSwitchName'."
+                    }
+                }
                 $allPortClassifications = @(Get-SCPortClassification -VMMServer $Server)
 
                 $vmNetworksByVlan = @{}
@@ -844,6 +967,8 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $Config.SCVMM.Network.PortClassificationName,
         $SourceRemark,
         $AdapterVlanMappings,
+        @($Config.SCVMM.Network.AllowedVmNetworkNames),
+        @($Config.SCVMM.Network.AllowedVmSubnetNames),
         $(if ($Config.SCVMM.Network.InventoryCacheTtlMinutes -is [int]) { $Config.SCVMM.Network.InventoryCacheTtlMinutes } else { 10 }),
         ($networkConfigAttempt -gt 1)
             )
@@ -1297,7 +1422,12 @@ try {
                 break
             }
 
-            if ($finalizationCheck.Result -eq "Failed" -or $finalizationCheck.Result -eq "Warning") {
+            if ($finalizationCheck.Result -eq "Warning") {
+                Write-MigrationLog "[$VMName] Restore session '$($finalizationCheck.Name)' ended with result 'Warning'. Continuing with SCVMM network/post-configuration and keeping execution non-blocking." -Level WARNING -LogFile $LogFile
+                break
+            }
+
+            if ($finalizationCheck.Result -eq "Failed") {
                 throw "Restore session '$($finalizationCheck.Name)' ended with result '$($finalizationCheck.Result)'."
             }
         }

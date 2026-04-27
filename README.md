@@ -74,6 +74,8 @@ SCVMM = @{
     Network = @{
         PortClassificationName = "PC_VMNetwork"
         LogicalSwitchName      = "LS_SET_VMNetwork"
+        AllowedVmNetworkNames  = @("VMNetwork-1816", "VMNetwork-2001")
+        AllowedVmSubnetNames   = @("Subnet-1816", "Subnet-2001")
     }
     OperatingSystemMap = @{
         "Windows Server 2025 Datacenter"                = "Windows Server 2025 Datacenter"
@@ -88,6 +90,9 @@ SCVMM = @{
     }
 }
 ```
+
+When `AllowedVmNetworkNames` / `AllowedVmSubnetNames` are configured, step3 limits SCVMM network discovery to those objects instead of parsing the full SCVMM inventory.
+Step3 also filters discovered VM networks/subnets to the configured `LogicalSwitchName` to avoid mapping on a different SCVMM switch.
 
 The source labels are normalized before lookup (case-insensitive, separators collapsed, and a leading `Microsoft` vendor prefix removed), so values such as `Windows_Server_2019`, `windows server 2019`, and `Microsoft Windows Server 2019` resolve to the same mapping key.
 
