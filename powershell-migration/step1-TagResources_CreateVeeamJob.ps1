@@ -3,6 +3,7 @@ param (
     [string]$CsvFile,
     [string]$TagCategory,
     [string]$BackupRepoName,
+    [string]$BackupProxyName,
     [string]$Tag,      # Optional - to add context to the log
     [string]$LogFile
 )
@@ -14,6 +15,7 @@ if (-not $VCenterServer) { $VCenterServer = $Config.VCenter.Server }
 if (-not $CsvFile)       { $CsvFile       = $Config.Paths.CsvFile }
 if (-not $TagCategory)   { $TagCategory   = $Config.Tags.Category }
 if (-not $BackupRepoName){ $BackupRepoName = $Config.Veeam.BackupRepo }
+if (-not $BackupProxyName){ $BackupProxyName = $Config.Veeam.BackupProxy }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step1-tag-veeam$(if ($Tag) { "-$Tag" })-$(Get-Date -Format 'yyyyMMdd').log" }
 
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
@@ -112,10 +114,20 @@ if ($PSVersionTable.PSEdition -eq "Core") {
 $BackupRepoName = $env:VMW2HV_BACKUP_REPO_NAME
 $VCenterServer = $env:VMW2HV_VCENTER_SERVER
 $TagsJson = $env:VMW2HV_TAGS_JSON
+$BackupProxyName = $env:VMW2HV_BACKUP_PROXY_NAME
 
 Import-Module Veeam.Backup.PowerShell -DisableNameChecking -ErrorAction Stop
 $backupRepo = Get-VBRBackupRepository -Name $BackupRepoName -ErrorAction Stop
 $availableVeeamTags = Find-VBRViEntity -Tags -Server $VCenterServer
+$backupProxy = $null
+if (-not [string]::IsNullOrWhiteSpace($BackupProxyName)) {
+    $backupProxy = Get-VBRViProxy -Name $BackupProxyName -ErrorAction SilentlyContinue
+    if (-not $backupProxy) {
+        Write-Output "[ERROR] Backup proxy '$BackupProxyName' not found in Veeam."
+        exit 1
+    }
+    Write-Output "[INFO] Using backup proxy '$BackupProxyName' for newly created jobs."
+}
 $tags = @()
 if (-not [string]::IsNullOrWhiteSpace($TagsJson)) {
     $tags = ConvertFrom-Json -InputObject $TagsJson
@@ -136,7 +148,11 @@ foreach ($tagName in $tags) {
     $job = Get-VBRJob -Name $jobName -ErrorAction SilentlyContinue
 
     if (-not $job) {
-        Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
+        if ($backupProxy) {
+            Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag -Proxy $backupProxy | Out-Null
+        } else {
+            Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
+        }
         Write-Output "[SUCCESS] Created backup job: $jobName"
     } else {
         Write-Output "[INFO] The job $jobName already exists."
@@ -148,10 +164,12 @@ foreach ($tagName in $tags) {
     $previousBackupRepoName = $env:VMW2HV_BACKUP_REPO_NAME
     $previousVCenterServer = $env:VMW2HV_VCENTER_SERVER
     $previousTagsJson = $env:VMW2HV_TAGS_JSON
+    $previousBackupProxyName = $env:VMW2HV_BACKUP_PROXY_NAME
 
     $env:VMW2HV_BACKUP_REPO_NAME = $BackupRepoName
     $env:VMW2HV_VCENTER_SERVER = $VCenterServer
     $env:VMW2HV_TAGS_JSON = $tagsJson
+    $env:VMW2HV_BACKUP_PROXY_NAME = $BackupProxyName
 
     try {
         $winPsOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedScript 2>&1
@@ -161,6 +179,7 @@ foreach ($tagName in $tags) {
         $env:VMW2HV_BACKUP_REPO_NAME = $previousBackupRepoName
         $env:VMW2HV_VCENTER_SERVER = $previousVCenterServer
         $env:VMW2HV_TAGS_JSON = $previousTagsJson
+        $env:VMW2HV_BACKUP_PROXY_NAME = $previousBackupProxyName
     }
 
     foreach ($line in $winPsOutput) {
@@ -183,6 +202,16 @@ foreach ($tagName in $tags) {
 } else {
     $backupRepo = Get-VBRBackupRepository -Name $BackupRepoName
     $availableVeeamTags = Find-VBRViEntity -Tags -Server $VCenterServer
+$backupProxy = $null
+    if (-not [string]::IsNullOrWhiteSpace($BackupProxyName)) {
+        $backupProxy = Get-VBRViProxy -Name $BackupProxyName -ErrorAction SilentlyContinue
+        if (-not $backupProxy) {
+            $message = "Backup proxy '$BackupProxyName' not found in Veeam."
+            Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+            throw $message
+        }
+        Write-MigrationLog "Using backup proxy '$BackupProxyName' for newly created jobs." -LogFile $LogFile
+    }
 
     foreach ($tagName in $csvTags) {
         $vmwareTag = $availableVeeamTags | Where-Object { $_.Name -eq $tagName } | Select-Object -First 1
@@ -196,7 +225,11 @@ foreach ($tagName in $tags) {
 
         if (-not $job) {
             Write-MigrationLog "Creating backup job: $jobName" -LogFile $LogFile
-            Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
+            if ($backupProxy) {
+                Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag -Proxy $backupProxy | Out-Null
+            } else {
+                Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
+            }
         } else {
             Write-MigrationLog "The job $jobName already exists." -LogFile $LogFile
         }
