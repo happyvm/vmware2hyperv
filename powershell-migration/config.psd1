@@ -72,7 +72,8 @@
     }
 
     Veeam = @{
-        BackupRepo = "SN_LocalRepo"
+        BackupRepo  = "SN_LocalRepo"
+        BackupProxy = "" # Optional: Veeam backup proxy name used when creating jobs
     }
 
     Tags = @{

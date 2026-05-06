@@ -54,6 +54,7 @@ Default configuration is stored in:
 Update at least:
 
 - Infrastructure endpoints (`VCenter`, `SCVMM`, `HyperV`, `Veeam`)
+  - In `Veeam`, `BackupProxy` is optional and lets you force the proxy used when creating backup jobs in step1
 - Tag names (`Tags`)
 - SMTP and recipients (`Smtp`, `Recipients`)
 - Paths (`Paths`), especially:
