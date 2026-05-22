@@ -291,11 +291,12 @@ function Test-Flow {
     $latency = "--"
 
     try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
         $sw  = [System.Diagnostics.Stopwatch]::StartNew()
-        $tcn = Test-NetConnection -ComputerName $Destination -Port $Port `
-                   -WarningAction SilentlyContinue -InformationLevel Quiet
+        $ar  = $tcp.BeginConnect($Destination, $Port, $null, $null)
+        $ok  = $ar.AsyncWaitHandle.WaitOne(2000, $false)
         $sw.Stop()
-        if ($tcn) {
+        if ($ok -and $tcp.Connected) {
             $status  = "PASS"
             $latency = "{0} ms" -f [int]$sw.ElapsedMilliseconds
             $script:PassCount++
@@ -303,6 +304,7 @@ function Test-Flow {
             $status = "FAIL"
             $script:FailCount++
         }
+        $tcp.Close()
     } catch {
         $script:FailCount++
     }
