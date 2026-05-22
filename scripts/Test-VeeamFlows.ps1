@@ -295,7 +295,7 @@ function Test-Flow {
         $tcn = Test-NetConnection -ComputerName $Destination -Port $Port `
                    -WarningAction SilentlyContinue -InformationLevel Quiet
         $sw.Stop()
-        if ($tcn.TcpTestSucceeded) {
+        if ($tcn) {
             $status  = "PASS"
             $latency = "{0} ms" -f [int]$sw.ElapsedMilliseconds
             $script:PassCount++
