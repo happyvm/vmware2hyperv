@@ -5,7 +5,8 @@ Describe 'PowerShell scripts syntax' {
         $repoRoot = Split-Path -Parent $PSScriptRoot
         $scriptFiles = @(
             Get-ChildItem -Path (Join-Path -Path $repoRoot -ChildPath 'powershell-migration') -Filter '*.ps1' -File
-            Get-ChildItem -Path (Join-Path -Path $repoRoot -ChildPath 'tests') -Filter '*.ps1' -File
+            Get-ChildItem -Path (Join-Path -Path $repoRoot -ChildPath 'scripts')              -Filter '*.ps1' -File
+            Get-ChildItem -Path (Join-Path -Path $repoRoot -ChildPath 'tests')                -Filter '*.ps1' -File
         )
     }
 

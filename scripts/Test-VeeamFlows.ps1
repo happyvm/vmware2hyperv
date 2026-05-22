@@ -1,11 +1,13 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Validation des flux reseau Veeam B&R selon le role de la machine.
+    Validation des flux reseau Veeam B&R 12.3 selon le role de la machine.
 
 .DESCRIPTION
     Selectionne le role de la machine courante et ne demande que les variables
     necessaires a ce role. Teste uniquement les flux partant de cette machine.
+
+    Reference : matrice de ports Veeam Backup & Replication 12.3.
 
     Roles disponibles :
       VBR        - Serveur VBR seul (proxy sur machine separee)
@@ -15,8 +17,8 @@
       HyperV     - Hote Hyper-V
 
     Variables demandees par role :
-      VBR        -> HyperV hosts, SCVMM, [SQL]
-      VBRProxy   -> HyperV hosts, SCVMM, [SQL]
+      VBR        -> vCenter, HyperV hosts, SCVMM, [ESXi hosts], [SQL]
+      VBRProxy   -> vCenter, HyperV hosts, SCVMM, [ESXi hosts], [SQL]
       Proxy      -> VBR, HyperV hosts, SCVMM
       SCVMM      -> VBR, HyperV hosts, [SQL]
       HyperV     -> VBR, [Proxy], [autres hotes HyperV]
@@ -37,6 +39,13 @@
 .PARAMETER SCVMMServer
     FQDN ou IP du serveur SCVMM
 
+.PARAMETER VCenterServer
+    FQDN ou IP du serveur vCenter (infrastructure VMware source)
+
+.PARAMETER ESXiHosts
+    Tableau de FQDN ou IP des hotes ESXi source (optionnel).
+    Requis pour tester le canal NBD (port 902) en mode VBRProxy.
+
 .PARAMETER SQLServer
     FQDN ou IP du serveur SQL (optionnel)
 
@@ -53,8 +62,9 @@
         -HyperVHosts hv02,hv03 -ExportCSV C:\Temp\flows.csv
 
 .EXAMPLE
-    # Non-interactif depuis le VBR+Proxy
-    .\Test-VeeamFlows.ps1 -Role VBRProxy -HyperVHosts hv01,hv02,hv03 `
+    # Non-interactif VBR+Proxy (source VMware -> cible Hyper-V, VBR 12.3)
+    .\Test-VeeamFlows.ps1 -Role VBRProxy -VCenterServer vcenter01 `
+        -ESXiHosts esxi01,esxi02 -HyperVHosts hv01,hv02,hv03 `
         -SCVMMServer scvmm01 -SQLServer sql01
 #>
 
@@ -68,6 +78,8 @@ param(
     [Parameter(Mandatory=$false)] [string]   $ProxyServer,
     [Parameter(Mandatory=$false)] [string[]] $HyperVHosts,
     [Parameter(Mandatory=$false)] [string]   $SCVMMServer,
+    [Parameter(Mandatory=$false)] [string]   $VCenterServer,
+    [Parameter(Mandatory=$false)] [string[]] $ESXiHosts,
     [Parameter(Mandatory=$false)] [string]   $SQLServer,
     [Parameter(Mandatory=$false)] [string]   $ExportCSV
 )
@@ -88,16 +100,16 @@ $RoleDefs = [ordered]@{
     VBR      = @{
         Label      = "VBR seul"
         Desc       = "Serveur VBR — le proxy est sur une machine separee"
-        Required   = @("HyperVHosts","SCVMMServer")
-        Optional   = @("SQLServer")
+        Required   = @("HyperVHosts","SCVMMServer","VCenterServer")
+        Optional   = @("SQLServer","ESXiHosts")
         NeedVBR    = $false
         NeedProxy  = $false
     }
     VBRProxy = @{
         Label      = "VBR + Proxy integre"
         Desc       = "Serveur VBR qui assure aussi le role de proxy"
-        Required   = @("HyperVHosts","SCVMMServer")
-        Optional   = @("SQLServer")
+        Required   = @("HyperVHosts","SCVMMServer","VCenterServer")
+        Optional   = @("SQLServer","ESXiHosts")
         NeedVBR    = $false
         NeedProxy  = $false
     }
@@ -138,7 +150,7 @@ function Write-Line([string]$Char = "=", [int]$Width = 100, [string]$Color = "Cy
 function Write-Banner {
     Write-Host ""
     Write-Line
-    Write-Host "  VEEAM NETWORK FLOW VALIDATOR  --  Hyper-V / SCVMM  --  v3.0" -ForegroundColor White
+    Write-Host "  VEEAM NETWORK FLOW VALIDATOR  --  Hyper-V / SCVMM / VMware  --  VBR 12.3" -ForegroundColor White
     Write-Line
     Write-Host ("  Machine  : {0}" -f $env:COMPUTERNAME) -ForegroundColor Gray
     Write-Host ("  Heure    : {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")) -ForegroundColor Gray
@@ -164,7 +176,7 @@ function Show-RoleMenu {
     return $keys[$n - 1]
 }
 
-function Prompt-Required([string]$VarName, [string]$Label, [bool]$IsArray = $false) {
+function Read-RequiredInput([string]$VarName, [string]$Label, [bool]$IsArray = $false) {
     do {
         $val = Read-Host ("  {0}" -f $Label)
         $val = $val.Trim()
@@ -176,7 +188,7 @@ function Prompt-Required([string]$VarName, [string]$Label, [bool]$IsArray = $fal
     return $val
 }
 
-function Prompt-Optional([string]$Label, [bool]$IsArray = $false) {
+function Read-OptionalInput([string]$Label, [bool]$IsArray = $false) {
     $val = Read-Host ("  {0} [Entree pour ignorer]" -f $Label)
     $val = $val.Trim()
     if ([string]::IsNullOrWhiteSpace($val)) { return $null }
@@ -186,7 +198,7 @@ function Prompt-Optional([string]$Label, [bool]$IsArray = $false) {
     return $val
 }
 
-function Collect-Variables([string]$SelectedRole) {
+function Initialize-Variables([string]$SelectedRole) {
     $def = $RoleDefs[$SelectedRole]
 
     Write-Host ""
@@ -196,31 +208,40 @@ function Collect-Variables([string]$SelectedRole) {
     Write-Host ""
 
     # VBR
-    if ("VBRServer" -in $def.Required -and -not $VBRServer) {
-        $script:VBRServer = Prompt-Required "VBRServer" "* Serveur VBR (FQDN ou IP)"
+    if ("VBRServer" -in $def.Required -and -not $script:VBRServer) {
+        $script:VBRServer = Read-RequiredInput "VBRServer" "* Serveur VBR (FQDN ou IP)"
     }
     # Proxy
-    if ("ProxyServer" -in $def.Required -and -not $ProxyServer) {
-        $script:ProxyServer = Prompt-Required "ProxyServer" "* Proxy off-host (FQDN ou IP)"
+    if ("ProxyServer" -in $def.Required -and -not $script:ProxyServer) {
+        $script:ProxyServer = Read-RequiredInput "ProxyServer" "* Proxy off-host (FQDN ou IP)"
     }
-    if ("ProxyServer" -in $def.Optional -and -not $ProxyServer) {
-        $script:ProxyServer = Prompt-Optional "  Proxy off-host (FQDN ou IP)"
+    if ("ProxyServer" -in $def.Optional -and -not $script:ProxyServer) {
+        $script:ProxyServer = Read-OptionalInput "  Proxy off-host (FQDN ou IP)"
     }
     # HyperV hosts
-    if ("HyperVHosts" -in $def.Required -and (-not $HyperVHosts -or $HyperVHosts.Count -eq 0)) {
-        $script:HyperVHosts = Prompt-Required "HyperVHosts" "* Hotes Hyper-V (FQDN/IP, separes par virgules)" -IsArray $true
+    if ("HyperVHosts" -in $def.Required -and (-not $script:HyperVHosts -or $script:HyperVHosts.Count -eq 0)) {
+        $script:HyperVHosts = Read-RequiredInput "HyperVHosts" "* Hotes Hyper-V (FQDN/IP, separes par virgules)" -IsArray $true
     }
-    if ("HyperVHosts" -in $def.Optional -and (-not $HyperVHosts -or $HyperVHosts.Count -eq 0)) {
-        $v = Prompt-Optional "  Autres hotes Hyper-V pour Live Migration (virgules)" -IsArray $true
+    if ("HyperVHosts" -in $def.Optional -and (-not $script:HyperVHosts -or $script:HyperVHosts.Count -eq 0)) {
+        $v = Read-OptionalInput "  Autres hotes Hyper-V pour Live Migration (virgules)" -IsArray $true
         if ($v) { $script:HyperVHosts = $v }
     }
     # SCVMM
-    if ("SCVMMServer" -in $def.Required -and -not $SCVMMServer) {
-        $script:SCVMMServer = Prompt-Required "SCVMMServer" "* Serveur SCVMM (FQDN ou IP)"
+    if ("SCVMMServer" -in $def.Required -and -not $script:SCVMMServer) {
+        $script:SCVMMServer = Read-RequiredInput "SCVMMServer" "* Serveur SCVMM (FQDN ou IP)"
+    }
+    # vCenter (source VMware)
+    if ("VCenterServer" -in $def.Required -and -not $script:VCenterServer) {
+        $script:VCenterServer = Read-RequiredInput "VCenterServer" "* Serveur vCenter source (FQDN ou IP)"
+    }
+    # ESXi hosts (optionnel — requis pour test NBD en VBRProxy)
+    if ("ESXiHosts" -in $def.Optional -and (-not $script:ESXiHosts -or $script:ESXiHosts.Count -eq 0)) {
+        $v = Read-OptionalInput "  Hotes ESXi source (FQDN/IP, virgules) -- requis pour test NBD (port 902)" -IsArray $true
+        if ($v) { $script:ESXiHosts = $v }
     }
     # SQL
-    if ("SQLServer" -in $def.Optional -and -not $SQLServer) {
-        $v = Prompt-Optional "  Serveur SQL distant (FQDN ou IP)"
+    if ("SQLServer" -in $def.Optional -and -not $script:SQLServer) {
+        $v = Read-OptionalInput "  Serveur SQL distant (FQDN ou IP)"
         if ($v) { $script:SQLServer = $v }
     }
 
@@ -233,11 +254,13 @@ function Show-Config([string]$SelectedRole) {
     Write-Line "-" 100 "DarkGray"
     Write-Host ("  Role      : {0} -- {1}" -f $def.Label, $def.Desc) -ForegroundColor Cyan
     Write-Host ("  Machine   : {0}" -f $env:COMPUTERNAME) -ForegroundColor Gray
-    if ($script:VBRServer)    { Write-Host ("  VBR       : {0}" -f $script:VBRServer)    -ForegroundColor Gray }
-    if ($script:ProxyServer)  { Write-Host ("  Proxy     : {0}" -f $script:ProxyServer)  -ForegroundColor Gray }
-    if ($script:HyperVHosts)  { Write-Host ("  Hyper-V   : {0}" -f ($script:HyperVHosts -join ", ")) -ForegroundColor Gray }
-    if ($script:SCVMMServer)  { Write-Host ("  SCVMM     : {0}" -f $script:SCVMMServer)  -ForegroundColor Gray }
-    if ($script:SQLServer)    { Write-Host ("  SQL       : {0}" -f $script:SQLServer)    -ForegroundColor Gray }
+    if ($script:VBRServer)     { Write-Host ("  VBR       : {0}" -f $script:VBRServer)     -ForegroundColor Gray }
+    if ($script:ProxyServer)   { Write-Host ("  Proxy     : {0}" -f $script:ProxyServer)   -ForegroundColor Gray }
+    if ($script:HyperVHosts)   { Write-Host ("  Hyper-V   : {0}" -f ($script:HyperVHosts -join ", "))  -ForegroundColor Gray }
+    if ($script:SCVMMServer)   { Write-Host ("  SCVMM     : {0}" -f $script:SCVMMServer)   -ForegroundColor Gray }
+    if ($script:VCenterServer) { Write-Host ("  vCenter   : {0}" -f $script:VCenterServer) -ForegroundColor Gray }
+    if ($script:ESXiHosts)     { Write-Host ("  ESXi      : {0}" -f ($script:ESXiHosts -join ", "))     -ForegroundColor Gray }
+    if ($script:SQLServer)     { Write-Host ("  SQL       : {0}" -f $script:SQLServer)     -ForegroundColor Gray }
     Write-Line "-" 100 "DarkGray"
     Write-Host ""
 }
@@ -320,7 +343,21 @@ function Test-DNS([string[]]$Hosts) {
 # ─────────────────────────────────────────────────────────────────────────────
 
 function Invoke-VBR {
-    # Flux de management uniquement (pas de data : le proxy gere ca)
+    # --- VMware source (infrastructure de depart) ---
+    Write-SectionHeader "VBR -> vCenter Server  (VMware source - API)"
+    Test-Flow $script:VCenterServer 443 -Desc "vSphere API (HTTPS)"
+    Test-Flow $script:VCenterServer 80  -Desc "HTTP (redirect HTTPS)"
+
+    if ($script:ESXiHosts -and $script:ESXiHosts.Count -gt 0) {
+        Write-SectionHeader "VBR -> Hotes ESXi  (VMware source - API uniquement)"
+        Write-Host "  Note : port 902 NBD gere par le proxy off-host" -ForegroundColor DarkGray
+        foreach ($esxi in $script:ESXiHosts) {
+            Write-Host ("  -- {0}" -f $esxi) -ForegroundColor DarkCyan
+            Test-Flow $esxi 443 -Desc "vSphere API (HTTPS)"
+        }
+    }
+
+    # --- Infrastructure Hyper-V cible (management uniquement) ---
     Write-SectionHeader "VBR -> Hotes Hyper-V  (management)"
     foreach ($hv in $script:HyperVHosts) {
         Write-Host ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
@@ -346,13 +383,32 @@ function Invoke-VBR {
         Test-Flow $script:SQLServer 1434 -Desc "SQL Browser"
     }
 
-    $dns = @($script:SCVMMServer) + $script:HyperVHosts
+    $dns = @($script:VCenterServer, $script:SCVMMServer) + $script:HyperVHosts
+    if ($script:ESXiHosts) { $dns += $script:ESXiHosts }
     if ($script:SQLServer) { $dns += $script:SQLServer }
     Test-DNS $dns
 }
 
 function Invoke-VBRProxy {
-    # Flux management + data (le VBR est aussi proxy)
+    # --- VMware source (infrastructure de depart) ---
+    Write-SectionHeader "VBR+Proxy -> vCenter Server  (VMware source - API)"
+    Test-Flow $script:VCenterServer 443 -Desc "vSphere API (HTTPS)"
+    Test-Flow $script:VCenterServer 80  -Desc "HTTP (redirect HTTPS)"
+
+    if ($script:ESXiHosts -and $script:ESXiHosts.Count -gt 0) {
+        Write-SectionHeader "VBR+Proxy -> Hotes ESXi  (VMware source - API + NBD)"
+        foreach ($esxi in $script:ESXiHosts) {
+            Write-Host ("  -- {0}" -f $esxi) -ForegroundColor DarkCyan
+            Test-Flow $esxi 443 -Desc "vSphere API (HTTPS)"
+            Test-Flow $esxi 902 -Desc "VMware Host Agent (NBD data)"
+        }
+    } else {
+        Write-Host ""
+        Write-Host "  [!] ESXiHosts non specifie : port 902 NBD non teste." -ForegroundColor DarkYellow
+        Write-Host "      Utilisez -ESXiHosts esxi01,esxi02 pour valider le canal NBD." -ForegroundColor DarkYellow
+    }
+
+    # --- Infrastructure Hyper-V cible (management + data) ---
     Write-SectionHeader "VBR+Proxy -> Hotes Hyper-V  (management + data)"
     foreach ($hv in $script:HyperVHosts) {
         Write-Host ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
@@ -380,7 +436,8 @@ function Invoke-VBRProxy {
         Test-Flow $script:SQLServer 1434 -Desc "SQL Browser"
     }
 
-    $dns = @($script:SCVMMServer) + $script:HyperVHosts
+    $dns = @($script:VCenterServer, $script:SCVMMServer) + $script:HyperVHosts
+    if ($script:ESXiHosts) { $dns += $script:ESXiHosts }
     if ($script:SQLServer) { $dns += $script:SQLServer }
     Test-DNS $dns
 }
@@ -425,7 +482,8 @@ function Invoke-SCVMM {
     Write-SectionHeader "SCVMM -> VBR"
     Test-Flow $script:VBRServer 135  -Desc "RPC Endpoint Mapper"
     Test-Flow $script:VBRServer 445  -Desc "SMB / CIFS"
-    Test-Flow $script:VBRServer 9392 -Desc "Veeam REST API"
+    Test-Flow $script:VBRServer 9392 -Desc "VBR Console"
+    Test-Flow $script:VBRServer 9419 -Desc "VBR REST API (12.x)"
 
     if ($script:SQLServer) {
         Write-SectionHeader "SCVMM -> SQL Server  (base SCVMM)"
@@ -454,7 +512,8 @@ function Invoke-HyperV {
 
     Write-SectionHeader "Hyper-V -> VBR  (console / REST)"
     Test-Flow $script:VBRServer 443  -Desc "REST API / Console HTTPS"
-    Test-Flow $script:VBRServer 9392 -Desc "Veeam REST API"
+    Test-Flow $script:VBRServer 9392 -Desc "VBR Console"
+    Test-Flow $script:VBRServer 9419 -Desc "VBR REST API (12.x)"
 
     if ($script:HyperVHosts -and $script:HyperVHosts.Count -gt 0) {
         Write-SectionHeader "Hyper-V -> Autres hotes  (Live Migration / Cluster)"
@@ -509,12 +568,14 @@ function Write-Summary {
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Promouvoir les params en variables de script pour permettre la mise a jour
-# depuis Collect-Variables (contournement du scope PowerShell)
-$script:VBRServer   = $VBRServer
-$script:ProxyServer = $ProxyServer
-$script:HyperVHosts = $HyperVHosts
-$script:SCVMMServer = $SCVMMServer
-$script:SQLServer   = $SQLServer
+# depuis Initialize-Variables (contournement du scope PowerShell)
+$script:VBRServer     = $VBRServer
+$script:ProxyServer   = $ProxyServer
+$script:HyperVHosts   = $HyperVHosts
+$script:SCVMMServer   = $SCVMMServer
+$script:VCenterServer = $VCenterServer
+$script:ESXiHosts     = $ESXiHosts
+$script:SQLServer     = $SQLServer
 
 Write-Banner
 
@@ -526,7 +587,7 @@ if ($Role) {
 }
 
 # Collecte des variables manquantes
-Collect-Variables $script:ActiveRole
+Initialize-Variables $script:ActiveRole
 
 # Affichage de la configuration retenue
 Show-Config $script:ActiveRole
