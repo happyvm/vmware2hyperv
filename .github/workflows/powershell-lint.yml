@@ -26,9 +26,12 @@ jobs:
         run: |
           Set-StrictMode -Version Latest
 
-          $scripts = Get-ChildItem -Path ./powershell-migration -Filter *.ps1 -File -Recurse
+          $scripts = @(
+            Get-ChildItem -Path ./powershell-migration -Filter *.ps1 -File -Recurse
+            Get-ChildItem -Path ./scripts              -Filter *.ps1 -File -Recurse
+          )
           if (-not $scripts) {
-            throw 'No PowerShell scripts found in ./powershell-migration'
+            throw 'No PowerShell scripts found in ./powershell-migration or ./scripts'
           }
 
           $results = foreach ($script in $scripts) {
