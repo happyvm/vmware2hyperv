@@ -17,9 +17,9 @@
       HyperV     - Hote Hyper-V
 
     Variables demandees par role :
-      VBR        -> vCenter, HyperV hosts, SCVMM, [ESXi hosts], [SQL]
+      VBR        -> vCenter, HyperV hosts, SCVMM, [ESXi hosts], [SQL], [Proxy]
       VBRProxy   -> vCenter, HyperV hosts, SCVMM, [ESXi hosts], [SQL]
-      Proxy      -> VBR, HyperV hosts, SCVMM
+      Proxy      -> VBR, HyperV hosts
       SCVMM      -> VBR, HyperV hosts, [SQL]
       HyperV     -> VBR, [Proxy], [autres hotes HyperV]
 
@@ -101,7 +101,7 @@ $RoleDefs = [ordered]@{
         Label      = "VBR seul"
         Desc       = "Serveur VBR — le proxy est sur une machine separee"
         Required   = @("HyperVHosts","SCVMMServer","VCenterServer")
-        Optional   = @("SQLServer","ESXiHosts")
+        Optional   = @("SQLServer","ESXiHosts","ProxyServer")
         NeedVBR    = $false
         NeedProxy  = $false
     }
@@ -116,7 +116,7 @@ $RoleDefs = [ordered]@{
     Proxy    = @{
         Label      = "Proxy off-host"
         Desc       = "Proxy Veeam dedie, separe du VBR"
-        Required   = @("VBRServer","HyperVHosts","SCVMMServer")
+        Required   = @("VBRServer","HyperVHosts")
         Optional   = @()
         NeedVBR    = $true
         NeedProxy  = $false
@@ -385,9 +385,19 @@ function Invoke-VBR {
         Test-Flow $script:SQLServer 1434 -Desc "SQL Browser"
     }
 
+    if ($script:ProxyServer) {
+        Write-SectionHeader "VBR -> Proxy off-host  (deploiement + controle Data Mover)"
+        Write-Host ("  -- {0}" -f $script:ProxyServer) -ForegroundColor DarkCyan
+        Test-Flow $script:ProxyServer 135  -Desc "RPC Endpoint Mapper"
+        Test-Flow $script:ProxyServer 445  -Desc "SMB / CIFS"
+        Test-Flow $script:ProxyServer 6160 -Desc "Veeam Installer Service"
+        Test-Flow $script:ProxyServer 6162 -Desc "Veeam Data Mover"
+    }
+
     $dns = @($script:VCenterServer, $script:SCVMMServer) + $script:HyperVHosts
-    if ($script:ESXiHosts) { $dns += $script:ESXiHosts }
-    if ($script:SQLServer) { $dns += $script:SQLServer }
+    if ($script:ESXiHosts)   { $dns += $script:ESXiHosts }
+    if ($script:SQLServer)   { $dns += $script:SQLServer }
+    if ($script:ProxyServer) { $dns += $script:ProxyServer }
     Test-DNS $dns
 }
 
@@ -456,18 +466,11 @@ function Invoke-Proxy {
         Test-Flow $hv 3300 -Desc "Data transfer (fin plage)"
     }
 
-    Write-SectionHeader "Proxy -> VBR  (control channel retour)"
-    Test-Flow $script:VBRServer 2500 -Desc "Data retour (debut plage)"
-    Test-Flow $script:VBRServer 3300 -Desc "Data retour (fin plage)"
+    Write-SectionHeader "Proxy -> VBR  (canal de controle)"
     Test-Flow $script:VBRServer 6162 -Desc "Veeam Data Mover"
     Test-Flow $script:VBRServer 9501 -Desc "Veeam Guest Agent"
 
-    Write-SectionHeader "Proxy -> SCVMM"
-    Test-Flow $script:SCVMMServer 135  -Desc "RPC Endpoint Mapper"
-    Test-Flow $script:SCVMMServer 445  -Desc "SMB / CIFS"
-    Test-Flow $script:SCVMMServer 8100 -Desc "SCVMM Agent"
-
-    Test-DNS (@($script:VBRServer, $script:SCVMMServer) + $script:HyperVHosts)
+    Test-DNS (@($script:VBRServer) + $script:HyperVHosts)
 }
 
 function Invoke-SCVMM {
