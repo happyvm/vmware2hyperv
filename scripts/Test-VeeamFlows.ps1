@@ -56,6 +56,10 @@
     Interval in minutes to rerun tests continuously (e.g., 2).
     If not specified, the script runs only once.
 
+.PARAMETER ContinuousIntervalMinutes
+    Intervalle en minutes pour relancer les tests en continu (ex: 2).
+    Si non renseigne, le script ne fait qu'un seul passage.
+
 .EXAMPLE
     # Interactive: the script asks the right questions for the selected role
     .\Test-VeeamFlows.ps1
@@ -589,7 +593,7 @@ function Write-Summary {
 
     if ($script:FailCount -gt 0) {
         Write-Information ""
-        Write-Information "  FAILED FLOWS -- to open in the firewall:" -ForegroundColor Red
+        Write-Information "  FLUX EN ECHEC -- a ouvrir dans le pare-feu :" -ForegroundColor Red
         $script:Results | Where-Object { $_.Status -ne "PASS" } | ForEach-Object {
             Write-Information ("    [KO]  {0} -> {1}  Port {2}/{3}  ({4})" -f `
                 $env:COMPUTERNAME, $_.Destination, $_.Port, $_.Proto, $_.Description) `
@@ -616,7 +620,7 @@ function Invoke-TestCycle {
     param([int]$CycleNumber = 1)
 
     Reset-RunStats
-    Write-Information ("  Test cycle: {0}" -f $CycleNumber) -ForegroundColor Yellow
+    Write-Information ("  Cycle de test : {0}" -f $CycleNumber) -ForegroundColor Yellow
 
     switch ($script:ActiveRole) {
         "VBR"      { Invoke-VBR      }
