@@ -460,7 +460,6 @@ function Invoke-Proxy {
         Write-Host ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
         Test-Flow $hv 135  -Desc "RPC Endpoint Mapper"
         Test-Flow $hv 445  -Desc "SMB / CIFS"
-        Test-Flow $hv 6160 -Desc "Veeam Installer Service"
         Test-Flow $hv 6162 -Desc "Veeam Data Mover"
         Test-Flow $hv 2500 -Desc "Data transfer (debut plage)"
         Test-Flow $hv 3300 -Desc "Data transfer (fin plage)"
@@ -493,6 +492,7 @@ function Invoke-SCVMM {
     if ($script:SQLServer) {
         Write-SectionHeader "SCVMM -> SQL Server  (base SCVMM)"
         Test-Flow $script:SQLServer 1433 -Desc "SQL Server"
+        Test-Flow $script:SQLServer 1434 -Desc "SQL Browser (instance nommee)"
     }
 
     $dns = @($script:VBRServer) + $script:HyperVHosts
@@ -510,26 +510,20 @@ function Invoke-HyperV {
         Test-Flow $script:ProxyServer 3300 -Desc "Data transfer (fin plage)"
         Test-Flow $script:ProxyServer 6162 -Desc "Veeam Data Mover"
 
-        Write-SectionHeader "Hyper-V -> VBR  (agent + console / REST)"
+        Write-SectionHeader "Hyper-V -> VBR  (agent)"
         Write-Host ("  -- {0}" -f $script:VBRServer) -ForegroundColor DarkCyan
         Test-Flow $script:VBRServer 9501 -Desc "Veeam Guest Agent"
         Test-Flow $script:VBRServer 9502 -Desc "Veeam Agent (Windows)"
-        Test-Flow $script:VBRServer 443  -Desc "REST API / Console HTTPS"
-        Test-Flow $script:VBRServer 9392 -Desc "VBR Console"
-        Test-Flow $script:VBRServer 9419 -Desc "VBR REST API (12.x)"
     } else {
         # Cas 2 : VBRProxy (VBR est aussi proxy) ou VBR seul
         # Toutes les connexions data + control vont vers le VBR
-        Write-SectionHeader "Hyper-V -> VBR/VBRProxy  (data retour + agent + console)"
+        Write-SectionHeader "Hyper-V -> VBR/VBRProxy  (data retour + agent)"
         Write-Host ("  -- {0}" -f $script:VBRServer) -ForegroundColor DarkCyan
         Test-Flow $script:VBRServer 2500 -Desc "Data transfer (debut plage)"
         Test-Flow $script:VBRServer 3300 -Desc "Data transfer (fin plage)"
         Test-Flow $script:VBRServer 6162 -Desc "Veeam Data Mover"
         Test-Flow $script:VBRServer 9501 -Desc "Veeam Guest Agent"
         Test-Flow $script:VBRServer 9502 -Desc "Veeam Agent (Windows)"
-        Test-Flow $script:VBRServer 443  -Desc "REST API / Console HTTPS"
-        Test-Flow $script:VBRServer 9392 -Desc "VBR Console"
-        Test-Flow $script:VBRServer 9419 -Desc "VBR REST API (12.x)"
     }
 
     if ($script:HyperVHosts -and $script:HyperVHosts.Count -gt 0) {
