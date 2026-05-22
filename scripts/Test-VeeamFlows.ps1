@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Validation des flux reseau Veeam B&R 12.3 selon le role de la machine.
@@ -52,6 +52,10 @@
 .PARAMETER ExportCSV
     Chemin du fichier CSV d'export (optionnel)
 
+.PARAMETER ContinuousIntervalMinutes
+    Intervalle en minutes pour relancer les tests en continu (ex: 2).
+    Si non renseigne, le script ne fait qu'un seul passage.
+
 .EXAMPLE
     # Interactif : le script pose les bonnes questions selon le role choisi
     .\Test-VeeamFlows.ps1
@@ -66,8 +70,14 @@
     .\Test-VeeamFlows.ps1 -Role VBRProxy -VCenterServer vcenter01 `
         -ESXiHosts esxi01,esxi02 -HyperVHosts hv01,hv02,hv03 `
         -SCVMMServer scvmm01 -SQLServer sql01
+
+.EXAMPLE
+    # Mode continu toutes les 2 minutes (Ctrl+C pour arreter)
+    .\Test-VeeamFlows.ps1 -Role HyperV -VBRServer vbr01 -ContinuousIntervalMinutes 2
 #>
 
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification='Script helper names use infrastructure acronyms and role terms.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification='Console UX intentionally uses colorized host output via local wrapper.')]
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$false)]
@@ -81,16 +91,33 @@ param(
     [Parameter(Mandatory=$false)] [string]   $VCenterServer,
     [Parameter(Mandatory=$false)] [string[]] $ESXiHosts,
     [Parameter(Mandatory=$false)] [string]   $SQLServer,
-    [Parameter(Mandatory=$false)] [string]   $ExportCSV
+    [Parameter(Mandatory=$false)] [string]   $ExportCSV,
+    [Parameter(Mandatory=$false)] [ValidateRange(1,1440)] [int] $ContinuousIntervalMinutes
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'SilentlyContinue'
+$InformationPreference = 'Continue'
 
 $script:Results    = [System.Collections.Generic.List[PSCustomObject]]::new()
 $script:TotalTests = 0
 $script:PassCount  = 0
 $script:FailCount  = 0
+
+function Write-Information {
+    param(
+        [Parameter(Position=0, ValueFromRemainingArguments=$true)]
+        [object[]]$MessageData,
+        [string]$ForegroundColor
+    )
+
+    $message = ($MessageData -join '')
+    if ($PSBoundParameters.ContainsKey('ForegroundColor')) {
+        Write-Host $message -ForegroundColor $ForegroundColor
+    } else {
+        Write-Host $message
+    }
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEFINITIONS DES ROLES
@@ -144,34 +171,34 @@ $RoleDefs = [ordered]@{
 # ─────────────────────────────────────────────────────────────────────────────
 
 function Write-Line([string]$Char = "=", [int]$Width = 100, [string]$Color = "Cyan") {
-    Write-Host ($Char * $Width) -ForegroundColor $Color
+    Write-Information ($Char * $Width) -ForegroundColor $Color
 }
 
 function Write-Banner {
-    Write-Host ""
+    Write-Information ""
     Write-Line
-    Write-Host "  VEEAM NETWORK FLOW VALIDATOR  --  Hyper-V / SCVMM / VMware  --  VBR 12.3" -ForegroundColor White
+    Write-Information "  VEEAM NETWORK FLOW VALIDATOR  --  Hyper-V / SCVMM / VMware  --  VBR 12.3" -ForegroundColor White
     Write-Line
-    Write-Host ("  Machine  : {0}" -f $env:COMPUTERNAME) -ForegroundColor Gray
-    Write-Host ("  Heure    : {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")) -ForegroundColor Gray
+    Write-Information ("  Machine  : {0}" -f $env:COMPUTERNAME) -ForegroundColor Gray
+    Write-Information ("  Heure    : {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")) -ForegroundColor Gray
     Write-Line "-" 100 "DarkGray"
-    Write-Host ""
+    Write-Information ""
 }
 
 function Show-RoleMenu {
-    Write-Host "  Quel est le role de cette machine ?" -ForegroundColor Yellow
-    Write-Host ""
+    Write-Information "  Quel est le role de cette machine ?" -ForegroundColor Yellow
+    Write-Information ""
     $keys = @($RoleDefs.Keys)
     for ($i = 0; $i -lt $keys.Count; $i++) {
         $r = $RoleDefs[$keys[$i]]
-        Write-Host ("  [{0}]  {1,-22} {2}" -f ($i+1), $r.Label, $r.Desc) -ForegroundColor White
+        Write-Information ("  [{0}]  {1,-22} {2}" -f ($i+1), $r.Label, $r.Desc) -ForegroundColor White
     }
-    Write-Host ""
+    Write-Information ""
     do {
         $raw = Read-Host "  Choix [1-$($keys.Count)]"
         $n   = 0
         $ok  = [int]::TryParse($raw,[ref]$n) -and $n -ge 1 -and $n -le $keys.Count
-        if (-not $ok) { Write-Host "  Choix invalide." -ForegroundColor Red }
+        if (-not $ok) { Write-Information "  Choix invalide." -ForegroundColor Red }
     } while (-not $ok)
     return $keys[$n - 1]
 }
@@ -201,11 +228,11 @@ function Read-OptionalInput([string]$Label, [bool]$IsArray = $false) {
 function Initialize-Variables([string]$SelectedRole) {
     $def = $RoleDefs[$SelectedRole]
 
-    Write-Host ""
-    Write-Host "  Variables pour le role : $($def.Label)" -ForegroundColor Yellow
+    Write-Information ""
+    Write-Information "  Variables pour le role : $($def.Label)" -ForegroundColor Yellow
     Write-Line "-" 100 "DarkGray"
-    Write-Host "  (Obligatoires marques *, optionnels entre crochets)" -ForegroundColor DarkGray
-    Write-Host ""
+    Write-Information "  (Obligatoires marques *, optionnels entre crochets)" -ForegroundColor DarkGray
+    Write-Information ""
 
     # VBR
     if ("VBRServer" -in $def.Required -and -not $script:VBRServer) {
@@ -245,24 +272,24 @@ function Initialize-Variables([string]$SelectedRole) {
         if ($v) { $script:SQLServer = $v }
     }
 
-    Write-Host ""
+    Write-Information ""
 }
 
 function Show-Config([string]$SelectedRole) {
     $def = $RoleDefs[$SelectedRole]
-    Write-Host ""
+    Write-Information ""
     Write-Line "-" 100 "DarkGray"
-    Write-Host ("  Role      : {0} -- {1}" -f $def.Label, $def.Desc) -ForegroundColor Cyan
-    Write-Host ("  Machine   : {0}" -f $env:COMPUTERNAME) -ForegroundColor Gray
-    if ($script:VBRServer)     { Write-Host ("  VBR       : {0}" -f $script:VBRServer)     -ForegroundColor Gray }
-    if ($script:ProxyServer)   { Write-Host ("  Proxy     : {0}" -f $script:ProxyServer)   -ForegroundColor Gray }
-    if ($script:HyperVHosts)   { Write-Host ("  Hyper-V   : {0}" -f ($script:HyperVHosts -join ", "))  -ForegroundColor Gray }
-    if ($script:SCVMMServer)   { Write-Host ("  SCVMM     : {0}" -f $script:SCVMMServer)   -ForegroundColor Gray }
-    if ($script:VCenterServer) { Write-Host ("  vCenter   : {0}" -f $script:VCenterServer) -ForegroundColor Gray }
-    if ($script:ESXiHosts)     { Write-Host ("  ESXi      : {0}" -f ($script:ESXiHosts -join ", "))     -ForegroundColor Gray }
-    if ($script:SQLServer)     { Write-Host ("  SQL       : {0}" -f $script:SQLServer)     -ForegroundColor Gray }
+    Write-Information ("  Role      : {0} -- {1}" -f $def.Label, $def.Desc) -ForegroundColor Cyan
+    Write-Information ("  Machine   : {0}" -f $env:COMPUTERNAME) -ForegroundColor Gray
+    if ($script:VBRServer)     { Write-Information ("  VBR       : {0}" -f $script:VBRServer)     -ForegroundColor Gray }
+    if ($script:ProxyServer)   { Write-Information ("  Proxy     : {0}" -f $script:ProxyServer)   -ForegroundColor Gray }
+    if ($script:HyperVHosts)   { Write-Information ("  Hyper-V   : {0}" -f ($script:HyperVHosts -join ", "))  -ForegroundColor Gray }
+    if ($script:SCVMMServer)   { Write-Information ("  SCVMM     : {0}" -f $script:SCVMMServer)   -ForegroundColor Gray }
+    if ($script:VCenterServer) { Write-Information ("  vCenter   : {0}" -f $script:VCenterServer) -ForegroundColor Gray }
+    if ($script:ESXiHosts)     { Write-Information ("  ESXi      : {0}" -f ($script:ESXiHosts -join ", "))     -ForegroundColor Gray }
+    if ($script:SQLServer)     { Write-Information ("  SQL       : {0}" -f $script:SQLServer)     -ForegroundColor Gray }
     Write-Line "-" 100 "DarkGray"
-    Write-Host ""
+    Write-Information ""
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,10 +297,10 @@ function Show-Config([string]$SelectedRole) {
 # ─────────────────────────────────────────────────────────────────────────────
 
 function Write-SectionHeader([string]$Title) {
-    Write-Host ""
-    Write-Host ("  >> {0}" -f $Title) -ForegroundColor Yellow
+    Write-Information ""
+    Write-Information ("  >> {0}" -f $Title) -ForegroundColor Yellow
     Write-Line "-" 95 "DarkGray"
-    Write-Host ("  {0,-38} {1,-28} {2,-10} {3}" -f "DESTINATION","DESCRIPTION","PORT","RESULTAT") `
+    Write-Information ("  {0,-38} {1,-28} {2,-10} {3}" -f "DESTINATION","DESCRIPTION","PORT","RESULTAT") `
         -ForegroundColor DarkCyan
     Write-Line "-" 95 "DarkGray"
 }
@@ -312,7 +339,7 @@ function Test-Flow {
     $color = switch ($status) { "PASS"{"Green"} "FAIL"{"Red"} default{"DarkYellow"} }
     $icon  = switch ($status) { "PASS"{"[OK]"}  "FAIL"{"[KO]"} default{"[??]"} }
 
-    Write-Host ("  {0,-38} {1,-28} {2,-10} {3} {4,-7} {5}" -f `
+    Write-Information ("  {0,-38} {1,-28} {2,-10} {3} {4,-7} {5}" -f `
         $Destination, $Desc, $portStr, $icon, $status, $latency) -ForegroundColor $color
 
     $script:Results.Add([PSCustomObject]@{
@@ -333,9 +360,9 @@ function Test-DNS([string[]]$Hosts) {
     foreach ($h in ($Hosts | Sort-Object -Unique)) {
         try {
             $ip = ([System.Net.Dns]::GetHostAddresses($h) | Select-Object -First 1).IPAddressToString
-            Write-Host ("  {0,-42} -> {1}" -f $h, $ip) -ForegroundColor Green
+            Write-Information ("  {0,-42} -> {1}" -f $h, $ip) -ForegroundColor Green
         } catch {
-            Write-Host ("  {0,-42} -> ECHEC" -f $h) -ForegroundColor Red
+            Write-Information ("  {0,-42} -> ECHEC" -f $h) -ForegroundColor Red
         }
     }
 }
@@ -352,9 +379,9 @@ function Invoke-VBR {
 
     if ($script:ESXiHosts -and $script:ESXiHosts.Count -gt 0) {
         Write-SectionHeader "VBR -> Hotes ESXi  (VMware source - API uniquement)"
-        Write-Host "  Note : port 902 NBD gere par le proxy off-host" -ForegroundColor DarkGray
+        Write-Information "  Note : port 902 NBD gere par le proxy off-host" -ForegroundColor DarkGray
         foreach ($esxi in $script:ESXiHosts) {
-            Write-Host ("  -- {0}" -f $esxi) -ForegroundColor DarkCyan
+            Write-Information ("  -- {0}" -f $esxi) -ForegroundColor DarkCyan
             Test-Flow $esxi 443 -Desc "vSphere API (HTTPS)"
         }
     }
@@ -362,7 +389,7 @@ function Invoke-VBR {
     # --- Infrastructure Hyper-V cible (management uniquement) ---
     Write-SectionHeader "VBR -> Hotes Hyper-V  (management)"
     foreach ($hv in $script:HyperVHosts) {
-        Write-Host ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
+        Write-Information ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
         Test-Flow $hv 135  -Desc "RPC Endpoint Mapper"
         Test-Flow $hv 445  -Desc "SMB / CIFS"
         Test-Flow $hv 5985 -Desc "WinRM HTTP"
@@ -388,7 +415,7 @@ function Invoke-VBR {
 
     if ($script:ProxyServer) {
         Write-SectionHeader "VBR -> Proxy off-host  (deploiement + controle Data Mover)"
-        Write-Host ("  -- {0}" -f $script:ProxyServer) -ForegroundColor DarkCyan
+        Write-Information ("  -- {0}" -f $script:ProxyServer) -ForegroundColor DarkCyan
         Test-Flow $script:ProxyServer 135  -Desc "RPC Endpoint Mapper"
         Test-Flow $script:ProxyServer 445  -Desc "SMB / CIFS"
         Test-Flow $script:ProxyServer 6160 -Desc "Veeam Installer Service"
@@ -411,20 +438,20 @@ function Invoke-VBRProxy {
     if ($script:ESXiHosts -and $script:ESXiHosts.Count -gt 0) {
         Write-SectionHeader "VBR+Proxy -> Hotes ESXi  (VMware source - API + NBD)"
         foreach ($esxi in $script:ESXiHosts) {
-            Write-Host ("  -- {0}" -f $esxi) -ForegroundColor DarkCyan
+            Write-Information ("  -- {0}" -f $esxi) -ForegroundColor DarkCyan
             Test-Flow $esxi 443 -Desc "vSphere API (HTTPS)"
             Test-Flow $esxi 902 -Desc "VMware Host Agent (NBD data)"
         }
     } else {
-        Write-Host ""
-        Write-Host "  [!] ESXiHosts non specifie : port 902 NBD non teste." -ForegroundColor DarkYellow
-        Write-Host "      Utilisez -ESXiHosts esxi01,esxi02 pour valider le canal NBD." -ForegroundColor DarkYellow
+        Write-Information ""
+        Write-Information "  [!] ESXiHosts non specifie : port 902 NBD non teste." -ForegroundColor DarkYellow
+        Write-Information "      Utilisez -ESXiHosts esxi01,esxi02 pour valider le canal NBD." -ForegroundColor DarkYellow
     }
 
     # --- Infrastructure Hyper-V cible (management + data) ---
     Write-SectionHeader "VBR+Proxy -> Hotes Hyper-V  (management + data)"
     foreach ($hv in $script:HyperVHosts) {
-        Write-Host ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
+        Write-Information ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
         Test-Flow $hv 135  -Desc "RPC Endpoint Mapper"
         Test-Flow $hv 445  -Desc "SMB / CIFS"
         Test-Flow $hv 5985 -Desc "WinRM HTTP"
@@ -459,7 +486,7 @@ function Invoke-VBRProxy {
 function Invoke-Proxy {
     Write-SectionHeader "Proxy -> Hotes Hyper-V  (data + deploiement agent)"
     foreach ($hv in $script:HyperVHosts) {
-        Write-Host ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
+        Write-Information ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
         Test-Flow $hv 135  -Desc "RPC Endpoint Mapper"
         Test-Flow $hv 445  -Desc "SMB / CIFS"
         Test-Flow $hv 6162 -Desc "Veeam Data Mover"
@@ -478,7 +505,7 @@ function Invoke-Proxy {
 function Invoke-SCVMM {
     Write-SectionHeader "SCVMM -> Hotes Hyper-V  (gestion VMM)"
     foreach ($hv in $script:HyperVHosts) {
-        Write-Host ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
+        Write-Information ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
         Test-Flow $hv 135  -Desc "RPC Endpoint Mapper"
         Test-Flow $hv 445  -Desc "SMB / CIFS"
         Test-Flow $hv 5985 -Desc "WinRM HTTP"
@@ -508,20 +535,20 @@ function Invoke-HyperV {
         # Cas 1 : VBR standalone + proxy off-host
         # Data Mover HyperV se connecte au proxy (pas au VBR)
         Write-SectionHeader "Hyper-V -> Proxy off-host  (data retour)"
-        Write-Host ("  -- {0}" -f $script:ProxyServer) -ForegroundColor DarkCyan
+        Write-Information ("  -- {0}" -f $script:ProxyServer) -ForegroundColor DarkCyan
         Test-Flow $script:ProxyServer 2500 -Desc "Data transfer (debut plage)"
         Test-Flow $script:ProxyServer 3300 -Desc "Data transfer (fin plage)"
         Test-Flow $script:ProxyServer 6162 -Desc "Veeam Data Mover"
 
         Write-SectionHeader "Hyper-V -> VBR  (agent)"
-        Write-Host ("  -- {0}" -f $script:VBRServer) -ForegroundColor DarkCyan
+        Write-Information ("  -- {0}" -f $script:VBRServer) -ForegroundColor DarkCyan
         Test-Flow $script:VBRServer 9501 -Desc "Veeam Guest Agent"
         Test-Flow $script:VBRServer 9502 -Desc "Veeam Agent (Windows)"
     } else {
         # Cas 2 : VBRProxy (VBR est aussi proxy) ou VBR seul
         # Toutes les connexions data + control vont vers le VBR
         Write-SectionHeader "Hyper-V -> VBR/VBRProxy  (data retour + agent)"
-        Write-Host ("  -- {0}" -f $script:VBRServer) -ForegroundColor DarkCyan
+        Write-Information ("  -- {0}" -f $script:VBRServer) -ForegroundColor DarkCyan
         Test-Flow $script:VBRServer 2500 -Desc "Data transfer (debut plage)"
         Test-Flow $script:VBRServer 3300 -Desc "Data transfer (fin plage)"
         Test-Flow $script:VBRServer 6162 -Desc "Veeam Data Mover"
@@ -532,7 +559,7 @@ function Invoke-HyperV {
     if ($script:HyperVHosts -and $script:HyperVHosts.Count -gt 0) {
         Write-SectionHeader "Hyper-V -> Autres hotes  (Live Migration / Cluster)"
         foreach ($hv in $script:HyperVHosts) {
-            Write-Host ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
+            Write-Information ("  -- {0}" -f $hv) -ForegroundColor DarkCyan
             Test-Flow $hv 445  -Desc "SMB (Live Migration)"
             Test-Flow $hv 6600 -Desc "Live Migration (Hyper-V)"
             Test-Flow $hv 3343 -Desc "Cluster heartbeat"
@@ -550,31 +577,66 @@ function Invoke-HyperV {
 # ─────────────────────────────────────────────────────────────────────────────
 
 function Write-Summary {
-    Write-Host ""
+    Write-Information ""
     Write-Line
-    Write-Host ("  RESUME  --  {0}  --  {1}" -f $RoleDefs[$script:ActiveRole].Label, $env:COMPUTERNAME) `
+    Write-Information ("  RESUME  --  {0}  --  {1}" -f $RoleDefs[$script:ActiveRole].Label, $env:COMPUTERNAME) `
         -ForegroundColor White
     Write-Line
-    Write-Host ("  Tests     : {0}" -f $script:TotalTests) -ForegroundColor White
-    Write-Host ("  [OK] PASS : {0}" -f $script:PassCount)  -ForegroundColor Green
+    Write-Information ("  Tests     : {0}" -f $script:TotalTests) -ForegroundColor White
+    Write-Information ("  [OK] PASS : {0}" -f $script:PassCount)  -ForegroundColor Green
     $fc = if ($script:FailCount -gt 0) {"Red"} else {"Gray"}
-    Write-Host ("  [KO] FAIL : {0}" -f $script:FailCount)  -ForegroundColor $fc
+    Write-Information ("  [KO] FAIL : {0}" -f $script:FailCount)  -ForegroundColor $fc
 
     if ($script:FailCount -gt 0) {
-        Write-Host ""
-        Write-Host "  FLUX EN ECHEC -- a ouvrir dans le pare-feu :" -ForegroundColor Red
+        Write-Information ""
+        Write-Information "  FLUX EN ECHEC -- a ouvrir dans le pare-feu :" -ForegroundColor Red
         $script:Results | Where-Object { $_.Status -ne "PASS" } | ForEach-Object {
-            Write-Host ("    [KO]  {0} -> {1}  Port {2}/{3}  ({4})" -f `
+            Write-Information ("    [KO]  {0} -> {1}  Port {2}/{3}  ({4})" -f `
                 $env:COMPUTERNAME, $_.Destination, $_.Port, $_.Proto, $_.Description) `
                 -ForegroundColor DarkRed
         }
     } else {
-        Write-Host ""
-        Write-Host "  Tous les flux sont ouverts." -ForegroundColor Green
+        Write-Information ""
+        Write-Information "  Tous les flux sont ouverts." -ForegroundColor Green
     }
 
     Write-Line
-    Write-Host ""
+    Write-Information ""
+}
+
+
+function Reset-RunStats {
+    $script:Results.Clear()
+    $script:TotalTests = 0
+    $script:PassCount  = 0
+    $script:FailCount  = 0
+}
+
+function Invoke-TestCycle {
+    param([int]$CycleNumber = 1)
+
+    Reset-RunStats
+    Write-Information ("  Cycle de test : {0}" -f $CycleNumber) -ForegroundColor Yellow
+
+    switch ($script:ActiveRole) {
+        "VBR"      { Invoke-VBR      }
+        "VBRProxy" { Invoke-VBRProxy }
+        "Proxy"    { Invoke-Proxy    }
+        "SCVMM"    { Invoke-SCVMM    }
+        "HyperV"   { Invoke-HyperV   }
+    }
+
+    Write-Summary
+
+    if ($ExportCSV) {
+        try {
+            $script:Results | Export-Csv -Path $ExportCSV -NoTypeInformation -Encoding UTF8
+            Write-Information ("  Rapport exporte : {0}" -f $ExportCSV) -ForegroundColor Cyan
+            Write-Information ""
+        } catch {
+            Write-Warning ("Export CSV impossible : {0}" -f $_.Exception.Message)
+        }
+    }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -606,26 +668,18 @@ Initialize-Variables $script:ActiveRole
 # Affichage de la configuration retenue
 Show-Config $script:ActiveRole
 
-# Dispatch
-switch ($script:ActiveRole) {
-    "VBR"      { Invoke-VBR      }
-    "VBRProxy" { Invoke-VBRProxy }
-    "Proxy"    { Invoke-Proxy    }
-    "SCVMM"    { Invoke-SCVMM    }
-    "HyperV"   { Invoke-HyperV   }
-}
+if ($ContinuousIntervalMinutes) {
+    Write-Information ("  Mode continu active : un cycle toutes les {0} minute(s). Ctrl+C pour arreter." -f $ContinuousIntervalMinutes) -ForegroundColor Yellow
+    Write-Information ""
 
-Write-Summary
-
-# Export CSV
-if ($ExportCSV) {
-    try {
-        $script:Results | Export-Csv -Path $ExportCSV -NoTypeInformation -Encoding UTF8
-        Write-Host ("  Rapport exporte : {0}" -f $ExportCSV) -ForegroundColor Cyan
-        Write-Host ""
-    } catch {
-        Write-Warning ("Export CSV impossible : {0}" -f $_.Exception.Message)
+    $cycle = 1
+    while ($true) {
+        Invoke-TestCycle -CycleNumber $cycle
+        $cycle++
+        Start-Sleep -Seconds ($ContinuousIntervalMinutes * 60)
     }
+} else {
+    Invoke-TestCycle -CycleNumber 1
 }
 
 exit $script:FailCount
