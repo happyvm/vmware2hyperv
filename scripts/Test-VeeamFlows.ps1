@@ -368,6 +368,7 @@ function Invoke-VBR {
         Test-Flow $hv 5985 -Desc "WinRM HTTP"
         Test-Flow $hv 5986 -Desc "WinRM HTTPS"
         Test-Flow $hv 6160 -Desc "Veeam Installer Service"
+        Test-Flow $hv 6163 -Desc "Veeam Hyper-V Integration Service"
         # Pas de 6162/2500-3300 : gere par le proxy off-host
     }
 
@@ -430,6 +431,7 @@ function Invoke-VBRProxy {
         Test-Flow $hv 5986 -Desc "WinRM HTTPS"
         Test-Flow $hv 6160 -Desc "Veeam Installer Service"
         Test-Flow $hv 6162 -Desc "Veeam Data Mover"
+        Test-Flow $hv 6163 -Desc "Veeam Hyper-V Integration Service"
         Test-Flow $hv 2500 -Desc "Data transfer (debut plage)"
         Test-Flow $hv 3300 -Desc "Data transfer (fin plage)"
     }
@@ -461,6 +463,7 @@ function Invoke-Proxy {
         Test-Flow $hv 135  -Desc "RPC Endpoint Mapper"
         Test-Flow $hv 445  -Desc "SMB / CIFS"
         Test-Flow $hv 6162 -Desc "Veeam Data Mover"
+        Test-Flow $hv 6163 -Desc "Veeam Hyper-V Integration Service"
         Test-Flow $hv 2500 -Desc "Data transfer (debut plage)"
         Test-Flow $hv 3300 -Desc "Data transfer (fin plage)"
     }
