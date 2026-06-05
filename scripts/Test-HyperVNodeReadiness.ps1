@@ -44,56 +44,21 @@
       0 = All checks passed (or only warnings)
       1 = One or more checks failed
 
-.PARAMETER Mode
-    Validation scope: PreNode | PreCluster | Both
-
-.PARAMETER StorageType
-    Storage architecture: SAN | S2D
-    SAN = external shared storage via iSCSI or Fibre Channel (MPIO required)
-    S2D = Storage Spaces Direct, internal disks only, Datacenter edition required
-
-.PARAMETER ClusterNodes
-    FQDNs or IPs of the other cluster nodes. This local node is always included.
-
-.PARAMETER WitnessShare
-    UNC path of the file share witness (e.g. \\fileserver\witness). Optional but
-    required for even-node clusters to validate quorum.
-
-.PARAMETER ServiceAccount
-    SAMAccountName of the service/admin account that will create the cluster
-    (e.g. svc_cluster or CORP\svc_cluster). Used in section J.
-
-.PARAMETER ClusterOU
-    Distinguished Name of the OU where cluster objects (CNO, VCOs) will be created
-    (e.g. OU=Clusters,OU=Servers,DC=corp,DC=local). Used in section J.
-
-.PARAMETER ClusterName
-    Planned NetBIOS name of the cluster (e.g. CLHYPERV01). If provided, the script
-    checks for a prestaged CNO and validates its state. Used in section J.
-
-.PARAMETER LogFile
-    Path for the text log file. Defaults to .\HyperV-Readiness-<timestamp>.log.
-
-.PARAMETER HtmlReportPath
-    If provided, an HTML summary report is written to this path.
-
-.PARAMETER SkipClusterValidation
-    Skip the long-running Test-Cluster cmdlet during PreCluster checks.
+.PARAMETER ConfigFile
+    Path to the hyperv-check.psd1 configuration file. The script searches in order:
+      1. The path provided here
+      2. hyperv-check.psd1 in the same directory as the script
+      3. hyperv-check.psd1 in the current working directory
+    If no file is found, the script enters interactive mode and prompts for each value.
 
 .EXAMPLE
-    # Validate a single node against SAN storage
-    .\Test-HyperVNodeReadiness.ps1 -Mode PreNode -StorageType SAN `
-        -ServiceAccount svc_cluster -ClusterOU "OU=Clusters,DC=corp,DC=local"
+    # Use a config file (recommended)
+    .\Test-HyperVNodeReadiness.ps1
+    .\Test-HyperVNodeReadiness.ps1 -ConfigFile C:\Admin\hyperv-check.psd1
 
 .EXAMPLE
-    # Full 3-node S2D cluster validation with HTML report
-    .\Test-HyperVNodeReadiness.ps1 -Mode Both -StorageType S2D `
-        -ClusterNodes node2.corp.local,node3.corp.local `
-        -ServiceAccount CORP\svc_cluster `
-        -ClusterOU "OU=HyperV,OU=Servers,DC=corp,DC=local" `
-        -ClusterName CLHYPERV01 `
-        -WitnessShare \\fs01\clusterwitness `
-        -HtmlReportPath C:\Reports\readiness.html
+    # Interactive mode (no config file present)
+    .\Test-HyperVNodeReadiness.ps1
 
 .NOTES
     Must be run as Domain Administrator or delegated account with read access to AD ACLs.
@@ -107,27 +72,9 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('PreNode', 'PreCluster', 'Both')]
-    [string]$Mode = 'Both',
-
-    [ValidateSet('SAN', 'S2D')]
-    [string]$StorageType = 'SAN',
-
-    [string[]]$ClusterNodes = @(),
-
-    [string]$WitnessShare = '',
-
-    [string]$ServiceAccount = '',
-
-    [string]$ClusterOU = '',
-
-    [string]$ClusterName = '',
-
-    [string]$LogFile = ".\HyperV-Readiness-$(Get-Date -Format 'yyyyMMdd-HHmmss').log",
-
-    [string]$HtmlReportPath = '',
-
-    [switch]$SkipClusterValidation
+    # Path to hyperv-check.psd1. If empty, the script searches next to itself then CWD.
+    # If still not found, interactive prompts are shown.
+    [string]$ConfigFile = ''
 )
 
 Set-StrictMode -Version Latest
@@ -190,6 +137,106 @@ function Add-Result {
 function Section([string]$Title) {
     Write-Log '' -Level INFO
     Write-Log "──── $Title ────" -Level SECTION
+}
+
+# Prompt helper — returns config value if present, otherwise prompts interactively
+function Read-CfgValue {
+    param(
+        [hashtable]$Cfg,
+        [string]$Key,
+        [string]$Prompt,
+        [string]$Default = '',
+        [switch]$IsArray,
+        [switch]$Required
+    )
+    $val = $Cfg[$Key]
+    if ($null -eq $val -or ($val -is [string] -and $val -eq '')) {
+        $hint  = if ($Default -ne '') { " [$Default]" } else { '' }
+        $input = Read-Host "$Prompt$hint"
+        if ($input -eq '' -and $Default -ne '') { $input = $Default }
+        if ($input -eq '' -and $Required) { throw "Required value '$Key' was not provided." }
+        $val = $input
+    }
+    if ($IsArray) {
+        if ($val -is [array]) { return @($val | Where-Object { $_ -ne '' }) }
+        return @($val -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    }
+    return $val
+}
+
+function Initialize-Config {
+    # Locate config file
+    $candidates = @(
+        $ConfigFile,
+        (Join-Path $PSScriptRoot 'hyperv-check.psd1'),
+        (Join-Path (Get-Location) 'hyperv-check.psd1')
+    ) | Where-Object { $_ -ne '' }
+
+    $cfgPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $cfg     = @{}
+
+    if ($cfgPath) {
+        Write-Host "[======] Loading config: $cfgPath" -ForegroundColor Cyan
+        $cfg = Import-PowerShellDataFile -Path $cfgPath
+    } else {
+        Write-Host "[======] No hyperv-check.psd1 found — interactive mode" -ForegroundColor Yellow
+        Write-Host "         (Create hyperv-check.psd1 from the template to skip these prompts)" -ForegroundColor DarkYellow
+        Write-Host ''
+    }
+
+    # ── Populate script-scope configuration variables ─────────────────────────
+    $script:Mode         = Read-CfgValue $cfg 'Mode'         'Mode (PreNode / PreCluster / Both)' 'Both'
+    if ($script:Mode -notin @('PreNode','PreCluster','Both')) { $script:Mode = 'Both' }
+
+    $script:StorageType  = Read-CfgValue $cfg 'StorageType'  'Storage type (SAN / S2D)' 'SAN'
+    if ($script:StorageType -notin @('SAN','S2D')) { $script:StorageType = 'SAN' }
+
+    $script:ClusterNodes = Read-CfgValue $cfg 'ClusterNodes' 'Other cluster node FQDNs/IPs (comma-separated, empty = single node)' '' -IsArray
+    $script:WitnessShare = Read-CfgValue $cfg 'WitnessShare' 'File share witness UNC (e.g. \\srv\witness, empty to skip)'
+    $script:ClusterName  = Read-CfgValue $cfg 'ClusterName'  'Planned cluster NetBIOS name (e.g. CLHYPERV01, empty to skip)'
+    $script:ClusterOU    = Read-CfgValue $cfg 'ClusterOU'    'OU DN for CNO/VCOs (e.g. OU=Clusters,DC=corp,DC=local, empty to skip)'
+    $script:ServiceAccount = Read-CfgValue $cfg 'ServiceAccount' 'Service account SAMAccountName (e.g. CORP\svc_cluster, empty to skip)'
+
+    # Infrastructure endpoints used for port checks
+    $script:DomainControllers = Read-CfgValue $cfg 'DomainControllers' 'Domain controller FQDNs/IPs for port tests (comma-sep, empty = auto-discover)' '' -IsArray
+    $script:IscsiTargets      = Read-CfgValue $cfg 'IscsiTargets'      'iSCSI target FQDNs/IPs (comma-sep, SAN only, empty to skip)' '' -IsArray
+    $script:NtpServer         = Read-CfgValue $cfg 'NtpServer'         'NTP server FQDN/IP for port test (empty to skip)'
+    $script:ScvmmServer       = Read-CfgValue $cfg 'ScvmmServer'       'SCVMM server FQDN/IP (empty to skip)'
+
+    $script:SkipClusterValidation = [bool]($cfg['SkipClusterValidation'])
+
+    # Log / report paths
+    $logCfg = $cfg['LogFile']
+    $script:LogFile = if ($logCfg -and $logCfg -ne '') { $logCfg } else {
+        ".\HyperV-Readiness-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    }
+    $script:HtmlReportPath = if ($cfg['HtmlReportPath']) { $cfg['HtmlReportPath'] } else { '' }
+
+    # Auto-discover DCs if none supplied and machine is domain-joined
+    if (-not $script:DomainControllers -or $script:DomainControllers.Count -eq 0) {
+        try {
+            $discovered = @(
+                [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain().DomainControllers |
+                Select-Object -ExpandProperty Name -First 3
+            )
+            if ($discovered.Count -gt 0) {
+                $script:DomainControllers = $discovered
+                Write-Host "[ INFO ] Auto-discovered DCs: $($discovered -join ', ')" -ForegroundColor Gray
+            }
+        } catch { }
+    }
+
+    # Summary of active config
+    Write-Host ''
+    Write-Host "[======] Configuration summary" -ForegroundColor Cyan
+    Write-Host "  Mode          : $($script:Mode)"
+    Write-Host "  StorageType   : $($script:StorageType)"
+    Write-Host "  ClusterNodes  : $(if ($script:ClusterNodes) { $script:ClusterNodes -join ', ' } else { '(none)' })"
+    Write-Host "  WitnessShare  : $(if ($script:WitnessShare) { $script:WitnessShare } else { '(none)' })"
+    Write-Host "  ServiceAccount: $(if ($script:ServiceAccount) { $script:ServiceAccount } else { '(none)' })"
+    Write-Host "  DomainControllers: $(if ($script:DomainControllers) { $script:DomainControllers -join ', ' } else { '(none)' })"
+    Write-Host "  LogFile       : $($script:LogFile)"
+    Write-Host ''
 }
 
 #endregion
@@ -1595,6 +1642,145 @@ function Test-EventLogHealth {
 
 #endregion
 
+#region ── L. Network Port Connectivity ──────────────────────────────────────
+
+function Test-TcpPort {
+    param([string]$Target, [int]$Port, [int]$TimeoutMs = 2000)
+    try {
+        $tcp = [System.Net.Sockets.TcpClient]::new()
+        $ar  = $tcp.BeginConnect($Target, $Port, $null, $null)
+        $ok  = $ar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)
+        try { $tcp.Close() } catch {}
+        return $ok
+    } catch { return $false }
+}
+
+function Test-UdpPort {
+    param([string]$Target, [int]$Port, [byte[]]$Payload, [int]$TimeoutMs = 2000)
+    try {
+        $udp = [System.Net.Sockets.UdpClient]::new()
+        $udp.Client.ReceiveTimeout = $TimeoutMs
+        $udp.Connect($Target, $Port)
+        [void]$udp.Send($Payload, $Payload.Length)
+        $ep  = [System.Net.IPEndPoint]([System.Net.IPAddress]::Any, 0)
+        [void]$udp.Receive([ref]$ep)
+        $udp.Close()
+        return $true
+    } catch [System.Net.Sockets.SocketException] {
+        # ICMP port unreachable = host replied (port closed but host reachable)
+        if ($_.Exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::ConnectionReset) {
+            return $false
+        }
+        return $false
+    } catch { return $false }
+}
+
+function Test-PortConnectivity {
+    Section 'L. Network Port Connectivity'
+    $cat = 'Ports'
+
+    function Check-Port {
+        param([string]$Target, [int]$Port, [string]$Service, [string]$Scope,
+              [ValidateSet('TCP','UDP')][string]$Proto = 'TCP',
+              [byte[]]$UdpPayload, [switch]$Optional)
+        if ($Target -eq '' -or $null -eq $Target) { return }
+        $label = "$Scope → ${Target}:${Port}/${Proto} ($Service)"
+        $ok = if ($Proto -eq 'UDP') {
+            Test-UdpPort -Target $Target -Port $Port -Payload $UdpPayload
+        } else {
+            Test-TcpPort -Target $Target -Port $Port
+        }
+        if ($ok) {
+            Add-Result $cat $label 'PASS' 'Open'
+        } elseif ($Optional) {
+            Add-Result $cat $label 'INFO' 'Closed/unreachable (optional port)'
+        } else {
+            Add-Result $cat $label 'FAIL' 'Closed or filtered — verify firewall rules'
+        }
+    }
+
+    # ── L.1 Domain Controllers ────────────────────────────────────────────────
+    if ($script:DomainControllers -and $script:DomainControllers.Count -gt 0) {
+        foreach ($dc in $script:DomainControllers) {
+            Check-Port $dc  53  'DNS'             "DC"
+            Check-Port $dc  88  'Kerberos'        "DC"
+            Check-Port $dc 135  'RPC EPM'         "DC"
+            Check-Port $dc 389  'LDAP'            "DC"
+            Check-Port $dc 445  'SMB/Netlogon'    "DC"
+            Check-Port $dc 636  'LDAPS'           "DC" -Optional
+            Check-Port $dc 3268 'Global Catalog'  "DC"
+            Check-Port $dc 3269 'GC SSL'          "DC" -Optional
+            # NTP via UDP on each DC
+            $ntpPayload    = [byte[]]::new(48); $ntpPayload[0] = 0x1b
+            Check-Port $dc 123  'NTP'             "DC" -Proto UDP -UdpPayload $ntpPayload -Optional
+        }
+    } else {
+        Add-Result $cat 'DC port checks' 'SKIP' 'No domain controllers configured or discovered'
+    }
+
+    # ── L.2 NTP server (dedicated, if specified) ──────────────────────────────
+    if ($script:NtpServer -and $script:NtpServer -ne '') {
+        $ntpPayload = [byte[]]::new(48); $ntpPayload[0] = 0x1b
+        Check-Port $script:NtpServer 123 'NTP' "NTP" -Proto UDP -UdpPayload $ntpPayload
+    }
+
+    # ── L.3 Other cluster nodes ───────────────────────────────────────────────
+    $remoteNodes = @($script:ClusterNodes | Where-Object { $_ -ne $env:COMPUTERNAME -and $_ -ne '' })
+    if ($remoteNodes.Count -gt 0) {
+        foreach ($node in $remoteNodes) {
+            Check-Port $node  135  'RPC EPM'             "Node"
+            Check-Port $node  445  'SMB (CSV/Cluster)'   "Node"
+            Check-Port $node 3343  'Cluster Service'      "Node"
+            Check-Port $node 5985  'WinRM HTTP'           "Node"
+            Check-Port $node 5986  'WinRM HTTPS'          "Node" -Optional
+            Check-Port $node 6600  'Live Migration'        "Node"
+            Check-Port $node 2179  'Hyper-V VMConnect'    "Node" -Optional
+        }
+    } else {
+        Add-Result $cat 'Cluster node port checks' 'SKIP' 'No remote cluster nodes specified (single-node mode or -ClusterNodes empty)'
+    }
+
+    # ── L.4 File share witness server ────────────────────────────────────────
+    if ($script:WitnessShare -and $script:WitnessShare -ne '') {
+        # Extract server from \\server\share
+        if ($script:WitnessShare -match '^\\\\([^\\]+)') {
+            $witnessServer = $Matches[1]
+            Check-Port $witnessServer 445 'SMB (witness share)' "Witness"
+            Check-Port $witnessServer 135 'RPC EPM (DFS)'       "Witness" -Optional
+        } else {
+            Add-Result $cat 'Witness server port check' 'SKIP' "Cannot parse server from '$($script:WitnessShare)'"
+        }
+    }
+
+    # ── L.5 iSCSI targets (SAN only) ─────────────────────────────────────────
+    if ($script:StorageType -eq 'SAN' -and $script:IscsiTargets -and $script:IscsiTargets.Count -gt 0) {
+        foreach ($target in $script:IscsiTargets) {
+            Check-Port $target 3260 'iSCSI' "iSCSI"
+        }
+    } elseif ($script:StorageType -eq 'SAN' -and (-not $script:IscsiTargets -or $script:IscsiTargets.Count -eq 0)) {
+        Add-Result $cat 'iSCSI target port checks' 'SKIP' 'No iSCSI targets specified (add IscsiTargets to hyperv-check.psd1)'
+    }
+
+    # ── L.6 SCVMM server (optional) ───────────────────────────────────────────
+    if ($script:ScvmmServer -and $script:ScvmmServer -ne '') {
+        Check-Port $script:ScvmmServer 8100 'SCVMM Agent'  "SCVMM"
+        Check-Port $script:ScvmmServer  445 'SMB'          "SCVMM" -Optional
+        Check-Port $script:ScvmmServer 5985 'WinRM HTTP'   "SCVMM" -Optional
+    }
+
+    # ── L.7 Self-checks (services that must listen locally) ───────────────────
+    foreach ($p in @(
+        @{ Port = 135;  Desc = 'RPC EPM (local)' },
+        @{ Port = 445;  Desc = 'SMB (local)' },
+        @{ Port = 3343; Desc = 'Cluster Service (local)' }
+    )) {
+        $ok = Test-TcpPort '127.0.0.1' $p.Port
+        Add-Result $cat "Local $($p.Port)/TCP ($($p.Desc))" (if ($ok) { 'PASS' } else { 'WARN' }) (if ($ok) { 'Listening' } else { 'Not listening' })
+    }
+}
+
+#endregion
+
 #region ── Summary & Report ───────────────────────────────────────────────────
 
 function Write-Summary {
@@ -1624,7 +1810,7 @@ function Write-Summary {
     }
 
     Write-Log '' -Level INFO
-    Write-Log "Log file: $LogFile" -Level INFO
+    Write-Log "Log file: $script:LogFile" -Level INFO
     return $failCount
 }
 
@@ -1673,11 +1859,14 @@ td{padding:7px 12px;border-bottom:1px solid #e0e0e0;font-size:.9em}
 
 #region ── Main ──────────────────────────────────────────────────────────────
 
-Write-Log "Test-HyperVNodeReadiness — Host: $env:COMPUTERNAME — Mode: $Mode — Storage: $StorageType" -Level SECTION
-Write-Log "Log: $LogFile" -Level INFO
+# Load config file or prompt interactively — populates all $script:* variables
+Initialize-Config
 
-$runNode    = $Mode -in @('PreNode', 'Both')
-$runCluster = $Mode -in @('PreCluster', 'Both')
+Write-Log "Test-HyperVNodeReadiness — Host: $env:COMPUTERNAME — Mode: $script:Mode — Storage: $script:StorageType" -Level SECTION
+Write-Log "Log: $script:LogFile" -Level INFO
+
+$runNode    = $script:Mode -in @('PreNode', 'Both')
+$runCluster = $script:Mode -in @('PreCluster', 'Both')
 
 if ($runNode) {
     Test-OSCompatibility
@@ -1691,22 +1880,25 @@ if ($runNode) {
 }
 
 if ($runCluster) {
-    Test-ClusterReadiness -Nodes $ClusterNodes
+    Test-ClusterReadiness -Nodes $script:ClusterNodes
 }
 
-# Section J runs whenever a ServiceAccount is supplied, regardless of mode
-if ($ServiceAccount -ne '' -or $ClusterOU -ne '') {
+# Section J: service account / OU — runs whenever configured
+if ($script:ServiceAccount -ne '' -or $script:ClusterOU -ne '') {
     Test-ServiceAccountPermissions
 }
 
-# Section K always runs (event log check is always relevant)
+# Section K: event log health (always for PreNode and Both)
 if ($runNode) {
     Test-EventLogHealth
 }
 
+# Section L: port connectivity (always — needs infra endpoints from config)
+Test-PortConnectivity
+
 $failCount = Write-Summary
 
-if ($HtmlReportPath -ne '') {
+if ($script:HtmlReportPath -ne '') {
     Write-HtmlReport -Path $HtmlReportPath
 }
 
