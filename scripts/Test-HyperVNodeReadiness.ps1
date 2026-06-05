@@ -2742,6 +2742,10 @@ function Invoke-CheckSection {
     }
 }
 
+# Skip execution when the script is dot-sourced (e.g. by the Pester unit tests),
+# so the helper functions can be loaded in isolation without running the checks.
+if ($MyInvocation.InvocationName -eq '.') { return }
+
 # Load config file or prompt interactively — populates all $script:* variables
 Initialize-Config
 
