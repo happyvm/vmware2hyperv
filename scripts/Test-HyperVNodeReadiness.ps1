@@ -30,10 +30,11 @@
     Network section also covers:
       - IPv6 consistency (uniform enable/disable across nodes)
       - LBFO deprecation detection (migrate to SET on WS2022/2025)
-      - MTU / Jumbo frames per NIC (9000 required for iSCSI and S2D)
-      - VMQ configuration reminder
+      - Role-aware NIC checks via NetworkAdapters/NetworkRoles mapping
+      - MTU / Jumbo frames only on iSCSI and S2D storage NICs
+      - VMQ on VM traffic, not management/cluster heartbeat
       - RSS (Receive Side Scaling)
-      - PFC (Priority Flow Control) for RoCE RDMA adapters
+      - RDMA/PFC/DCB only on S2D storage or RDMA Live Migration adapters
 
     Modes:
       PreNode     — Validate this machine as a standalone Hyper-V host
@@ -194,6 +195,13 @@ function Initialize-Config {
     $script:LiveMigrationAuth = if ($cfg.ContainsKey('LiveMigrationAuth') -and $cfg['LiveMigrationAuth']) { $cfg['LiveMigrationAuth'] } else { 'Kerberos' }
     if ($script:LiveMigrationAuth -notin @('Kerberos','CredSSP')) { $script:LiveMigrationAuth = 'Kerberos' }
 
+    $script:NetworkAdapters = @()
+    if ($cfg.ContainsKey('NetworkAdapters') -and $cfg['NetworkAdapters']) {
+        $script:NetworkAdapters = @($cfg['NetworkAdapters'])
+    } elseif ($cfg.ContainsKey('NetworkRoles') -and $cfg['NetworkRoles']) {
+        $script:NetworkAdapters = @($cfg['NetworkRoles'])
+    }
+
     $script:ClusterNodes = Read-CfgValue $cfg 'ClusterNodes' 'Other cluster node FQDNs/IPs (comma-separated, empty = single node)' '' -IsArray
     $script:WitnessShare = Read-CfgValue $cfg 'WitnessShare' 'File share witness UNC (e.g. \\srv\witness, empty to skip)'
     $script:ClusterName  = Read-CfgValue $cfg 'ClusterName'  'Planned cluster NetBIOS name (e.g. CLHYPERV01, empty to skip)'
@@ -248,6 +256,8 @@ function Initialize-Config {
     Write-Host "  WitnessShare  : $(if ($script:WitnessShare) { $script:WitnessShare } else { '(none)' })"
     Write-Host "  ServiceAccount: $(if ($script:ServiceAccount) { $script:ServiceAccount } else { '(none)' })"
     Write-Host "  DomainControllers: $(if ($script:DomainControllers) { $script:DomainControllers -join ', ' } else { '(none)' })"
+    $networkAdapterSummary = if ($script:NetworkAdapters -and $script:NetworkAdapters.Count -gt 0) { "$($script:NetworkAdapters.Count) role mapping(s)" } else { '(none)' }
+    Write-Host "  NetworkAdapters: $networkAdapterSummary"
     $platformRequirements = @(
         $(if ($script:RequireSecureBoot) { 'SecureBoot' }),
         $(if ($script:RequireTpm) { 'TPM' }),
@@ -607,12 +617,97 @@ function Test-HardwareRequirements {
 
 #region ── C. Network Configuration ──────────────────────────────────────────
 
+function Normalize-NetworkAdapterRole {
+    param([string]$Role)
+
+    if ([string]::IsNullOrWhiteSpace($Role)) { return $null }
+
+    switch -Regex ($Role.Trim()) {
+        '^Management$'    { return 'Management' }
+        '^(Cluster|Heartbeat)$' { return 'Cluster' }
+        '^LiveMigration$' { return 'LiveMigration' }
+        '^iSCSI$'         { return 'iSCSI' }
+        '^(S2DStorage|Storage|S2D)$' { return 'S2DStorage' }
+        '^(VM|VirtualMachine|VMUplink)$' { return 'VM' }
+        default           { return $null }
+    }
+}
+
+function ConvertTo-NetworkRoleMap {
+    param([object[]]$Mappings)
+
+    $roleMap = @{}
+    foreach ($mapping in @($Mappings)) {
+        if (-not $mapping) { continue }
+
+        if ($mapping -is [hashtable]) {
+            $keys = @($mapping.Keys)
+            $looksLikeMap = $keys.Count -gt 0 -and -not ($mapping.ContainsKey('Name') -or $mapping.ContainsKey('InterfaceAlias') -or $mapping.ContainsKey('InterfaceDescription') -or $mapping.ContainsKey('Role'))
+            if ($looksLikeMap) {
+                foreach ($key in $keys) {
+                    $role = Normalize-NetworkAdapterRole -Role ([string]$mapping[$key])
+                    if ($role) { $roleMap[[string]$key] = $role }
+                }
+                continue
+            }
+        }
+
+        $name = $null
+        $role = $null
+        foreach ($nameProperty in @('Name', 'InterfaceAlias', 'InterfaceDescription')) {
+            $property = $mapping.PSObject.Properties[$nameProperty]
+            if ($property -and $property.Value) {
+                $name = [string]$property.Value
+                break
+            }
+        }
+        $roleProperty = $mapping.PSObject.Properties['Role']
+        if ($roleProperty) {
+            $role = Normalize-NetworkAdapterRole -Role ([string]$roleProperty.Value)
+        }
+        if ($name -and $role) { $roleMap[$name] = $role }
+    }
+
+    return $roleMap
+}
+
+function Get-NetworkAdapterRole {
+    param(
+        [object]$Adapter,
+        [hashtable]$RoleMap
+    )
+
+    if (-not $Adapter -or -not $RoleMap -or $RoleMap.Count -eq 0) { return $null }
+
+    $candidateValues = @()
+    foreach ($nameProperty in @('Name', 'InterfaceAlias', 'InterfaceDescription')) {
+        $property = $Adapter.PSObject.Properties[$nameProperty]
+        if ($property -and $property.Value) { $candidateValues += [string]$property.Value }
+    }
+
+    foreach ($candidate in $candidateValues) {
+        if ($RoleMap.ContainsKey([string]$candidate)) {
+            return $RoleMap[[string]$candidate]
+        }
+    }
+
+    return $null
+}
+
 function Test-NetworkConfiguration {
     Section 'C. Network Configuration'
     $cat = 'Network'
 
     $adapters     = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })
     $adapterCount = $adapters.Count
+    $roleMap      = ConvertTo-NetworkRoleMap -Mappings $script:NetworkAdapters
+    $adapterRoles = @{}
+
+    if ($roleMap.Count -eq 0) {
+        Add-Result $cat 'Network adapter role mapping' 'INFO' 'No NetworkAdapters/NetworkRoles mapping configured; role-specific NIC checks are skipped where enforcement would be ambiguous'
+    } else {
+        Add-Result $cat 'Network adapter role mapping' 'INFO' "$($roleMap.Count) configured role mapping(s)"
+    }
 
     # S2D requires RDMA NICs — minimum 2 dedicated 10 GbE+ for SMB Direct
     $minNics = if ($StorageType -eq 'S2D') { 4 } else { 2 }
@@ -620,61 +715,120 @@ function Test-NetworkConfiguration {
     Add-Result $cat "NIC count (minimum $minNics for $StorageType)" $nicLevel "$adapterCount active NIC(s)"
 
     foreach ($nic in $adapters) {
+        $role = Get-NetworkAdapterRole -Adapter $nic -RoleMap $roleMap
+        $adapterRoles[$nic.Name] = $role
+        if ($role) {
+            Add-Result $cat "NIC '$($nic.Name)' role" 'INFO' $role
+        } else {
+            Add-Result $cat "NIC '$($nic.Name)' role" 'INFO' 'No role mapping found — role-specific requirements skipped for this NIC'
+        }
+
         $ipCfg = Get-NetIPConfiguration -InterfaceIndex $nic.InterfaceIndex -ErrorAction SilentlyContinue
         if (-not $ipCfg) { continue }
 
         $ipv4 = $ipCfg.IPv4Address
         if (-not $ipv4) {
-            Add-Result $cat "NIC '$($nic.Name)' IPv4" 'WARN' 'No IPv4 address — expected on cluster traffic NICs'
+            if ($role -eq 'VM') {
+                Add-Result $cat "NIC '$($nic.Name)' IPv4" 'SKIP' 'No IPv4 address required for a pure VM uplink'
+            } elseif ($role -in @('Management', 'Cluster', 'iSCSI', 'S2DStorage')) {
+                Add-Result $cat "NIC '$($nic.Name)' IPv4" 'WARN' "No IPv4 address — expected for $role traffic"
+            } else {
+                Add-Result $cat "NIC '$($nic.Name)' IPv4" 'INFO' 'No IPv4 address; no mapped role requiring IPv4 enforcement'
+            }
             continue
         }
 
         $addr   = $ipv4.IPAddress
         $prefix = $ipv4.PrefixLength
 
-        # Static IP required on all cluster nodes
         $dhcp = (Get-NetIPInterface -InterfaceIndex $nic.InterfaceIndex -AddressFamily IPv4).Dhcp -eq 'Enabled'
-        if ($dhcp) {
-            Add-Result $cat "NIC '$($nic.Name)' static IP" 'FAIL' "IP $addr/$prefix via DHCP — all cluster NIC IPs must be static"
+        if ($role -in @('Management', 'Cluster', 'iSCSI', 'S2DStorage')) {
+            if ($dhcp) {
+                Add-Result $cat "NIC '$($nic.Name)' static IP" 'FAIL' "IP $addr/$prefix via DHCP — static IP required for $role traffic"
+            } else {
+                Add-Result $cat "NIC '$($nic.Name)' static IP" 'PASS' "$addr/$prefix ($role)"
+            }
+        } elseif ($role -eq 'VM') {
+            Add-Result $cat "NIC '$($nic.Name)' static IP" 'SKIP' 'Pure VM uplink — host IPv4/static-IP enforcement skipped'
         } else {
-            Add-Result $cat "NIC '$($nic.Name)' static IP" 'PASS' "$addr/$prefix"
+            Add-Result $cat "NIC '$($nic.Name)' static IP" 'INFO' "IP $addr/$prefix; no mapped role requiring static-IP enforcement"
         }
 
         # Link speed
         $speedGbps = [math]::Round($nic.LinkSpeed / 1000000000, 0)
-        if ($StorageType -eq 'S2D' -and $speedGbps -lt 10) {
-            Add-Result $cat "NIC '$($nic.Name)' link speed" 'FAIL' "${speedGbps} Gbps — S2D requires minimum 10 GbE (25 GbE+ recommended)"
+        if ($role -eq 'S2DStorage' -and $speedGbps -lt 10) {
+            Add-Result $cat "NIC '$($nic.Name)' link speed" 'FAIL' "${speedGbps} Gbps — S2D storage requires minimum 10 GbE (25 GbE+ recommended)"
+        } elseif ($role -in @('iSCSI', 'LiveMigration') -and $speedGbps -lt 10) {
+            Add-Result $cat "NIC '$($nic.Name)' link speed" 'WARN' "${speedGbps} Gbps — $role traffic usually benefits from dedicated 10 GbE+"
         } elseif ($speedGbps -lt 1) {
-            Add-Result $cat "NIC '$($nic.Name)' link speed" 'WARN' "${speedGbps} Gbps — low speed for cluster traffic"
+            Add-Result $cat "NIC '$($nic.Name)' link speed" 'WARN' "${speedGbps} Gbps — low speed for Hyper-V host traffic"
         } else {
             Add-Result $cat "NIC '$($nic.Name)' link speed" 'INFO' "${speedGbps} Gbps"
         }
 
-        # DNS servers configured
+        # DNS servers and default gateway are required only on management NICs.
         $dns = $ipCfg.DNSServer | Where-Object { $_.AddressFamily -eq 2 }
-        if ($dns -and $dns.ServerAddresses) {
-            Add-Result $cat "NIC '$($nic.Name)' DNS servers" 'PASS' ($dns.ServerAddresses -join ', ')
-        }
+        if ($role -eq 'Management') {
+            if ($dns -and $dns.ServerAddresses) {
+                Add-Result $cat "NIC '$($nic.Name)' DNS servers" 'PASS' ($dns.ServerAddresses -join ', ')
+            } else {
+                Add-Result $cat "NIC '$($nic.Name)' DNS servers" 'FAIL' 'DNS servers required on management NIC'
+            }
 
-        # Default gateway — record for multi-gateway warning
-        if ($ipCfg.IPv4DefaultGateway) {
-            Add-Result $cat "NIC '$($nic.Name)' gateway" 'INFO' $ipCfg.IPv4DefaultGateway.NextHop
+            if ($ipCfg.IPv4DefaultGateway) {
+                Add-Result $cat "NIC '$($nic.Name)' gateway" 'PASS' $ipCfg.IPv4DefaultGateway.NextHop
+            } else {
+                Add-Result $cat "NIC '$($nic.Name)' gateway" 'FAIL' 'Default gateway required on management NIC'
+            }
+        } elseif ($role) {
+            if ($dns -and $dns.ServerAddresses) {
+                Add-Result $cat "NIC '$($nic.Name)' DNS servers" 'INFO' "Configured on $role NIC but only required on management: $($dns.ServerAddresses -join ', ')"
+            }
+            if ($ipCfg.IPv4DefaultGateway) {
+                Add-Result $cat "NIC '$($nic.Name)' gateway" 'INFO' "Configured on $role NIC but only required on management: $($ipCfg.IPv4DefaultGateway.NextHop)"
+            }
+        } else {
+            Add-Result $cat "NIC '$($nic.Name)' DNS/gateway role check" 'SKIP' 'NIC is not mapped to a role; management DNS/gateway requirements not evaluated'
         }
     }
 
-    # RDMA (required for S2D SMB Direct, strongly recommended otherwise)
+    # RDMA — only S2D storage and RDMA-backed Live Migration roles should require/enable it.
     try {
         $rdmaAdapters = @(Get-NetAdapterRDMA -ErrorAction Stop | Where-Object { $_.Enabled })
-        if ($StorageType -eq 'S2D') {
+        $s2dStorageNames = @($adapters | Where-Object { (Get-NetworkAdapterRole -Adapter $_ -RoleMap $roleMap) -eq 'S2DStorage' } | Select-Object -ExpandProperty Name)
+
+        if ($roleMap.Count -gt 0) {
+            if ($StorageType -eq 'S2D') {
+                $s2dRdma = @($rdmaAdapters | Where-Object { $_.Name -in $s2dStorageNames })
+                if ($s2dRdma.Count -ge 2) {
+                    Add-Result $cat 'RDMA adapters (S2DStorage role)' 'PASS' "$($s2dRdma.Count) S2DStorage RDMA-enabled NIC(s): $($s2dRdma.Name -join ', ')"
+                } elseif ($s2dRdma.Count -eq 1) {
+                    Add-Result $cat 'RDMA adapters (S2DStorage role)' 'WARN' 'Only 1 S2DStorage RDMA NIC — minimum 2 recommended for redundant SMB Direct (S2D)'
+                } else {
+                    Add-Result $cat 'RDMA adapters (S2DStorage role)' 'WARN' 'No RDMA-enabled S2DStorage NICs — SMB Direct / RDMA strongly recommended for S2D performance'
+                }
+            }
+
+            foreach ($rdmaNic in $rdmaAdapters) {
+                $rdmaRole = Get-NetworkAdapterRole -Adapter $rdmaNic -RoleMap $roleMap
+                if ($rdmaRole -in @('S2DStorage', 'LiveMigration')) {
+                    Add-Result $cat "NIC '$($rdmaNic.Name)' RDMA" 'INFO' "RDMA enabled on $rdmaRole NIC"
+                } elseif ($rdmaRole) {
+                    Add-Result $cat "NIC '$($rdmaNic.Name)' RDMA" 'WARN' "RDMA enabled on $rdmaRole NIC — RDMA should be limited to S2DStorage or RDMA LiveMigration traffic"
+                } else {
+                    Add-Result $cat "NIC '$($rdmaNic.Name)' RDMA" 'SKIP' 'RDMA enabled, but NIC is not mapped to a role; verify this is S2DStorage or RDMA LiveMigration traffic'
+                }
+            }
+        } elseif ($StorageType -eq 'S2D') {
             if ($rdmaAdapters.Count -ge 2) {
                 Add-Result $cat 'RDMA adapters (S2D SMB Direct)' 'PASS' "$($rdmaAdapters.Count) RDMA-enabled NIC(s): $($rdmaAdapters.Name -join ', ')"
             } elseif ($rdmaAdapters.Count -eq 1) {
-                Add-Result $cat 'RDMA adapters (S2D SMB Direct)' 'WARN' "Only 1 RDMA NIC — minimum 2 recommended for redundant SMB Direct (S2D)"
+                Add-Result $cat 'RDMA adapters (S2D SMB Direct)' 'WARN' 'Only 1 RDMA NIC — minimum 2 recommended for redundant SMB Direct (S2D)'
             } else {
-                Add-Result $cat 'RDMA adapters (S2D SMB Direct)' 'WARN' "No RDMA-enabled NICs — SMB Direct / RDMA strongly recommended for S2D performance"
+                Add-Result $cat 'RDMA adapters (S2D SMB Direct)' 'WARN' 'No RDMA-enabled NICs — SMB Direct / RDMA strongly recommended for S2D performance'
             }
         } else {
-            $rdmaInfo = if ($rdmaAdapters.Count -gt 0) { "$($rdmaAdapters.Count) RDMA NIC(s) — beneficial for Live Migration" } else { 'None detected' }
+            $rdmaInfo = if ($rdmaAdapters.Count -gt 0) { "$($rdmaAdapters.Count) RDMA NIC(s) — map roles to verify only S2DStorage/LiveMigration use RDMA" } else { 'None detected' }
             Add-Result $cat 'RDMA adapters' 'INFO' $rdmaInfo
         }
     } catch {
@@ -692,10 +846,29 @@ function Test-NetworkConfiguration {
         }
     }
 
-    # Multiple default gateways
+    # Default gateway placement — required only on management NICs.
     $allGateways = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)
     if ($allGateways.Count -gt 1) {
-        Add-Result $cat 'Multiple default gateways' 'WARN' "$($allGateways.Count) default routes — verify asymmetric routing does not break cluster heartbeat"
+        $managementGatewayCount = 0
+        $nonManagementGateways = @()
+        foreach ($gateway in $allGateways) {
+            $gatewayNic = $adapters | Where-Object { $_.InterfaceIndex -eq $gateway.InterfaceIndex } | Select-Object -First 1
+            $gatewayRole = Get-NetworkAdapterRole -Adapter $gatewayNic -RoleMap $roleMap
+            if ($gatewayRole -eq 'Management') {
+                $managementGatewayCount++
+            } elseif ($gatewayRole) {
+                $nonManagementGateways += "$($gateway.NextHop) on $gatewayRole"
+            } else {
+                $nonManagementGateways += "$($gateway.NextHop) on unmapped NIC"
+            }
+        }
+
+        if ($managementGatewayCount -gt 1) {
+            Add-Result $cat 'Multiple management default gateways' 'WARN' "$managementGatewayCount management default routes — verify asymmetric routing does not break host management"
+        }
+        if ($nonManagementGateways.Count -gt 0) {
+            Add-Result $cat 'Non-management default gateways' 'INFO' "Default gateway is only required on management NICs; found: $($nonManagementGateways -join ', ')"
+        }
     }
 
     # DNS suffix
@@ -741,26 +914,37 @@ function Test-NetworkConfiguration {
         Add-Result $cat 'NIC Teaming: LBFO' 'SKIP' "Get-NetLbfoTeam unavailable: $_"
     }
 
-    # MTU / Jumbo frames — storage NICs need MTU 9000 for iSCSI and S2D
+    # MTU / Jumbo frames — enforce MTU 9000 only for iSCSI and S2D storage NICs.
     $storageMinMtu = 9000
     foreach ($nic in $adapters) {
+        $role = $adapterRoles[$nic.Name]
         try {
             $adv = Get-NetAdapterAdvancedProperty -Name $nic.Name -RegistryKeyword 'JumboPacket' -ErrorAction SilentlyContinue
             if ($adv) {
                 $mtu = [int]$adv.RegistryValue[0]
-                if ($StorageType -eq 'S2D' -and $mtu -lt $storageMinMtu) {
-                    Add-Result $cat "NIC '$($nic.Name)' MTU (JumboPacket)" 'WARN' "MTU $mtu — S2D storage NICs should be $storageMinMtu; set on NIC AND switch"
-                } elseif ($StorageType -eq 'SAN' -and $mtu -lt $storageMinMtu) {
-                    Add-Result $cat "NIC '$($nic.Name)' MTU (JumboPacket)" 'WARN' "MTU $mtu — iSCSI storage NICs should be $storageMinMtu; verify switch port MTU matches"
+                if ($role -in @('iSCSI', 'S2DStorage')) {
+                    if ($mtu -lt $storageMinMtu) {
+                        Add-Result $cat "NIC '$($nic.Name)' MTU (JumboPacket)" 'WARN' "MTU $mtu — $role storage NICs should be $storageMinMtu; verify NIC and switch port MTU match"
+                    } else {
+                        Add-Result $cat "NIC '$($nic.Name)' MTU (JumboPacket)" 'PASS' "MTU $mtu ($role)"
+                    }
+                } elseif ($role) {
+                    Add-Result $cat "NIC '$($nic.Name)' MTU (JumboPacket)" 'INFO' "MTU $mtu — jumbo-frame requirement applies only to iSCSI/S2DStorage roles, not $role"
                 } else {
-                    Add-Result $cat "NIC '$($nic.Name)' MTU (JumboPacket)" 'PASS' "MTU $mtu"
+                    Add-Result $cat "NIC '$($nic.Name)' MTU (JumboPacket)" 'SKIP' "MTU $mtu; NIC is not mapped to a role, so storage MTU requirement was not evaluated"
                 }
             } else {
-                # Try reading via Get-NetIPInterface AdvancedProperty not available — use alternate method
                 $mtuDef = (Get-NetIPInterface -InterfaceIndex $nic.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).NlMtu
                 if ($mtuDef) {
-                    $level = if ($mtuDef -lt 1500) { 'WARN' } else { 'INFO' }
-                    Add-Result $cat "NIC '$($nic.Name)' MTU" $level "NlMtu = $mtuDef (JumboPacket key absent — NIC may not support it or MTU is default)"
+                    if ($role -in @('iSCSI', 'S2DStorage') -and $mtuDef -lt $storageMinMtu) {
+                        Add-Result $cat "NIC '$($nic.Name)' MTU" 'WARN' "NlMtu = $mtuDef — $role storage NICs should be $storageMinMtu"
+                    } elseif ($role -in @('iSCSI', 'S2DStorage')) {
+                        Add-Result $cat "NIC '$($nic.Name)' MTU" 'PASS' "NlMtu = $mtuDef ($role)"
+                    } elseif ($role) {
+                        Add-Result $cat "NIC '$($nic.Name)' MTU" 'INFO' "NlMtu = $mtuDef — jumbo-frame requirement applies only to iSCSI/S2DStorage roles"
+                    } else {
+                        Add-Result $cat "NIC '$($nic.Name)' MTU" 'SKIP' "NlMtu = $mtuDef; NIC is not mapped to a role"
+                    }
                 }
             }
         } catch {
@@ -768,12 +952,28 @@ function Test-NetworkConfiguration {
         }
     }
 
-    # VMQ (Virtual Machine Queue) — should be DISABLED on management NIC
+    # VMQ (Virtual Machine Queue) — recommended for VM traffic, not management/cluster heartbeat.
     try {
         $vmqAdapters = @(Get-NetAdapterVmq -ErrorAction Stop)
         foreach ($vmqNic in $vmqAdapters) {
-            if ($vmqNic.Enabled) {
-                Add-Result $cat "NIC '$($vmqNic.Name)' VMQ" 'INFO' "VMQ enabled — ensure it is DISABLED on the management/cluster-heartbeat NIC and enabled only on Hyper-V VM traffic NICs"
+            $role = $null
+            if ($adapterRoles.ContainsKey($vmqNic.Name)) { $role = $adapterRoles[$vmqNic.Name] }
+            if ($role -eq 'VM') {
+                if ($vmqNic.Enabled) {
+                    Add-Result $cat "NIC '$($vmqNic.Name)' VMQ" 'PASS' 'VMQ enabled for VM traffic'
+                } else {
+                    Add-Result $cat "NIC '$($vmqNic.Name)' VMQ" 'WARN' 'VMQ recommended on Hyper-V VM traffic NICs'
+                }
+            } elseif ($role -in @('Management', 'Cluster')) {
+                if ($vmqNic.Enabled) {
+                    Add-Result $cat "NIC '$($vmqNic.Name)' VMQ" 'WARN' "VMQ enabled on $role NIC — VMQ is not recommended on management/heartbeat traffic"
+                } else {
+                    Add-Result $cat "NIC '$($vmqNic.Name)' VMQ" 'PASS' "VMQ disabled on $role NIC"
+                }
+            } elseif ($role) {
+                Add-Result $cat "NIC '$($vmqNic.Name)' VMQ" 'INFO' "VMQ Enabled=$($vmqNic.Enabled) on $role NIC"
+            } else {
+                Add-Result $cat "NIC '$($vmqNic.Name)' VMQ" 'SKIP' "VMQ Enabled=$($vmqNic.Enabled); NIC is not mapped to a role"
             }
         }
     } catch {
@@ -788,26 +988,37 @@ function Test-NetworkConfiguration {
         Add-Result $cat 'RSS (Receive Side Scaling)' 'SKIP' "Get-NetAdapterRss unavailable: $_"
     }
 
-    # PFC (Priority Flow Control) — required for RoCE RDMA; not required for iWARP
+    # PFC (Priority Flow Control) / DCB — only relevant for S2DStorage and RDMA-backed LiveMigration.
     try {
         $rdmaAll = @(Get-NetAdapterRDMA -ErrorAction Stop | Where-Object { $_.Enabled })
         if ($rdmaAll.Count -gt 0) {
             foreach ($rdmaNic in $rdmaAll) {
+                $role = Get-NetworkAdapterRole -Adapter $rdmaNic -RoleMap $roleMap
+                $pfcCheckAllowed = $role -eq 'S2DStorage' -or $role -eq 'LiveMigration'
+                if (-not $role) {
+                    Add-Result $cat "NIC '$($rdmaNic.Name)' PFC/DCB role check" 'SKIP' 'RDMA NIC is not mapped to a role; verify PFC/DCB manually only if this is S2DStorage or RDMA LiveMigration'
+                    continue
+                }
+                if (-not $pfcCheckAllowed) {
+                    Add-Result $cat "NIC '$($rdmaNic.Name)' PFC/DCB" 'WARN' "RDMA/PFC/DCB should be limited to S2DStorage or RDMA LiveMigration, not $role"
+                    continue
+                }
+
                 try {
                     $qos = Get-NetAdapterQos -Name $rdmaNic.Name -ErrorAction Stop
                     $pfcEnabled = $qos.Enabled -and ($qos.OperationalFlowControl -ne 'None' -or ($null -ne $qos.OperationalPriorityAssignmentTable))
                     if ($pfcEnabled) {
-                        Add-Result $cat "NIC '$($rdmaNic.Name)' PFC (RoCE)" 'PASS' "QoS/PFC appears active — required for RoCE RDMA"
+                        Add-Result $cat "NIC '$($rdmaNic.Name)' PFC/DCB (RoCE)" 'PASS' "QoS/PFC appears active for $role RDMA traffic — required for RoCE RDMA"
                     } else {
-                        Add-Result $cat "NIC '$($rdmaNic.Name)' PFC (RoCE)" 'WARN' "QoS/PFC not detected — if this NIC uses RoCE (not iWARP), PFC must be configured on the NIC AND the switch; without PFC, S2D/SMB Direct degrades severely under load"
+                        Add-Result $cat "NIC '$($rdmaNic.Name)' PFC/DCB (RoCE)" 'WARN' "QoS/PFC not detected on $role RDMA NIC — if this NIC uses RoCE (not iWARP), PFC must be configured on the NIC and switch"
                     }
                 } catch {
-                    Add-Result $cat "NIC '$($rdmaNic.Name)' PFC check" 'SKIP' "Get-NetAdapterQos failed: $_ — verify PFC manually if using RoCE"
+                    Add-Result $cat "NIC '$($rdmaNic.Name)' PFC/DCB check" 'SKIP' "Get-NetAdapterQos failed: $_ — verify PFC manually if using RoCE"
                 }
             }
         }
     } catch {
-        Add-Result $cat 'PFC (Priority Flow Control)' 'SKIP' "RDMA query unavailable: $_"
+        Add-Result $cat 'PFC/DCB (Priority Flow Control)' 'SKIP' "RDMA query unavailable: $_"
     }
 }
 

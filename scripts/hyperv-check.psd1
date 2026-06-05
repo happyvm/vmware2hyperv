@@ -18,6 +18,22 @@
     # S2D — Storage Spaces Direct, internal disks, Datacenter edition required
     StorageType = 'SAN'
 
+    # ── Network adapter roles ─────────────────────────────────────────────────
+    # Map physical NIC names (Get-NetAdapter -Name) to traffic roles so network
+    # checks only enforce requirements where they apply. Supported roles:
+    # Management, Cluster, LiveMigration, iSCSI, S2DStorage, VM
+    #
+    # You can also use a NetworkRoles hashtable with the same name-to-role pairs:
+    # NetworkRoles = @{ Mgmt01 = 'Management'; Cluster01 = 'Cluster'; VM01 = 'VM' }
+    NetworkAdapters = @(
+        # @{ Name = 'Mgmt01';    Role = 'Management' }
+        # @{ Name = 'Cluster01'; Role = 'Cluster' }
+        # @{ Name = 'LM01';      Role = 'LiveMigration' }
+        # @{ Name = 'iSCSI01';   Role = 'iSCSI' }
+        # @{ Name = 'S2D01';     Role = 'S2DStorage' }
+        # @{ Name = 'VM01';      Role = 'VM' }
+    )
+
     # Live Migration authentication target.
     # Kerberos — validate SPNs and constrained delegation between nodes (recommended).
     # CredSSP  — do not require Kerberos constrained delegation; warn if CredSSP is not enabled.
