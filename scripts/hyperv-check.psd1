@@ -2,7 +2,9 @@
 # Configuration file for Test-HyperVNodeReadiness.ps1
 #
 # Copy this file next to the script (or specify -ConfigFile <path>).
-# Any value left empty ('') will be prompted interactively at runtime.
+# When this file is used the script runs unattended: any value left empty ('')
+# or omitted simply skips that check (Mode/StorageType fall back to their
+# defaults). Interactive prompts appear ONLY when no config file is found.
 #
 # Required: Mode, StorageType
 # Optional: everything else (omit or set to '' to skip that section)

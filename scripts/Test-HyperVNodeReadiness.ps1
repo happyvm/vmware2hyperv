@@ -163,18 +163,29 @@ function Read-CfgValue {
         [switch]$IsArray,
         [switch]$Required
     )
-    $val = $Cfg[$Key]
-    if ($null -eq $val -or ($val -is [string] -and $val -eq '')) {
-        $hint  = if ($Default -ne '') { " [$Default]" } else { '' }
-        $answer = Read-Host "$Prompt$hint"
-        if ($answer -eq '' -and $Default -ne '') { $answer = $Default }
-        if ($answer -eq '' -and $Required) { throw "Required value '$Key' was not provided." }
-        $val = $answer
+    $val = if ($Cfg.ContainsKey($Key)) { $Cfg[$Key] } else { $null }
+    $isEmpty = ($null -eq $val) -or ($val -is [string] -and $val -eq '')
+
+    if ($isEmpty) {
+        if ($script:ConfigLoaded) {
+            # Config file in use — never block on Read-Host. Apply the default
+            # when one exists; otherwise leave empty so the check is skipped.
+            $val = $Default
+        } else {
+            $hint   = if ($Default -ne '') { " [$Default]" } else { '' }
+            $answer = Read-Host "$Prompt$hint"
+            if ($answer -eq '' -and $Default -ne '') { $answer = $Default }
+            if ($answer -eq '' -and $Required) { throw "Required value '$Key' was not provided." }
+            $val = $answer
+        }
     }
+
     if ($IsArray) {
         if ($val -is [array]) { return @($val | Where-Object { $_ -ne '' }) }
+        if ($null -eq $val -or $val -eq '') { return @() }
         return @($val -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
     }
+    if ($null -eq $val) { return '' }
     return $val
 }
 
@@ -197,6 +208,11 @@ function Initialize-Config {
         Write-Host "         (Create hyperv-check.psd1 from the template to skip these prompts)" -ForegroundColor DarkYellow
         Write-Host ''
     }
+
+    # When a config file is in use the script runs unattended: an omitted or
+    # empty optional value means "skip that check", never an interactive prompt.
+    # Prompts happen only when no config file was found at all.
+    $script:ConfigLoaded = [bool]$cfgPath
 
     # ── Populate script-scope configuration variables ─────────────────────────
     $script:Mode         = Read-CfgValue $cfg 'Mode'         'Mode (PreNode / PreCluster / Both)' 'Both'
@@ -671,14 +687,26 @@ function ConvertTo-NetworkRoleMap {
             $keys = @($mapping.Keys)
             $looksLikeMap = $keys.Count -gt 0 -and -not ($mapping.ContainsKey('Name') -or $mapping.ContainsKey('InterfaceAlias') -or $mapping.ContainsKey('InterfaceDescription') -or $mapping.ContainsKey('Role'))
             if ($looksLikeMap) {
+                # { NicName = 'Role'; ... } form (e.g. the NetworkRoles hashtable)
                 foreach ($key in $keys) {
                     $role = ConvertTo-NetworkAdapterRole -Role ([string]$mapping[$key])
                     if ($role) { $roleMap[[string]$key] = $role }
                 }
-                continue
+            } else {
+                # { Name/InterfaceAlias/InterfaceDescription = ...; Role = ... } form.
+                # Hashtable keys are NOT exposed via PSObject.Properties, so read
+                # them by index (the documented NetworkAdapters template format).
+                $name = $null
+                foreach ($nameKey in @('Name', 'InterfaceAlias', 'InterfaceDescription')) {
+                    if ($mapping.ContainsKey($nameKey) -and $mapping[$nameKey]) { $name = [string]$mapping[$nameKey]; break }
+                }
+                $role = if ($mapping.ContainsKey('Role')) { ConvertTo-NetworkAdapterRole -Role ([string]$mapping['Role']) } else { $null }
+                if ($name -and $role) { $roleMap[$name] = $role }
             }
+            continue
         }
 
+        # Non-hashtable objects (e.g. PSCustomObject): read via PSObject.Properties.
         $name = $null
         $role = $null
         foreach ($nameProperty in @('Name', 'InterfaceAlias', 'InterfaceDescription')) {
@@ -1377,14 +1405,10 @@ function Test-DNSResolution {
             Add-Result $cat "DNS SOA: $domainName" 'WARN' "SOA query failed — verify DNS zone allows dynamic updates (required for CNO registration)"
         }
 
-        # DNS scavenging — required to avoid stale CNO/VCO A records on cluster rebuild
-        # Query the AD-integrated zone object for dnszones scavenging properties
+        # DNS scavenging — required to avoid stale CNO/VCO A records on cluster
+        # rebuild. Query the DNS server WMI provider; only available on a box with
+        # the DNS-Server role (otherwise this falls through to SKIP).
         try {
-            $dnsZoneDNScav = "DC=$domainName,CN=MicrosoftDNS,DC=DomainDnsZones,DC=$($domainName.Replace('.', ',DC='))"
-            $zoneEntry     = [System.DirectoryServices.DirectoryEntry]"LDAP://$dnsZoneDNScav"
-            $zoneEntry.psbase.RefreshCache([string[]]@('dnsProperty'))
-            # dnsProperty is a multi-valued byte array; scavenging is encoded within it
-            # A simpler approach: check via WMI DNS server if available
             $dnsSrv = Get-CimInstance -Namespace root\MicrosoftDNS -ClassName MicrosoftDNS_Zone `
                 -Filter "Name='$domainName'" -ErrorAction Stop | Select-Object -First 1
             if ($dnsSrv) {
@@ -1410,7 +1434,8 @@ function Test-TimeSync {
 
     $w32tm = Get-Service -Name W32Time -ErrorAction SilentlyContinue
     if (-not $w32tm -or $w32tm.Status -ne 'Running') {
-        Add-Result $cat 'Windows Time service (W32TM)' 'FAIL' "Status: $($w32tm.Status) — run: w32tm /config /syncfromflags:domhier /update && net start W32Time"
+        $w32Status = if ($w32tm) { $w32tm.Status } else { 'Not found' }
+        Add-Result $cat 'Windows Time service (W32TM)' 'FAIL' "Status: $w32Status — run: w32tm /config /syncfromflags:domhier /update && net start W32Time"
         return
     }
     Add-Result $cat 'Windows Time service (W32TM)' 'PASS' 'Running'
@@ -1518,17 +1543,10 @@ function Test-FirewallRules {
         @{ Port = 3343; Desc = 'Cluster Service' }
     )
     foreach ($p in $ports) {
-        try {
-            $tcp    = [System.Net.Sockets.TcpClient]::new()
-            $ar     = $tcp.BeginConnect('127.0.0.1', $p.Port, $null, $null)
-            $ok     = $ar.AsyncWaitHandle.WaitOne(1000, $false)
-            $tcp.Close()
-            $level  = if ($ok) { 'PASS' } else { 'WARN' }
-            $detail = if ($ok) { 'Listening' } else { 'Not listening — service may be stopped or port blocked by FW' }
-            Add-Result $cat "Port $($p.Port)/TCP ($($p.Desc))" $level $detail
-        } catch {
-            Add-Result $cat "Port $($p.Port)/TCP ($($p.Desc))" 'WARN' "Test failed: $_"
-        }
+        $ok     = Test-TcpPort -Target '127.0.0.1' -Port $p.Port -TimeoutMs 1000
+        $level  = if ($ok) { 'PASS' } else { 'WARN' }
+        $detail = if ($ok) { 'Listening' } else { 'Not listening — service may be stopped or port blocked by FW' }
+        Add-Result $cat "Port $($p.Port)/TCP ($($p.Desc))" $level $detail
     }
 }
 
@@ -1583,19 +1601,21 @@ function Test-Storage {
             Add-Result $cat 'SAN: MPIO feature' 'SKIP' "ServerManager unavailable: $_"
         }
 
-        # Global MPIO load-balancing policy
+        # Global MPIO load-balancing policy. The default load-balance policy is
+        # exposed by Get-MSDSMGlobalDefaultLoadBalancePolicy (not Get-MPIOSetting,
+        # which only holds path-verification/retry/timeout settings).
         try {
-            $mpioSetting = Get-MPIOSetting -ErrorAction Stop
-            $policyCandidates = @(
-                $mpioSetting.NewPathVerificationState,
-                $mpioSetting.CustomPathRecovery,
-                $mpioSetting.LoadBalancePolicy,
-                $mpioSetting.DefaultLoadBalancePolicy,
-                $mpioSetting.MPIORetryCount
-            ) | Where-Object { $null -ne $_ -and $_ -ne '' }
+            $mpioSetting  = Get-MPIOSetting -ErrorAction Stop
             $policyDetail = ($mpioSetting | Format-List * | Out-String).Trim() -replace "`r?`n", '; '
+
+            $lbPolicy = $null
+            try {
+                $lbPolicy = (Get-MSDSMGlobalDefaultLoadBalancePolicy -ErrorAction Stop)
+            } catch { }
+            $policyDetail = if ($lbPolicy) { "DefaultLoadBalancePolicy=$lbPolicy; $policyDetail" } else { $policyDetail }
+
             if ($script:ExpectedMpioPolicy) {
-                $policyText = "$($policyCandidates -join ' ') $policyDetail"
+                $policyText = "$lbPolicy $policyDetail"
                 $level = if ($policyText -match [regex]::Escape($script:ExpectedMpioPolicy)) { 'PASS' } else { 'WARN' }
                 Add-Result $cat 'SAN: MPIO global policy' $level "Expected '$($script:ExpectedMpioPolicy)' — $policyDetail"
             } else {
@@ -1854,12 +1874,24 @@ function Test-Storage {
                 Add-Result $cat 'S2D: SAS drives detected' 'WARN' "$($sasBusDisks.Count) SAS disk(s) — verify HBA is in JBOD/pass-through mode (no RAID) and SAS expanders are NOT shared between nodes"
             }
 
-            # Boot/OS drive should not be poolable
-            $osDisk2 = @($allDisks | Where-Object { $_.IsSystem -or $_.IsBoot })
-            foreach ($d in $osDisk2) {
-                if ($d.CanPool) {
-                    Add-Result $cat "S2D: OS disk ($($d.FriendlyName)) poolable?" 'WARN' "OS/boot disk appears poolable — S2D should not include the OS disk in the pool"
+            # Boot/OS drive should not be poolable. Get-PhysicalDisk does not expose
+            # IsSystem/IsBoot (those live on Get-Disk), so resolve the OS/boot disk
+            # via Get-Disk and match it by serial number against the poolable set.
+            try {
+                $osSerials = @(Get-Disk -ErrorAction Stop |
+                    Where-Object { $_.IsSystem -or $_.IsBoot } |
+                    ForEach-Object { $_.SerialNumber } |
+                    Where-Object { $_ } | ForEach-Object { $_.Trim() })
+                if ($osSerials.Count -gt 0) {
+                    foreach ($d in $poolableDisks) {
+                        $serial = if ($d.SerialNumber) { $d.SerialNumber.Trim() } else { $null }
+                        if ($serial -and $serial -in $osSerials) {
+                            Add-Result $cat "S2D: OS disk ($($d.FriendlyName)) poolable?" 'WARN' "OS/boot disk appears poolable — S2D should not include the OS disk in the pool"
+                        }
+                    }
                 }
+            } catch {
+                Add-Result $cat 'S2D: OS disk poolable check' 'SKIP' "Get-Disk correlation failed: $_"
             }
 
         } catch {
@@ -2111,16 +2143,20 @@ function Test-ServiceAccountPermissions {
     }
 
     # ── K.2 Local administrator on this node ─────────────────────────────────
+    # Match by SID, not by name: $accountSids holds the account's own SID plus
+    # every group it transitively belongs to (tokenGroups). The account is a
+    # local admin iff any Administrators member SID is in that set — checking the
+    # name (or "any group present") would yield false positives.
     try {
         $localAdmins = @(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop)
-        $isLocalAdmin = $localAdmins | Where-Object {
-            ($_.ObjectClass -eq 'User'  -and $_.Name -match [regex]::Escape($samName)) -or
-            ($_.ObjectClass -eq 'Group' -and $accountSids.Count -gt 0)
-        }
-        if ($isLocalAdmin) {
-            Add-Result $cat "Local admin on $($env:COMPUTERNAME)" 'PASS' "Found in local Administrators group"
+        $matchedAdmin = @($localAdmins | Where-Object { $_.SID -and $accountSids.Contains([string]$_.SID.Value) })
+        if ($matchedAdmin.Count -gt 0) {
+            $via = ($matchedAdmin | ForEach-Object { "$($_.Name) [$($_.ObjectClass)]" }) -join ', '
+            Add-Result $cat "Local admin on $($env:COMPUTERNAME)" 'PASS' "Account or one of its groups is in local Administrators: $via"
+        } elseif ($accountSids.Count -le 1) {
+            Add-Result $cat "Local admin on $($env:COMPUTERNAME)" 'WARN' "Could not resolve the account's group SIDs (tokenGroups) — local admin membership via groups cannot be confirmed; verify manually"
         } else {
-            Add-Result $cat "Local admin on $($env:COMPUTERNAME)" 'FAIL' "'$samName' is NOT in local Administrators — the account creating the cluster must be local admin on all nodes"
+            Add-Result $cat "Local admin on $($env:COMPUTERNAME)" 'FAIL' "'$samName' (and its groups) is NOT in local Administrators — the account creating the cluster must be local admin on all nodes"
         }
     } catch {
         Add-Result $cat "Local admin on $($env:COMPUTERNAME)" 'WARN' "Get-LocalGroupMember failed: $_ — verify manually"
@@ -2466,13 +2502,21 @@ function Test-EventLogHealth {
 
 function Test-TcpPort {
     param([string]$Target, [int]$Port, [int]$TimeoutMs = 2000)
+    $tcp = $null
     try {
         $tcp = [System.Net.Sockets.TcpClient]::new()
         $ar  = $tcp.BeginConnect($Target, $Port, $null, $null)
-        $ok  = $ar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)
-        try { $tcp.Close() } catch {}
-        return $ok
-    } catch { return $false }
+        # WaitOne signals as soon as the attempt completes, including a refused
+        # connection (RST). Confirm with EndConnect (throws on refusal/failure)
+        # so a reachable-but-closed port is not reported as open.
+        if (-not $ar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return $false }
+        $tcp.EndConnect($ar)
+        return $tcp.Connected
+    } catch {
+        return $false
+    } finally {
+        if ($tcp) { try { $tcp.Close() } catch {} }
+    }
 }
 
 function Test-UdpPort {
@@ -2637,10 +2681,14 @@ function Write-Summary {
 function Write-HtmlReport {
     param([string]$Path)
 
+    # HTML-encode all dynamic values so detail text containing <, > or & (error
+    # messages, paths, DNs, etc.) cannot corrupt the table or inject markup.
+    function ConvertTo-HtmlText { param([string]$Text) [System.Net.WebUtility]::HtmlEncode([string]$Text) }
+
     $rows = foreach ($r in $script:Results) {
         $bg   = switch ($r.Status) { 'PASS' { '#d4edda' } 'WARN' { '#fff3cd' } 'FAIL' { '#f8d7da' } 'SKIP' { '#e2e3e5' } default { '#ffffff' } }
         $icon = switch ($r.Status) { 'PASS' { '&#9989;' } 'WARN' { '&#9888;' } 'FAIL' { '&#10060;' } 'SKIP' { '&#9940;' } default { '&#8505;' } }
-        "<tr style='background:$bg'><td>$($r.Category)</td><td>$($r.Check)</td><td>$icon $($r.Status)</td><td>$($r.Detail)</td></tr>"
+        "<tr style='background:$bg'><td>$(ConvertTo-HtmlText $r.Category)</td><td>$(ConvertTo-HtmlText $r.Check)</td><td>$icon $($r.Status)</td><td>$(ConvertTo-HtmlText $r.Detail)</td></tr>"
     }
 
     $passCount = ($script:Results | Where-Object { $_.Status -eq 'PASS' }).Count
@@ -2693,6 +2741,10 @@ function Invoke-CheckSection {
         Add-Result $Name 'Section execution' 'FAIL' "Unhandled error — section aborted: $($_.Exception.Message)"
     }
 }
+
+# Skip execution when the script is dot-sourced (e.g. by the Pester unit tests),
+# so the helper functions can be loaded in isolation without running the checks.
+if ($MyInvocation.InvocationName -eq '.') { return }
 
 # Load config file or prompt interactively — populates all $script:* variables
 Initialize-Config
