@@ -163,18 +163,29 @@ function Read-CfgValue {
         [switch]$IsArray,
         [switch]$Required
     )
-    $val = $Cfg[$Key]
-    if ($null -eq $val -or ($val -is [string] -and $val -eq '')) {
-        $hint  = if ($Default -ne '') { " [$Default]" } else { '' }
-        $answer = Read-Host "$Prompt$hint"
-        if ($answer -eq '' -and $Default -ne '') { $answer = $Default }
-        if ($answer -eq '' -and $Required) { throw "Required value '$Key' was not provided." }
-        $val = $answer
+    $val = if ($Cfg.ContainsKey($Key)) { $Cfg[$Key] } else { $null }
+    $isEmpty = ($null -eq $val) -or ($val -is [string] -and $val -eq '')
+
+    if ($isEmpty) {
+        if ($script:ConfigLoaded) {
+            # Config file in use — never block on Read-Host. Apply the default
+            # when one exists; otherwise leave empty so the check is skipped.
+            $val = $Default
+        } else {
+            $hint   = if ($Default -ne '') { " [$Default]" } else { '' }
+            $answer = Read-Host "$Prompt$hint"
+            if ($answer -eq '' -and $Default -ne '') { $answer = $Default }
+            if ($answer -eq '' -and $Required) { throw "Required value '$Key' was not provided." }
+            $val = $answer
+        }
     }
+
     if ($IsArray) {
         if ($val -is [array]) { return @($val | Where-Object { $_ -ne '' }) }
+        if ($null -eq $val -or $val -eq '') { return @() }
         return @($val -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
     }
+    if ($null -eq $val) { return '' }
     return $val
 }
 
@@ -197,6 +208,11 @@ function Initialize-Config {
         Write-Host "         (Create hyperv-check.psd1 from the template to skip these prompts)" -ForegroundColor DarkYellow
         Write-Host ''
     }
+
+    # When a config file is in use the script runs unattended: an omitted or
+    # empty optional value means "skip that check", never an interactive prompt.
+    # Prompts happen only when no config file was found at all.
+    $script:ConfigLoaded = [bool]$cfgPath
 
     # ── Populate script-scope configuration variables ─────────────────────────
     $script:Mode         = Read-CfgValue $cfg 'Mode'         'Mode (PreNode / PreCluster / Both)' 'Both'
@@ -1410,7 +1426,8 @@ function Test-TimeSync {
 
     $w32tm = Get-Service -Name W32Time -ErrorAction SilentlyContinue
     if (-not $w32tm -or $w32tm.Status -ne 'Running') {
-        Add-Result $cat 'Windows Time service (W32TM)' 'FAIL' "Status: $($w32tm.Status) — run: w32tm /config /syncfromflags:domhier /update && net start W32Time"
+        $w32Status = if ($w32tm) { $w32tm.Status } else { 'Not found' }
+        Add-Result $cat 'Windows Time service (W32TM)' 'FAIL' "Status: $w32Status — run: w32tm /config /syncfromflags:domhier /update && net start W32Time"
         return
     }
     Add-Result $cat 'Windows Time service (W32TM)' 'PASS' 'Running'
@@ -1583,19 +1600,21 @@ function Test-Storage {
             Add-Result $cat 'SAN: MPIO feature' 'SKIP' "ServerManager unavailable: $_"
         }
 
-        # Global MPIO load-balancing policy
+        # Global MPIO load-balancing policy. The default load-balance policy is
+        # exposed by Get-MSDSMGlobalDefaultLoadBalancePolicy (not Get-MPIOSetting,
+        # which only holds path-verification/retry/timeout settings).
         try {
-            $mpioSetting = Get-MPIOSetting -ErrorAction Stop
-            $policyCandidates = @(
-                $mpioSetting.NewPathVerificationState,
-                $mpioSetting.CustomPathRecovery,
-                $mpioSetting.LoadBalancePolicy,
-                $mpioSetting.DefaultLoadBalancePolicy,
-                $mpioSetting.MPIORetryCount
-            ) | Where-Object { $null -ne $_ -and $_ -ne '' }
+            $mpioSetting  = Get-MPIOSetting -ErrorAction Stop
             $policyDetail = ($mpioSetting | Format-List * | Out-String).Trim() -replace "`r?`n", '; '
+
+            $lbPolicy = $null
+            try {
+                $lbPolicy = (Get-MSDSMGlobalDefaultLoadBalancePolicy -ErrorAction Stop)
+            } catch { }
+            $policyDetail = if ($lbPolicy) { "DefaultLoadBalancePolicy=$lbPolicy; $policyDetail" } else { $policyDetail }
+
             if ($script:ExpectedMpioPolicy) {
-                $policyText = "$($policyCandidates -join ' ') $policyDetail"
+                $policyText = "$lbPolicy $policyDetail"
                 $level = if ($policyText -match [regex]::Escape($script:ExpectedMpioPolicy)) { 'PASS' } else { 'WARN' }
                 Add-Result $cat 'SAN: MPIO global policy' $level "Expected '$($script:ExpectedMpioPolicy)' — $policyDetail"
             } else {
@@ -1854,12 +1873,24 @@ function Test-Storage {
                 Add-Result $cat 'S2D: SAS drives detected' 'WARN' "$($sasBusDisks.Count) SAS disk(s) — verify HBA is in JBOD/pass-through mode (no RAID) and SAS expanders are NOT shared between nodes"
             }
 
-            # Boot/OS drive should not be poolable
-            $osDisk2 = @($allDisks | Where-Object { $_.IsSystem -or $_.IsBoot })
-            foreach ($d in $osDisk2) {
-                if ($d.CanPool) {
-                    Add-Result $cat "S2D: OS disk ($($d.FriendlyName)) poolable?" 'WARN' "OS/boot disk appears poolable — S2D should not include the OS disk in the pool"
+            # Boot/OS drive should not be poolable. Get-PhysicalDisk does not expose
+            # IsSystem/IsBoot (those live on Get-Disk), so resolve the OS/boot disk
+            # via Get-Disk and match it by serial number against the poolable set.
+            try {
+                $osSerials = @(Get-Disk -ErrorAction Stop |
+                    Where-Object { $_.IsSystem -or $_.IsBoot } |
+                    ForEach-Object { $_.SerialNumber } |
+                    Where-Object { $_ } | ForEach-Object { $_.Trim() })
+                if ($osSerials.Count -gt 0) {
+                    foreach ($d in $poolableDisks) {
+                        $serial = if ($d.SerialNumber) { $d.SerialNumber.Trim() } else { $null }
+                        if ($serial -and $serial -in $osSerials) {
+                            Add-Result $cat "S2D: OS disk ($($d.FriendlyName)) poolable?" 'WARN' "OS/boot disk appears poolable — S2D should not include the OS disk in the pool"
+                        }
+                    }
                 }
+            } catch {
+                Add-Result $cat 'S2D: OS disk poolable check' 'SKIP' "Get-Disk correlation failed: $_"
             }
 
         } catch {
