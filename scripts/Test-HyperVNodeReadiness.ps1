@@ -13,7 +13,8 @@
       F. Time synchronization (W32TM, Kerberos < 5 minutes)
       G. Firewall: cluster/SMB/Live-Migration rules and critical TCP ports
       H. Storage — mode-specific:
-            SAN : MPIO required, iSCSI/FC initiator, disk visibility across nodes
+            SAN : MPIO feature/global settings, claimed devices/path count, ALUA/vendor DSM,
+                  iSCSI/FC initiator, disk state, disk visibility across nodes
             S2D : Datacenter edition, physical disks eligible, bus type, no shared SAS,
                   RDMA NICs, SMB Direct, drive tier inventory
       I. Failover Cluster: quorum recommendation, cross-node OS/domain/hotfix consistency,
@@ -195,6 +196,14 @@ function Initialize-Config {
     $script:LiveMigrationAuth = if ($cfg.ContainsKey('LiveMigrationAuth') -and $cfg['LiveMigrationAuth']) { $cfg['LiveMigrationAuth'] } else { 'Kerberos' }
     if ($script:LiveMigrationAuth -notin @('Kerberos','CredSSP')) { $script:LiveMigrationAuth = 'Kerberos' }
 
+    # Optional SAN expectations. Missing or empty values keep checks informational
+    # so the same template works for greenfield discovery and strict validation.
+    $script:ExpectedSanDiskCount = if ($cfg.ContainsKey('ExpectedSanDiskCount') -and $null -ne $cfg['ExpectedSanDiskCount'] -and $cfg['ExpectedSanDiskCount'] -ne '') { [int]$cfg['ExpectedSanDiskCount'] } else { $null }
+    $script:ExpectedMpioPolicy   = if ($cfg.ContainsKey('ExpectedMpioPolicy') -and $cfg['ExpectedMpioPolicy']) { [string]$cfg['ExpectedMpioPolicy'] } else { '' }
+    $script:RequireAlua          = [bool]($cfg['RequireAlua'])
+    $script:SanTransport         = if ($cfg.ContainsKey('SanTransport') -and $cfg['SanTransport']) { [string]$cfg['SanTransport'] } else { 'Both' }
+    if ($script:SanTransport -notin @('iSCSI','FC','Both')) { $script:SanTransport = 'Both' }
+
     $script:NetworkAdapters = @()
     if ($cfg.ContainsKey('NetworkAdapters') -and $cfg['NetworkAdapters']) {
         $script:NetworkAdapters = @($cfg['NetworkAdapters'])
@@ -251,6 +260,12 @@ function Initialize-Config {
     Write-Host "[======] Configuration summary" -ForegroundColor Cyan
     Write-Host "  Mode          : $($script:Mode)"
     Write-Host "  StorageType   : $($script:StorageType)"
+    if ($script:StorageType -eq 'SAN') {
+        Write-Host "  SAN transport : $($script:SanTransport)"
+        Write-Host "  Expected SAN disks: $(if ($null -ne $script:ExpectedSanDiskCount) { $script:ExpectedSanDiskCount } else { '(not set)' })"
+        Write-Host "  Expected MPIO policy: $(if ($script:ExpectedMpioPolicy) { $script:ExpectedMpioPolicy } else { '(not set)' })"
+        Write-Host "  Require ALUA  : $($script:RequireAlua)"
+    }
     Write-Host "  LiveMigrationAuth: $($script:LiveMigrationAuth)"
     Write-Host "  ClusterNodes  : $(if ($script:ClusterNodes) { $script:ClusterNodes -join ', ' } else { '(none)' })"
     Write-Host "  WitnessShare  : $(if ($script:WitnessShare) { $script:WitnessShare } else { '(none)' })"
@@ -1531,6 +1546,12 @@ function Test-Storage {
     if ($StorageType -eq 'SAN') {
         # ── SAN ────────────────────────────────────────────────────────────────
 
+        $sanBusTypes = switch ($script:SanTransport) {
+            'iSCSI' { @('iSCSI') }
+            'FC'    { @('Fibre Channel', 'Fibrechannel') }
+            default { @('iSCSI', 'Fibre Channel', 'Fibrechannel') }
+        }
+
         # MPIO — required for SAN multi-path
         try {
             $mpio = Get-WindowsFeature -Name 'Multipath-IO' -ErrorAction SilentlyContinue
@@ -1542,61 +1563,224 @@ function Test-Storage {
             Add-Result $cat 'SAN: MPIO feature' 'SKIP' "ServerManager unavailable: $_"
         }
 
-        # MPIO path count per disk (should be > 1 for redundancy)
+        # Global MPIO load-balancing policy
         try {
-            $mpioPaths = Get-MSDSMSupportedHW -ErrorAction SilentlyContinue
-            if ($mpioPaths) {
-                Add-Result $cat 'SAN: MPIO supported hardware entries' 'INFO' "$($mpioPaths.Count) entry/entries"
+            $mpioSetting = Get-MPIOSetting -ErrorAction Stop
+            $policyCandidates = @(
+                $mpioSetting.NewPathVerificationState,
+                $mpioSetting.CustomPathRecovery,
+                $mpioSetting.LoadBalancePolicy,
+                $mpioSetting.DefaultLoadBalancePolicy,
+                $mpioSetting.MPIORetryCount
+            ) | Where-Object { $null -ne $_ -and $_ -ne '' }
+            $policyDetail = ($mpioSetting | Format-List * | Out-String).Trim() -replace "`r?`n", '; '
+            if ($script:ExpectedMpioPolicy) {
+                $policyText = "$($policyCandidates -join ' ') $policyDetail"
+                $level = if ($policyText -match [regex]::Escape($script:ExpectedMpioPolicy)) { 'PASS' } else { 'WARN' }
+                Add-Result $cat 'SAN: MPIO global policy' $level "Expected '$($script:ExpectedMpioPolicy)' — $policyDetail"
+            } else {
+                Add-Result $cat 'SAN: MPIO global policy' 'INFO' $policyDetail
+            }
+        } catch {
+            Add-Result $cat 'SAN: MPIO global policy' 'SKIP' "Get-MPIOSetting unavailable: $_"
+        }
+
+        # MPIO DSM support inventory
+        try {
+            $supportedHw = @(Get-MSDSMSupportedHW -ErrorAction Stop)
+            if ($supportedHw.Count -gt 0) {
+                $hwSummary = @($supportedHw | ForEach-Object {
+                    $vendor = if ($_.VendorId) { $_.VendorId.Trim() } else { 'unknown-vendor' }
+                    $product = if ($_.ProductId) { $_.ProductId.Trim() } else { 'unknown-product' }
+                    "$vendor/$product"
+                }) -join ', '
+                Add-Result $cat 'SAN: MPIO supported hardware entries' 'INFO' "$($supportedHw.Count) entry/entries — $hwSummary"
             } else {
                 Add-Result $cat 'SAN: MPIO supported hardware entries' 'WARN' 'No MPIO DSM entries — vendor DSM may not be installed'
             }
         } catch {
-            Add-Result $cat 'SAN: MPIO paths' 'SKIP' "MPIO cmdlets unavailable — run from Windows with Multipath-IO installed"
+            Add-Result $cat 'SAN: MPIO supported hardware entries' 'SKIP' "MPIO cmdlets unavailable — run from Windows with Multipath-IO installed: $_"
         }
 
-        # iSCSI Initiator
-        $iscsiSvc = Get-Service -Name MSiSCSI -ErrorAction SilentlyContinue
-        if ($iscsiSvc) {
-            $level = if ($iscsiSvc.Status -eq 'Running') { 'PASS' } else { 'WARN' }
-            Add-Result $cat 'SAN: iSCSI Initiator service (MSiSCSI)' $level "Status: $($iscsiSvc.Status)"
-        }
-
-        # iSCSI connected sessions
+        # Claimed MPIO devices and paths. Prefer mpclaim because it exposes DSM,
+        # policy, path and ALUA hints consistently across Windows Server builds.
+        $mpclaimOutput = @()
+        $claimedDeviceCount = 0
+        $lunPathCounts = @{}
         try {
-            $sessions = @(Get-IscsiSession -ErrorAction Stop)
-            if ($sessions.Count -gt 0) {
-                Add-Result $cat 'SAN: iSCSI sessions' 'PASS' "$($sessions.Count) active session(s) — Target(s): $(($sessions.TargetNodeAddress | Select-Object -Unique) -join ', ')"
+            $mpclaim = Get-Command -Name mpclaim.exe -ErrorAction SilentlyContinue
+            if (-not $mpclaim) { $mpclaim = Get-Command -Name mpclaim -ErrorAction SilentlyContinue }
+            if ($mpclaim) {
+                $mpclaimOutput = @(& $mpclaim.Source -s -d 2>&1 | ForEach-Object { [string]$_ })
+                $claimedLines = @($mpclaimOutput | Where-Object { $_ -match '^\s*MPIO Disk\s+\d+:' -or $_ -match '^\s*Disk\s+\d+\s+' })
+                $claimedDeviceCount = $claimedLines.Count
+
+                $currentLun = $null
+                foreach ($line in $mpclaimOutput) {
+                    if ($line -match '^\s*(MPIO\s+)?Disk\s+(\d+)[:\s]') {
+                        $currentLun = "Disk $($matches[2])"
+                        if (-not $lunPathCounts.ContainsKey($currentLun)) { $lunPathCounts[$currentLun] = 0 }
+                    } elseif ($currentLun -and $line -match '(?i)\b(active|optimized|standby)\b' -and $line -notmatch '(?i)policy|state\s*:') {
+                        $lunPathCounts[$currentLun] = [int]$lunPathCounts[$currentLun] + 1
+                    }
+                }
+
+                $mpclaimPreview = (($mpclaimOutput | Where-Object { $_.Trim() } | Select-Object -First 8) -join ' | ')
+                if ($claimedDeviceCount -gt 0) {
+                    Add-Result $cat 'SAN: MPIO claimed devices (mpclaim -s -d)' 'PASS' "$claimedDeviceCount claimed device(s). $mpclaimPreview"
+                } else {
+                    Add-Result $cat 'SAN: MPIO claimed devices (mpclaim -s -d)' 'WARN' "No claimed MPIO devices found. $mpclaimPreview"
+                }
             } else {
-                Add-Result $cat 'SAN: iSCSI sessions' 'WARN' 'No active iSCSI sessions — connect to SAN target before cluster creation'
+                Add-Result $cat 'SAN: MPIO claimed devices (mpclaim -s -d)' 'SKIP' 'mpclaim.exe unavailable'
             }
         } catch {
-            Add-Result $cat 'SAN: iSCSI sessions' 'SKIP' "iSCSI cmdlets unavailable or no iSCSI initiator: $_"
+            Add-Result $cat 'SAN: MPIO claimed devices (mpclaim -s -d)' 'SKIP' "mpclaim failed: $_"
+        }
+
+        if ($lunPathCounts.Count -gt 0) {
+            foreach ($lun in ($lunPathCounts.Keys | Sort-Object)) {
+                $pathCount = [int]$lunPathCounts[$lun]
+                $level = if ($pathCount -ge 2) { 'PASS' } else { 'WARN' }
+                Add-Result $cat "SAN: Active paths for $lun" $level "$pathCount active/available path(s) detected from mpclaim"
+            }
+        } elseif ($claimedDeviceCount -gt 0) {
+            Add-Result $cat 'SAN: Active paths per LUN' 'INFO' 'Claimed devices found, but path counts could not be parsed from mpclaim output'
+        } else {
+            Add-Result $cat 'SAN: Active paths per LUN' 'WARN' 'No claimed MPIO LUN path inventory available'
+        }
+
+        # ALUA/vendor DSM presence. ALUA is not universal, so only fail/warn when
+        # RequireAlua is enabled; otherwise record informational evidence.
+        $dsmEvidence = ($mpclaimOutput -join ' ')
+        $hasAlua = $dsmEvidence -match '(?i)ALUA|Asymmetric|Target Port Group|TPG'
+        $hasVendorDsm = $dsmEvidence -match '(?i)DSM' -and $dsmEvidence -notmatch '(?i)\bMSDSM\b'
+        $aluaLevel = if ($script:RequireAlua -and -not $hasAlua) { 'FAIL' } elseif ($hasAlua -or $hasVendorDsm) { 'PASS' } else { 'INFO' }
+        $aluaDetail = "ALUA evidence: $hasAlua; vendor DSM evidence: $hasVendorDsm"
+        if ($script:RequireAlua -and -not $hasAlua) { $aluaDetail += ' — ALUA required by configuration' }
+        Add-Result $cat 'SAN: ALUA/vendor DSM evidence' $aluaLevel $aluaDetail
+
+        # iSCSI Initiator
+        if ($script:SanTransport -in @('iSCSI', 'Both')) {
+            $iscsiSvc = Get-Service -Name MSiSCSI -ErrorAction SilentlyContinue
+            if ($iscsiSvc) {
+                $level = if ($iscsiSvc.Status -eq 'Running') { 'PASS' } else { 'WARN' }
+                Add-Result $cat 'SAN: iSCSI Initiator service (MSiSCSI)' $level "Status: $($iscsiSvc.Status)"
+            }
+
+            # iSCSI connected sessions
+            try {
+                $sessions = @(Get-IscsiSession -ErrorAction Stop)
+                if ($sessions.Count -gt 0) {
+                    Add-Result $cat 'SAN: iSCSI sessions' 'PASS' "$($sessions.Count) active session(s) — Target(s): $(($sessions.TargetNodeAddress | Select-Object -Unique) -join ', ')"
+                } else {
+                    Add-Result $cat 'SAN: iSCSI sessions' 'WARN' 'No active iSCSI sessions — connect to SAN target before cluster creation'
+                }
+            } catch {
+                Add-Result $cat 'SAN: iSCSI sessions' 'SKIP' "iSCSI cmdlets unavailable or no iSCSI initiator: $_"
+            }
+        } else {
+            Add-Result $cat 'SAN: iSCSI checks' 'SKIP' "SanTransport is '$($script:SanTransport)'"
         }
 
         # FC HBA detection via WMI
-        try {
-            $hbas = @(Get-CimInstance -Namespace root\wmi -ClassName MSFC_FCAdapterHBAAttributes -ErrorAction Stop)
-            if ($hbas.Count -gt 0) {
-                $wwpns = $hbas | ForEach-Object { ($_.NodeWWN | ForEach-Object { '{0:X2}' -f $_ }) -join ':' }
-                Add-Result $cat 'SAN: Fibre Channel HBA(s)' 'PASS' "$($hbas.Count) HBA(s) — WWNs: $($wwpns -join ', ')"
-            } else {
-                Add-Result $cat 'SAN: Fibre Channel HBA(s)' 'INFO' 'No FC HBA detected via WMI (normal if iSCSI-only SAN)'
+        if ($script:SanTransport -in @('FC', 'Both')) {
+            try {
+                $hbas = @(Get-CimInstance -Namespace root\wmi -ClassName MSFC_FCAdapterHBAAttributes -ErrorAction Stop)
+                if ($hbas.Count -gt 0) {
+                    $wwpns = $hbas | ForEach-Object { ($_.NodeWWN | ForEach-Object { '{0:X2}' -f $_ }) -join ':' }
+                    Add-Result $cat 'SAN: Fibre Channel HBA(s)' 'PASS' "$($hbas.Count) HBA(s) — WWNs: $($wwpns -join ', ')"
+                } else {
+                    Add-Result $cat 'SAN: Fibre Channel HBA(s)' 'WARN' 'No FC HBA detected via WMI while FC transport is enabled'
+                }
+            } catch {
+                Add-Result $cat 'SAN: Fibre Channel HBA(s)' 'SKIP' "FC WMI class unavailable: $_"
             }
-        } catch {
-            Add-Result $cat 'SAN: Fibre Channel HBA(s)' 'SKIP' "FC WMI class unavailable: $_"
+        } else {
+            Add-Result $cat 'SAN: Fibre Channel checks' 'SKIP' "SanTransport is '$($script:SanTransport)'"
         }
 
-        # Shared disks visible (at least 1 disk beyond OS drives)
+        # Shared disks visible and Get-Disk SAN readiness flags
         try {
-            $allDisks   = @(Get-Disk -ErrorAction Stop)
-            $sharedDisks= @($allDisks | Where-Object { $_.BusType -in @('iSCSI', 'Fibre Channel', 'SAS', 'Fibrechannel') -or $_.IsSystem -eq $false })
-            if ($sharedDisks.Count -gt 0) {
-                Add-Result $cat 'SAN: Shared disk(s) visible' 'PASS' "$($sharedDisks.Count) non-OS disk(s) visible"
+            $allDisks = @(Get-Disk -ErrorAction Stop)
+            $sharedDisks = @($allDisks | Where-Object { $_.BusType -in $sanBusTypes -or ($_.IsSystem -eq $false -and $_.IsBoot -eq $false -and $_.BusType -notin @('USB', 'SD')) })
+            $transportDisks = @($allDisks | Where-Object { $_.BusType -in $sanBusTypes })
+            $visibleCount = $sharedDisks.Count
+            if ($visibleCount -gt 0) {
+                $level = if ($null -ne $script:ExpectedSanDiskCount -and $visibleCount -ne $script:ExpectedSanDiskCount) { 'WARN' } else { 'PASS' }
+                $detail = "$visibleCount non-OS disk(s) visible"
+                if ($null -ne $script:ExpectedSanDiskCount) { $detail += " — expected $($script:ExpectedSanDiskCount)" }
+                Add-Result $cat 'SAN: Shared disk(s) visible' $level $detail
             } else {
                 Add-Result $cat 'SAN: Shared disk(s) visible' 'WARN' 'No SAN disk(s) detected — connect LUNs and rescan before creating cluster'
             }
+
+            if ($transportDisks.Count -gt 0) {
+                Add-Result $cat 'SAN: Disk transport inventory' 'PASS' "$($transportDisks.Count) disk(s) match SanTransport '$($script:SanTransport)'"
+            } elseif ($script:SanTransport -ne 'Both') {
+                Add-Result $cat 'SAN: Disk transport inventory' 'WARN' "No disk BusType matches SanTransport '$($script:SanTransport)'"
+            }
+
+            foreach ($disk in $sharedDisks) {
+                $diskName = "Disk $($disk.Number) ($($disk.FriendlyName))"
+                $stateProblems = @()
+                if ($disk.IsOffline) { $stateProblems += 'offline' }
+                if ($disk.IsReadOnly) { $stateProblems += 'read-only' }
+                if ($disk.PartitionStyle -eq 'RAW') { $stateProblems += 'RAW partition style' }
+                if ($disk.BusType -notin $sanBusTypes) { $stateProblems += "unexpected BusType=$($disk.BusType) for SanTransport=$($script:SanTransport)" }
+                $level = if ($stateProblems.Count -gt 0) { 'WARN' } else { 'PASS' }
+                Add-Result $cat "SAN: Get-Disk state $diskName" $level "IsOffline=$($disk.IsOffline); IsReadOnly=$($disk.IsReadOnly); PartitionStyle=$($disk.PartitionStyle); BusType=$($disk.BusType)$(if ($stateProblems.Count -gt 0) { '; Issues=' + ($stateProblems -join ', ') })"
+            }
+
+            # Compare LUN visibility across all cluster nodes. The local node is
+            # included so Invoke-Command results can be compared as one dataset.
+            $compareNodes = @(@($env:COMPUTERNAME) + @($script:ClusterNodes) | Where-Object { $_ } | Select-Object -Unique)
+            if ($compareNodes.Count -gt 1) {
+                $lunScript = {
+                    Get-Disk | Where-Object { -not $_.IsSystem -and -not $_.IsBoot } | ForEach-Object {
+                        [pscustomobject]@{
+                            Number = $_.Number
+                            FriendlyName = $_.FriendlyName
+                            UniqueId = $_.UniqueId
+                            SerialNumber = $_.SerialNumber
+                            Size = $_.Size
+                            BusType = $_.BusType
+                            PartitionStyle = $_.PartitionStyle
+                            IsOffline = $_.IsOffline
+                            IsReadOnly = $_.IsReadOnly
+                        }
+                    }
+                }
+                $nodeLuns = @()
+                foreach ($node in $compareNodes) {
+                    try {
+                        $nodeResult = if ($node -ieq $env:COMPUTERNAME -or $node -ieq 'localhost') {
+                            & $lunScript
+                        } else {
+                            Invoke-Command -ComputerName $node -ScriptBlock $lunScript -ErrorAction Stop
+                        }
+                        foreach ($lun in @($nodeResult)) {
+                            $id = if ($lun.UniqueId) { $lun.UniqueId } elseif ($lun.SerialNumber) { $lun.SerialNumber } else { "$($lun.FriendlyName)|$($lun.Size)|$($lun.BusType)" }
+                            $nodeLuns += [pscustomobject]@{ Node = $node; LunId = [string]$id; Disk = $lun }
+                        }
+                    } catch {
+                        Add-Result $cat "SAN: LUN visibility query $node" 'WARN' "Invoke-Command/Get-Disk failed: $_"
+                    }
+                }
+
+                $allLunIds = @($nodeLuns.LunId | Sort-Object -Unique)
+                foreach ($node in $compareNodes) {
+                    $nodeIds = @($nodeLuns | Where-Object { $_.Node -eq $node } | Select-Object -ExpandProperty LunId)
+                    $missing = @($allLunIds | Where-Object { $_ -notin $nodeIds })
+                    $extraCount = @($nodeIds | Where-Object { $_ -notin $allLunIds }).Count
+                    $level = if ($missing.Count -eq 0 -and $extraCount -eq 0) { 'PASS' } else { 'FAIL' }
+                    Add-Result $cat "SAN: LUN visibility match $node" $level "$($nodeIds.Count)/$($allLunIds.Count) shared LUN signature(s) visible$(if ($missing.Count -gt 0) { '; Missing=' + (($missing | Select-Object -First 5) -join ', ') })"
+                }
+            } else {
+                Add-Result $cat 'SAN: Cross-node LUN visibility comparison' 'SKIP' 'ClusterNodes is empty; no remote nodes to compare'
+            }
         } catch {
-            Add-Result $cat 'SAN: Disk visibility' 'SKIP' "Get-Disk failed: $_"
+            Add-Result $cat 'SAN: Disk visibility/state' 'SKIP' "Get-Disk failed: $_"
         }
 
     } else {
