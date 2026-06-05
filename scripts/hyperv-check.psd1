@@ -18,6 +18,11 @@
     # S2D — Storage Spaces Direct, internal disks, Datacenter edition required
     StorageType = 'SAN'
 
+    # Live Migration authentication target.
+    # Kerberos — validate SPNs and constrained delegation between nodes (recommended).
+    # CredSSP  — do not require Kerberos constrained delegation; warn if CredSSP is not enabled.
+    LiveMigrationAuth = 'Kerberos'
+
     # ── Cluster nodes ─────────────────────────────────────────────────────────
     # FQDNs or IPs of the OTHER nodes (this local node is always included).
     # Leave empty for single-node / PreNode validation.
