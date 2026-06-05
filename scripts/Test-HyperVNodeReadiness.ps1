@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Validate OS readiness for a future Hyper-V node (WS2022/2025) and/or failover cluster.
@@ -6,27 +6,29 @@
 .DESCRIPTION
     Runs a comprehensive set of checks derived from Microsoft documentation:
       A. OS edition (Datacenter/Standard) and build — targets WS2022 and WS2025 only
-      B. Hardware: CPU virtualization, SLAT, DEP, RAM, Hyper-V/Failover-Clustering features
-      C. Network: NIC count, static IPs, RDMA (S2D), DNS, WinRM
-      D. Active Directory: domain membership, DC reachability, computer account, SPN, Live Migration Kerberos delegation, CredSSP
-      E. DNS: forward/reverse resolution, AD SRV records, dynamic update
-      F. Time synchronization (W32TM, Kerberos < 5 minutes)
-      G. Firewall: cluster/SMB/Live-Migration rules and critical TCP ports
-      H. Storage — mode-specific:
+      B. Platform security: Secure Boot, TPM, BitLocker, VBS/Credential Guard, HVCI
+      C. Hardware: CPU virtualization, SLAT, DEP, RAM, Hyper-V/Failover-Clustering features
+      D. Network: NIC count, static IPs, RDMA (S2D), DNS, WinRM
+      E. Active Directory: domain membership, DC reachability, computer account, SPN, Live Migration Kerberos delegation, CredSSP
+      F. DNS: forward/reverse resolution, AD SRV records, dynamic update
+      G. Time synchronization (W32TM, Kerberos < 5 minutes)
+      H. Firewall: cluster/SMB/Live-Migration rules and critical TCP ports
+      I. Storage — mode-specific:
             SAN : MPIO feature/global settings, claimed devices/path count, ALUA/vendor DSM,
                   iSCSI/FC initiator, disk state, disk visibility across nodes
             S2D : Datacenter edition, physical disks eligible, bus type, no shared SAS,
                   RDMA NICs, SMB Direct, drive tier inventory
-      I. Failover Cluster: quorum recommendation, cross-node OS/domain/hotfix consistency,
+      J. Failover Cluster: quorum recommendation, cross-node OS/domain/hotfix consistency,
          Test-Cluster validation, network segregation
-      J. Service account & OU AD permissions:
+      K. Service account & OU AD permissions:
             account exists and is enabled, local admin on this node,
             CreateChild (computer) on target OU, Write All Properties on computer objects,
             OU accidental-deletion protection warning, CreateChild (dnsNode) on DNS zone,
             DNS scavenging state, prestaged CNO/VCO check
-      K. Event Log Health (last 24h): System/Application critical errors, disk/storage
+      L. Event Log Health (last 24h): System/Application critical errors, disk/storage
             driver errors (disk, storahci, stornvme), network driver errors,
             Hyper-V VMMS and Failover Clustering operational errors
+      M. Network port connectivity: DC/cluster/witness/iSCSI/SCVMM TCP & UDP reachability
 
     Network section also covers:
       - IPv6 consistency (uniform enable/disable across nodes)
@@ -86,6 +88,16 @@ $ErrorActionPreference = 'Stop'
 
 $script:Results = [System.Collections.Generic.List[pscustomobject]]::new()
 
+# Cache for read-only local CIM instances that several sections query repeatedly.
+$script:CimCache = @{}
+function Get-CachedCimInstance {
+    param([string]$ClassName)
+    if (-not $script:CimCache.ContainsKey($ClassName)) {
+        $script:CimCache[$ClassName] = Get-CimInstance -ClassName $ClassName -ErrorAction Stop
+    }
+    return $script:CimCache[$ClassName]
+}
+
 function Write-Log {
     param(
         [string]$Message,
@@ -101,7 +113,7 @@ function Write-Log {
         default   { '[ INFO ]' }
     }
     $line = "$ts $prefix $Message"
-    Add-Content -Path $LogFile -Value $line -Encoding UTF8
+    Add-Content -Path $script:LogFile -Value $line -Encoding UTF8
     $color = switch ($Level) {
         'OK'      { 'Green' }
         'WARN'    { 'Yellow' }
@@ -154,10 +166,10 @@ function Read-CfgValue {
     $val = $Cfg[$Key]
     if ($null -eq $val -or ($val -is [string] -and $val -eq '')) {
         $hint  = if ($Default -ne '') { " [$Default]" } else { '' }
-        $input = Read-Host "$Prompt$hint"
-        if ($input -eq '' -and $Default -ne '') { $input = $Default }
-        if ($input -eq '' -and $Required) { throw "Required value '$Key' was not provided." }
-        $val = $input
+        $answer = Read-Host "$Prompt$hint"
+        if ($answer -eq '' -and $Default -ne '') { $answer = $Default }
+        if ($answer -eq '' -and $Required) { throw "Required value '$Key' was not provided." }
+        $val = $answer
     }
     if ($IsArray) {
         if ($val -is [array]) { return @($val | Where-Object { $_ -ne '' }) }
@@ -293,7 +305,7 @@ function Test-OSCompatibility {
     Section 'A. OS Compatibility'
     $cat = 'OS'
 
-    $os      = Get-CimInstance -ClassName Win32_OperatingSystem
+    $os      = Get-CachedCimInstance 'Win32_OperatingSystem'
     $caption = $os.Caption
     $build   = [int]$os.BuildNumber
     $arch    = $os.OSArchitecture
@@ -426,7 +438,7 @@ function Test-PlatformSecurity {
             elseif ($bcdFirmware -match 'winload\.exe') { $firmwareType = 'BIOS/Legacy' }
         } catch { }
     }
-    $firmwareStatus = if ($firmwareType -eq 'BIOS/Legacy' -and $script:RequireSecureBoot) { 'FAIL' } elseif ($firmwareType -eq 'Unknown') { 'INFO' } else { 'INFO' }
+    $firmwareStatus = if ($firmwareType -eq 'BIOS/Legacy' -and $script:RequireSecureBoot) { 'FAIL' } else { 'INFO' }
     Add-Result $cat 'Firmware boot mode' $firmwareStatus $firmwareType
 
     # Secure Boot. Confirm-SecureBootUEFI returns $true/$false on UEFI systems
@@ -559,10 +571,10 @@ function Test-PlatformSecurity {
 #region ── C. Hardware & Virtualization Support ───────────────────────────────
 
 function Test-HardwareRequirements {
-    Section 'B. Hardware & Virtualization Support'
+    Section 'C. Hardware & Virtualization Support'
     $cat = 'Hardware'
 
-    $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+    $cs = Get-CachedCimInstance 'Win32_ComputerSystem'
     Add-Result $cat 'Server model' 'INFO' "Manufacturer: $($cs.Manufacturer), Model: $($cs.Model)"
 
     # RAM — 4 GB minimum, 32 GB+ for production Hyper-V, 64 GB+ recommended for S2D
@@ -630,9 +642,9 @@ function Test-HardwareRequirements {
 
 #endregion
 
-#region ── C. Network Configuration ──────────────────────────────────────────
+#region ── D. Network Configuration ──────────────────────────────────────────
 
-function Normalize-NetworkAdapterRole {
+function ConvertTo-NetworkAdapterRole {
     param([string]$Role)
 
     if ([string]::IsNullOrWhiteSpace($Role)) { return $null }
@@ -660,7 +672,7 @@ function ConvertTo-NetworkRoleMap {
             $looksLikeMap = $keys.Count -gt 0 -and -not ($mapping.ContainsKey('Name') -or $mapping.ContainsKey('InterfaceAlias') -or $mapping.ContainsKey('InterfaceDescription') -or $mapping.ContainsKey('Role'))
             if ($looksLikeMap) {
                 foreach ($key in $keys) {
-                    $role = Normalize-NetworkAdapterRole -Role ([string]$mapping[$key])
+                    $role = ConvertTo-NetworkAdapterRole -Role ([string]$mapping[$key])
                     if ($role) { $roleMap[[string]$key] = $role }
                 }
                 continue
@@ -678,7 +690,7 @@ function ConvertTo-NetworkRoleMap {
         }
         $roleProperty = $mapping.PSObject.Properties['Role']
         if ($roleProperty) {
-            $role = Normalize-NetworkAdapterRole -Role ([string]$roleProperty.Value)
+            $role = ConvertTo-NetworkAdapterRole -Role ([string]$roleProperty.Value)
         }
         if ($name -and $role) { $roleMap[$name] = $role }
     }
@@ -710,7 +722,7 @@ function Get-NetworkAdapterRole {
 }
 
 function Test-NetworkConfiguration {
-    Section 'C. Network Configuration'
+    Section 'D. Network Configuration'
     $cat = 'Network'
 
     $adapters     = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })
@@ -888,7 +900,7 @@ function Test-NetworkConfiguration {
 
     # DNS suffix
     $dnsSuffix    = (Get-DnsClientGlobalSetting).SuffixSearchList
-    $domainSuffix = (Get-CimInstance Win32_ComputerSystem).Domain
+    $domainSuffix = (Get-CachedCimInstance 'Win32_ComputerSystem').Domain
     $allSuffixes  = (@($dnsSuffix) + @($domainSuffix) | Select-Object -Unique | Where-Object { $_ }) -join ', '
     if ($allSuffixes) {
         Add-Result $cat 'DNS suffix search list' 'PASS' $allSuffixes
@@ -902,12 +914,10 @@ function Test-NetworkConfiguration {
     Add-Result $cat 'WinRM service' $level $(if ($winrm) { $winrm.Status } else { 'Not found' })
 
     # IPv6 — must be uniformly enabled or disabled across all cluster nodes
-    $ipv6Disabled = $false
     try {
         $ipv6Reg = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' `
             -Name 'DisabledComponents' -ErrorAction SilentlyContinue
         if ($ipv6Reg -and ($ipv6Reg.DisabledComponents -band 0xFF) -eq 0xFF) {
-            $ipv6Disabled = $true
             Add-Result $cat 'IPv6 state' 'WARN' "IPv6 fully disabled via registry (DisabledComponents=0xFF) — must be identical on ALL cluster nodes; inconsistency causes heartbeat issues"
         } else {
             Add-Result $cat 'IPv6 state' 'INFO' "IPv6 enabled — ensure consistent across all nodes"
@@ -1039,7 +1049,7 @@ function Test-NetworkConfiguration {
 
 #endregion
 
-#region ── D. Active Directory ───────────────────────────────────────────────
+#region ── E. Active Directory ───────────────────────────────────────────────
 
 function ConvertTo-LdapEscapedFilterValue {
     param([string]$Value)
@@ -1251,10 +1261,10 @@ function Test-CredSSPForLiveMigration {
 }
 
 function Test-ActiveDirectory {
-    Section 'D. Active Directory'
+    Section 'E. Active Directory'
     $cat = 'ActiveDirectory'
 
-    $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+    $cs = Get-CachedCimInstance 'Win32_ComputerSystem'
 
     if (-not $cs.PartOfDomain) {
         Add-Result $cat 'Domain membership' 'FAIL' "Not domain-joined — all cluster nodes must be in the same AD domain"
@@ -1318,10 +1328,10 @@ function Test-ActiveDirectory {
 }
 #endregion
 
-#region ── E. DNS Resolution ──────────────────────────────────────────────────
+#region ── F. DNS Resolution ──────────────────────────────────────────────────
 
 function Test-DNSResolution {
-    Section 'E. DNS Resolution'
+    Section 'F. DNS Resolution'
     $cat = 'DNS'
 
     $fqdn = [System.Net.Dns]::GetHostEntry('').HostName
@@ -1348,7 +1358,7 @@ function Test-DNSResolution {
     }
 
     # AD DNS SRV records
-    $domainName = (Get-CimInstance Win32_ComputerSystem).Domain
+    $domainName = (Get-CachedCimInstance 'Win32_ComputerSystem').Domain
     if ($domainName -and $domainName -ne 'WORKGROUP') {
         foreach ($srv in @("_ldap._tcp.$domainName", "_kerberos._tcp.$domainName", "_ldap._tcp.dc._msdcs.$domainName")) {
             try {
@@ -1392,10 +1402,10 @@ function Test-DNSResolution {
 
 #endregion
 
-#region ── F. Time Synchronization ───────────────────────────────────────────
+#region ── G. Time Synchronization ───────────────────────────────────────────
 
 function Test-TimeSync {
-    Section 'F. Time Synchronization'
+    Section 'G. Time Synchronization'
     $cat = 'TimeSync'
 
     $w32tm = Get-Service -Name W32Time -ErrorAction SilentlyContinue
@@ -1436,10 +1446,10 @@ function Test-TimeSync {
 
 #endregion
 
-#region ── G. Firewall ────────────────────────────────────────────────────────
+#region ── H. Firewall ────────────────────────────────────────────────────────
 
 function Test-FirewallRules {
-    Section 'G. Firewall & Required Ports'
+    Section 'H. Firewall & Required Ports'
     $cat = 'Firewall'
 
     try {
@@ -1451,6 +1461,16 @@ function Test-FirewallRules {
         Add-Result $cat 'Firewall profiles' 'SKIP' "NetFirewallProfile unavailable: $_"
     }
 
+    # Enumerate all firewall rules once — Get-NetFirewallRule without a filter is
+    # expensive (hundreds of rules), so cache the result and filter in memory
+    # rather than calling the cmdlet three separate times.
+    $allFwRules = $null
+    try {
+        $allFwRules = @(Get-NetFirewallRule -ErrorAction Stop)
+    } catch {
+        Add-Result $cat 'Firewall rules enumeration' 'SKIP' "Get-NetFirewallRule unavailable: $_"
+    }
+
     # Key built-in rules required for cluster
     $requiredRules = @(
         'Failover Clusters (RPC)',
@@ -1459,32 +1479,32 @@ function Test-FirewallRules {
         'File and Printer Sharing (SMB-In)',
         'Remote Event Log Management (RPC)'
     )
-    foreach ($name in $requiredRules) {
-        $rule = Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $rule) {
-            Add-Result $cat "FW rule: $name" 'WARN' 'Not found — may be covered by GPO or named differently'
-        } elseif ($rule.Enabled -eq 'True') {
-            Add-Result $cat "FW rule: $name" 'PASS' 'Enabled'
+    if ($null -ne $allFwRules) {
+        foreach ($name in $requiredRules) {
+            $rule = $allFwRules | Where-Object { $_.DisplayName -eq $name } | Select-Object -First 1
+            if (-not $rule) {
+                Add-Result $cat "FW rule: $name" 'WARN' 'Not found — may be covered by GPO or named differently'
+            } elseif ($rule.Enabled -eq 'True') {
+                Add-Result $cat "FW rule: $name" 'PASS' 'Enabled'
+            } else {
+                Add-Result $cat "FW rule: $name" 'FAIL' 'Rule exists but is DISABLED'
+            }
+        }
+
+        # Hyper-V Live Migration rule group
+        $hvRules = @($allFwRules | Where-Object { $_.DisplayGroup -match 'Hyper-V' -and $_.Direction -eq 'Inbound' })
+        if ($hvRules.Count -gt 0) {
+            $enabled = ($hvRules | Where-Object { $_.Enabled -eq 'True' }).Count
+            $level   = if ($enabled -eq $hvRules.Count) { 'PASS' } else { 'WARN' }
+            Add-Result $cat 'Hyper-V Live Migration rules' $level "$enabled / $($hvRules.Count) inbound rules enabled"
         } else {
-            Add-Result $cat "FW rule: $name" 'FAIL' 'Rule exists but is DISABLED'
+            Add-Result $cat 'Hyper-V Live Migration rules' 'SKIP' 'Rules not found — Hyper-V role may not be installed yet'
         }
     }
 
-    # Hyper-V Live Migration rule group
-    $hvRules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayGroup -match 'Hyper-V' -and $_.Direction -eq 'Inbound' })
-    if ($hvRules.Count -gt 0) {
-        $enabled = ($hvRules | Where-Object { $_.Enabled -eq 'True' }).Count
-        $level   = if ($enabled -eq $hvRules.Count) { 'PASS' } else { 'WARN' }
-        Add-Result $cat 'Hyper-V Live Migration rules' $level "$enabled / $($hvRules.Count) inbound rules enabled"
-    } else {
-        Add-Result $cat 'Hyper-V Live Migration rules' 'SKIP' 'Rules not found — Hyper-V role may not be installed yet'
-    }
-
     # S2D-specific: SMB storage traffic ports
-    if ($StorageType -eq 'S2D') {
-        $smbRules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayGroup -match 'File and Printer Sharing' -and $_.Direction -eq 'Inbound' })
+    if ($StorageType -eq 'S2D' -and $null -ne $allFwRules) {
+        $smbRules = @($allFwRules | Where-Object { $_.DisplayGroup -match 'File and Printer Sharing' -and $_.Direction -eq 'Inbound' })
         if ($smbRules.Count -gt 0) {
             $enabled = ($smbRules | Where-Object { $_.Enabled -eq 'True' }).Count
             Add-Result $cat 'S2D SMB storage rules (File and Printer Sharing)' $(if ($enabled -ge 1) { 'PASS' } else { 'FAIL' }) "$enabled / $($smbRules.Count) inbound rules enabled"
@@ -1514,10 +1534,10 @@ function Test-FirewallRules {
 
 #endregion
 
-#region ── H. Storage ────────────────────────────────────────────────────────
+#region ── I. Storage ────────────────────────────────────────────────────────
 
 function Test-Storage {
-    Section "H. Storage ($StorageType)"
+    Section "I. Storage ($StorageType)"
     $cat = 'Storage'
 
     # System drive — applies to both SAN and S2D
@@ -1787,7 +1807,7 @@ function Test-Storage {
         # ── S2D ────────────────────────────────────────────────────────────────
 
         # Datacenter edition is REQUIRED for S2D — already checked in section A but enforce here
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem
+        $os = Get-CachedCimInstance 'Win32_OperatingSystem'
         if ($os.Caption -notmatch 'Datacenter') {
             Add-Result $cat 'S2D: Datacenter edition required' 'FAIL' "$($os.Caption) — S2D is not supported on Standard edition"
         } else {
@@ -1798,7 +1818,6 @@ function Test-Storage {
         try {
             $allDisks     = @(Get-PhysicalDisk -ErrorAction Stop)
             $poolableDisks= @($allDisks | Where-Object { $_.CanPool })
-            $systemDisks  = @($allDisks | Where-Object { $_.Usage -eq 'Journal' -or $_.BusType -eq 'USB' })
 
             Add-Result $cat 'S2D: Total physical disks' 'INFO' "$($allDisks.Count) total, $($poolableDisks.Count) poolable (S2D-eligible)"
 
@@ -1869,19 +1888,19 @@ function Test-Storage {
 
 #endregion
 
-#region ── I. Cluster Pre-validation ─────────────────────────────────────────
+#region ── J. Cluster Pre-validation ─────────────────────────────────────────
 
 function Test-ClusterReadiness {
     param([string[]]$Nodes)
 
-    Section 'I. Failover Cluster Pre-validation'
+    Section 'J. Failover Cluster Pre-validation'
     $cat = 'Cluster'
 
     $localNode = $env:COMPUTERNAME
-    $allNodes  = @($localNode) + $Nodes | Select-Object -Unique
-    $nodeCount = $allNodes.Count
+    $clusterNodeSet = @(@($localNode) + @($Nodes) | Select-Object -Unique)
+    $nodeCount = $clusterNodeSet.Count
 
-    Add-Result $cat 'Cluster node count' 'INFO' "$nodeCount node(s): $($allNodes -join ', ')"
+    Add-Result $cat 'Cluster node count' 'INFO' "$nodeCount node(s): $($clusterNodeSet -join ', ')"
 
     # S2D minimum 2 nodes
     if ($StorageType -eq 'S2D' -and $nodeCount -lt 2) {
@@ -1909,33 +1928,37 @@ function Test-ClusterReadiness {
     }
 
     # Cross-node: reachability, OS version, domain
-    $nodeOsVersions = @{ $localNode = [System.Environment]::OSVersion.Version.ToString() }
+    # Use Win32_OperatingSystem.Version for the local node too, so its format
+    # ("10.0.20348") matches the remote nodes and does not produce a spurious
+    # version mismatch (Environment.OSVersion would add a 4th ".0" segment).
+    $localOsVersion = try { (Get-CachedCimInstance 'Win32_OperatingSystem').Version } catch { [System.Environment]::OSVersion.Version.ToString() }
+    $nodeOsVersions = @{ $localNode = $localOsVersion }
+    $localDomain    = (Get-CachedCimInstance 'Win32_ComputerSystem').Domain
     foreach ($node in $Nodes) {
         if (-not (Test-Connection -ComputerName $node -Count 2 -Quiet -ErrorAction SilentlyContinue)) {
-            Add-Result $cat "Node $node: reachable" 'FAIL' "Ping failed — node must be reachable before joining cluster"
+            Add-Result $cat "Node ${node}: reachable" 'FAIL' "Ping failed — node must be reachable before joining cluster"
             continue
         }
-        Add-Result $cat "Node $node: reachable" 'PASS' 'Ping OK'
+        Add-Result $cat "Node ${node}: reachable" 'PASS' 'Ping OK'
 
         try {
             $rOS = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $node -ErrorAction Stop
             $rCS = Get-CimInstance -ClassName Win32_ComputerSystem  -ComputerName $node -ErrorAction Stop
             $nodeOsVersions[$node] = $rOS.Version
 
-            Add-Result $cat "Node $node: OS" 'INFO' "$($rOS.Caption) build $($rOS.BuildNumber)"
+            Add-Result $cat "Node ${node}: OS" 'INFO' "$($rOS.Caption) build $($rOS.BuildNumber)"
 
-            $localDomain = (Get-CimInstance Win32_ComputerSystem).Domain
             if ($rCS.Domain -eq $localDomain) {
-                Add-Result $cat "Node $node: domain" 'PASS' $rCS.Domain
+                Add-Result $cat "Node ${node}: domain" 'PASS' $rCS.Domain
             } else {
-                Add-Result $cat "Node $node: domain" 'FAIL' "Domain mismatch: $($rCS.Domain) vs $localDomain"
+                Add-Result $cat "Node ${node}: domain" 'FAIL' "Domain mismatch: $($rCS.Domain) vs $localDomain"
             }
         } catch {
-            Add-Result $cat "Node $node: WMI/CIM" 'WARN' "Remote CIM unavailable: $_ — ensure WinRM is running"
+            Add-Result $cat "Node ${node}: WMI/CIM" 'WARN' "Remote CIM unavailable: $_ — ensure WinRM is running"
         }
     }
 
-    $distinctVersions = $nodeOsVersions.Values | Select-Object -Unique
+    $distinctVersions = @($nodeOsVersions.Values | Select-Object -Unique)
     if ($distinctVersions.Count -eq 1) {
         Add-Result $cat 'OS version consistency (all nodes)' 'PASS' "All nodes: $($distinctVersions[0])"
     } elseif ($distinctVersions.Count -gt 1) {
@@ -1952,10 +1975,10 @@ function Test-ClusterReadiness {
             } -ErrorAction Stop
             $nodeHotfixCounts[$node] = $remoteHfCount
         } catch {
-            Add-Result $cat "Node $node: hotfix count" 'SKIP' "Remote query failed: $_"
+            Add-Result $cat "Node ${node}: hotfix count" 'SKIP' "Remote query failed: $_"
         }
     }
-    $distinctHfCounts = $nodeHotfixCounts.Values | Select-Object -Unique
+    $distinctHfCounts = @($nodeHotfixCounts.Values | Select-Object -Unique)
     if ($distinctHfCounts.Count -le 1) {
         Add-Result $cat 'Hotfix/patch level consistency' 'PASS' "All nodes report ~$($distinctHfCounts[0]) KBs installed"
     } else {
@@ -1970,9 +1993,9 @@ function Test-ClusterReadiness {
                 Import-Module ServerManager; (Get-WindowsFeature 'Failover-Clustering').InstallState
             } -ErrorAction Stop
             $level = if ($state -eq 'Installed') { 'PASS' } else { 'WARN' }
-            Add-Result $cat "Node $node: Failover-Clustering feature" $level "State: $state"
+            Add-Result $cat "Node ${node}: Failover-Clustering feature" $level "State: $state"
         } catch {
-            Add-Result $cat "Node $node: Failover-Clustering feature" 'SKIP' "Remote query failed: $_"
+            Add-Result $cat "Node ${node}: Failover-Clustering feature" 'SKIP' "Remote query failed: $_"
         }
     }
 
@@ -1992,9 +2015,9 @@ function Test-ClusterReadiness {
         if (Get-Module -Name FailoverClusters -ListAvailable -ErrorAction SilentlyContinue) {
             Import-Module FailoverClusters -ErrorAction SilentlyContinue
             try {
-                Write-Log "Running Test-Cluster on: $($allNodes -join ', ') (may take several minutes)..." -Level INFO
+                Write-Log "Running Test-Cluster on: $($clusterNodeSet -join ', ') (may take several minutes)..." -Level INFO
                 $rpt        = Join-Path $env:TEMP "ClusterValidation-$(Get-Date -Format 'yyyyMMdd-HHmmss').htm"
-                $validation = Test-Cluster -Node $allNodes -ReportName $rpt -ErrorAction Stop
+                $validation = Test-Cluster -Node $clusterNodeSet -ReportName $rpt -ErrorAction Stop
                 $failed  = ($validation | Where-Object { $_.Status -eq 'Failed'  }).Count
                 $warned  = ($validation | Where-Object { $_.Status -eq 'Warning' }).Count
                 $passed  = ($validation | Where-Object { $_.Status -eq 'Successful' }).Count
@@ -2013,14 +2036,14 @@ function Test-ClusterReadiness {
 
 #endregion
 
-#region ── J. Service Account & OU AD Permissions ────────────────────────────
+#region ── K. Service Account & OU AD Permissions ────────────────────────────
 
 function Test-ServiceAccountPermissions {
-    Section 'J. Service Account & OU Permissions'
+    Section 'K. Service Account & OU Permissions'
     $cat = 'ServiceAccount'
 
     if ($ServiceAccount -eq '') {
-        Add-Result $cat 'Service account check' 'SKIP' 'No -ServiceAccount specified — skipping section J'
+        Add-Result $cat 'Service account check' 'SKIP' 'No -ServiceAccount specified — skipping section K'
         return
     }
 
@@ -2028,7 +2051,7 @@ function Test-ServiceAccountPermissions {
     $samName = $ServiceAccount -replace '^.*\\', ''
     Add-Result $cat 'Service account' 'INFO' "Checking: $ServiceAccount (samAccountName: $samName)"
 
-    # ── J.1 Account exists and is enabled ────────────────────────────────────
+    # ── K.1 Account exists and is enabled ────────────────────────────────────
     $acctEntry = $null
     try {
         $searcher = [adsisearcher]"(&(objectCategory=person)(objectClass=user)(samAccountName=$samName))"
@@ -2087,7 +2110,7 @@ function Test-ServiceAccountPermissions {
         Add-Result $cat 'Account group membership (tokenGroups)' 'WARN' "tokenGroups refresh failed: $_ — ACL checks may be incomplete"
     }
 
-    # ── J.2 Local administrator on this node ─────────────────────────────────
+    # ── K.2 Local administrator on this node ─────────────────────────────────
     try {
         $localAdmins = @(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop)
         $isLocalAdmin = $localAdmins | Where-Object {
@@ -2103,7 +2126,7 @@ function Test-ServiceAccountPermissions {
         Add-Result $cat "Local admin on $($env:COMPUTERNAME)" 'WARN' "Get-LocalGroupMember failed: $_ — verify manually"
     }
 
-    # ── J.3 OU permissions ────────────────────────────────────────────────────
+    # ── K.3 OU permissions ────────────────────────────────────────────────────
     if ($ClusterOU -eq '') {
         Add-Result $cat 'OU permission check' 'SKIP' 'No -ClusterOU specified — specify the OU DN where CNO/VCOs will be created'
     } else {
@@ -2119,23 +2142,26 @@ function Test-ServiceAccountPermissions {
             return
         }
 
-        # OU accidental deletion protection — if enabled, cluster cannot delete VCOs
+        # OU accidental deletion protection — if enabled, cluster cannot delete VCOs.
+        # The 'Protect object from accidental deletion' checkbox adds an explicit
+        # Deny ACE for Delete/DeleteTree to Everyone (S-1-1-0) on the OU itself.
         try {
-            $ouDE = [System.DirectoryServices.DirectoryEntry]"LDAP://$ClusterOU"
+            $ouDE  = [System.DirectoryServices.DirectoryEntry]"LDAP://$ClusterOU"
             $ouACL = $ouDE.psbase.ObjectSecurity
-            $denyDeleteAll = $ouACL.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) |
+            $denyDeleteAll = @($ouACL.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) |
                 Where-Object {
                     $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny -and
-                    ($_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::Delete) -and
+                    (($_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::Delete) -or
+                     ($_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::DeleteTree)) -and
                     $_.IdentityReference.Value -eq 'S-1-1-0'  # Everyone
-                }
-            # Simpler heuristic: check nTSecurityDescriptor for "Deny Delete All" on Everyone = accidental deletion protection
-            # In practice, check the adminCount or use a flag — easiest is to try deleting a test object... too invasive.
-            # Instead, query the OU itself for the 'Protect from accidental deletion' checkbox effect (Deny Delete on Everyone)
-            $ouEntry.psbase.RefreshCache([string[]]@('nTSecurityDescriptor'))
-            Add-Result $cat 'OU accidental deletion protection' 'INFO' "Cannot reliably detect via ADSI — verify manually in ADUC > OU Properties > Object tab that 'Protect object from accidental deletion' is UNCHECKED (otherwise VCO cleanup will fail)"
+                })
+            if ($denyDeleteAll.Count -gt 0) {
+                Add-Result $cat 'OU accidental deletion protection' 'WARN' "'Protect object from accidental deletion' appears ENABLED (Deny Delete/DeleteTree for Everyone on $ClusterOU) — cluster VCO cleanup will fail; uncheck it in ADUC > OU Properties > Object tab if VCO lifecycle management is required"
+            } else {
+                Add-Result $cat 'OU accidental deletion protection' 'PASS' 'No Deny Delete ACE for Everyone detected on the OU — VCO cleanup is not blocked by accidental-deletion protection'
+            }
         } catch {
-            Add-Result $cat 'OU accidental deletion protection' 'SKIP' "ACL inspection failed: $_"
+            Add-Result $cat 'OU accidental deletion protection' 'SKIP' "ACL inspection failed: $_ — verify manually in ADUC that 'Protect object from accidental deletion' is unchecked"
         }
 
         # Read DACL on the OU
@@ -2225,8 +2251,8 @@ function Test-ServiceAccountPermissions {
             Add-Result $cat 'OU DACL read' 'WARN' "ACL read failed: $_ — verify you have rights to read the OU DACL"
         }
 
-        # ── J.4 DNS zone permissions (to register CNO A record) ───────────────
-        $domainName = (Get-CimInstance Win32_ComputerSystem).Domain
+        # ── K.4 DNS zone permissions (to register CNO A record) ───────────────
+        $domainName = (Get-CachedCimInstance 'Win32_ComputerSystem').Domain
         if ($domainName -and $domainName -ne 'WORKGROUP') {
             # DNS zones in AD are under DomainDnsZones or System partition
             $dnsZoneDN = "CN=$domainName,CN=MicrosoftDNS,DC=DomainDnsZones,DC=$($domainName.Replace('.', ',DC='))"
@@ -2264,7 +2290,7 @@ function Test-ServiceAccountPermissions {
         }
     }
 
-    # ── J.5 Prestaged CNO check ───────────────────────────────────────────────
+    # ── K.5 Prestaged CNO check ───────────────────────────────────────────────
     if ($ClusterName -ne '') {
         try {
             $cnoSearcher = [adsisearcher]"(&(objectCategory=computer)(name=$ClusterName))"
@@ -2304,10 +2330,10 @@ function Test-ServiceAccountPermissions {
 
 #endregion
 
-#region ── K. Event Log Health ───────────────────────────────────────────────
+#region ── L. Event Log Health ───────────────────────────────────────────────
 
 function Test-EventLogHealth {
-    Section 'K. Event Log Health (last 24 hours)'
+    Section 'L. Event Log Health (last 24 hours)'
     $cat  = 'EventLog'
     $since = (Get-Date).AddHours(-24)
 
@@ -2330,7 +2356,9 @@ function Test-EventLogHealth {
             $limit  = if ($chk.ContainsKey('Limit')) { $chk.Limit } else { 1 }
             if ($count -ge $limit) {
                 $top = ($events | Select-Object -First 3 | ForEach-Object {
-                    "$($_.TimeCreated.ToString('HH:mm')) [$($_.Id)] $($_.ProviderName): $($_.Message.Split("`n")[0].Substring(0, [Math]::Min(80, $_.Message.Split("`n")[0].Length)))"
+                    $firstLine = ([string]$_.Message).Split("`n")[0]
+                    $snippet   = $firstLine.Substring(0, [Math]::Min(80, $firstLine.Length))
+                    "$($_.TimeCreated.ToString('HH:mm')) [$($_.Id)] $($_.ProviderName): $snippet"
                 }) -join ' | '
                 $level = if ($chk.Level -eq 1) { 'FAIL' } else { 'WARN' }
                 Add-Result $cat "$($chk.Label) (last 24h)" $level "$count event(s) — $top"
@@ -2434,7 +2462,7 @@ function Test-EventLogHealth {
 
 #endregion
 
-#region ── L. Network Port Connectivity ──────────────────────────────────────
+#region ── M. Network Port Connectivity ──────────────────────────────────────
 
 function Test-TcpPort {
     param([string]$Target, [int]$Port, [int]$TimeoutMs = 2000)
@@ -2468,10 +2496,10 @@ function Test-UdpPort {
 }
 
 function Test-PortConnectivity {
-    Section 'L. Network Port Connectivity'
+    Section 'M. Network Port Connectivity'
     $cat = 'Ports'
 
-    function Check-Port {
+    function Test-PortEndpoint {
         param([string]$Target, [int]$Port, [string]$Service, [string]$Scope,
               [ValidateSet('TCP','UDP')][string]$Proto = 'TCP',
               [byte[]]$UdpPayload, [switch]$Optional)
@@ -2491,83 +2519,83 @@ function Test-PortConnectivity {
         }
     }
 
-    # ── L.1 Domain Controllers ────────────────────────────────────────────────
+    # ── M.1 Domain Controllers ────────────────────────────────────────────────
     if ($script:DomainControllers -and $script:DomainControllers.Count -gt 0) {
         foreach ($dc in $script:DomainControllers) {
-            Check-Port $dc  53  'DNS'             "DC"
-            Check-Port $dc  88  'Kerberos'        "DC"
-            Check-Port $dc 135  'RPC EPM'         "DC"
-            Check-Port $dc 389  'LDAP'            "DC"
-            Check-Port $dc 445  'SMB/Netlogon'    "DC"
-            Check-Port $dc 636  'LDAPS'           "DC" -Optional
-            Check-Port $dc 3268 'Global Catalog'  "DC"
-            Check-Port $dc 3269 'GC SSL'          "DC" -Optional
+            Test-PortEndpoint $dc  53  'DNS'             "DC"
+            Test-PortEndpoint $dc  88  'Kerberos'        "DC"
+            Test-PortEndpoint $dc 135  'RPC EPM'         "DC"
+            Test-PortEndpoint $dc 389  'LDAP'            "DC"
+            Test-PortEndpoint $dc 445  'SMB/Netlogon'    "DC"
+            Test-PortEndpoint $dc 636  'LDAPS'           "DC" -Optional
+            Test-PortEndpoint $dc 3268 'Global Catalog'  "DC"
+            Test-PortEndpoint $dc 3269 'GC SSL'          "DC" -Optional
             # NTP via UDP on each DC
             $ntpPayload    = [byte[]]::new(48); $ntpPayload[0] = 0x1b
-            Check-Port $dc 123  'NTP'             "DC" -Proto UDP -UdpPayload $ntpPayload -Optional
+            Test-PortEndpoint $dc 123  'NTP'             "DC" -Proto UDP -UdpPayload $ntpPayload -Optional
         }
     } else {
         Add-Result $cat 'DC port checks' 'SKIP' 'No domain controllers configured or discovered'
     }
 
-    # ── L.2 NTP server (dedicated, if specified) ──────────────────────────────
+    # ── M.2 NTP server (dedicated, if specified) ──────────────────────────────
     if ($script:NtpServer -and $script:NtpServer -ne '') {
         $ntpPayload = [byte[]]::new(48); $ntpPayload[0] = 0x1b
-        Check-Port $script:NtpServer 123 'NTP' "NTP" -Proto UDP -UdpPayload $ntpPayload
+        Test-PortEndpoint $script:NtpServer 123 'NTP' "NTP" -Proto UDP -UdpPayload $ntpPayload
     }
 
-    # ── L.3 Other cluster nodes ───────────────────────────────────────────────
+    # ── M.3 Other cluster nodes ───────────────────────────────────────────────
     $remoteNodes = @($script:ClusterNodes | Where-Object { $_ -ne $env:COMPUTERNAME -and $_ -ne '' })
     if ($remoteNodes.Count -gt 0) {
         foreach ($node in $remoteNodes) {
-            Check-Port $node  135  'RPC EPM'             "Node"
-            Check-Port $node  445  'SMB (CSV/Cluster)'   "Node"
-            Check-Port $node 3343  'Cluster Service'      "Node"
-            Check-Port $node 5985  'WinRM HTTP'           "Node"
-            Check-Port $node 5986  'WinRM HTTPS'          "Node" -Optional
-            Check-Port $node 6600  'Live Migration'        "Node"
-            Check-Port $node 2179  'Hyper-V VMConnect'    "Node" -Optional
+            Test-PortEndpoint $node  135  'RPC EPM'             "Node"
+            Test-PortEndpoint $node  445  'SMB (CSV/Cluster)'   "Node"
+            Test-PortEndpoint $node 3343  'Cluster Service'      "Node"
+            Test-PortEndpoint $node 5985  'WinRM HTTP'           "Node"
+            Test-PortEndpoint $node 5986  'WinRM HTTPS'          "Node" -Optional
+            Test-PortEndpoint $node 6600  'Live Migration'        "Node"
+            Test-PortEndpoint $node 2179  'Hyper-V VMConnect'    "Node" -Optional
         }
     } else {
         Add-Result $cat 'Cluster node port checks' 'SKIP' 'No remote cluster nodes specified (single-node mode or -ClusterNodes empty)'
     }
 
-    # ── L.4 File share witness server ────────────────────────────────────────
+    # ── M.4 File share witness server ────────────────────────────────────────
     if ($script:WitnessShare -and $script:WitnessShare -ne '') {
         # Extract server from \\server\share
         if ($script:WitnessShare -match '^\\\\([^\\]+)') {
             $witnessServer = $Matches[1]
-            Check-Port $witnessServer 445 'SMB (witness share)' "Witness"
-            Check-Port $witnessServer 135 'RPC EPM (DFS)'       "Witness" -Optional
+            Test-PortEndpoint $witnessServer 445 'SMB (witness share)' "Witness"
+            Test-PortEndpoint $witnessServer 135 'RPC EPM (DFS)'       "Witness" -Optional
         } else {
             Add-Result $cat 'Witness server port check' 'SKIP' "Cannot parse server from '$($script:WitnessShare)'"
         }
     }
 
-    # ── L.5 iSCSI targets (SAN only) ─────────────────────────────────────────
+    # ── M.5 iSCSI targets (SAN only) ─────────────────────────────────────────
     if ($script:StorageType -eq 'SAN' -and $script:IscsiTargets -and $script:IscsiTargets.Count -gt 0) {
         foreach ($target in $script:IscsiTargets) {
-            Check-Port $target 3260 'iSCSI' "iSCSI"
+            Test-PortEndpoint $target 3260 'iSCSI' "iSCSI"
         }
     } elseif ($script:StorageType -eq 'SAN' -and (-not $script:IscsiTargets -or $script:IscsiTargets.Count -eq 0)) {
         Add-Result $cat 'iSCSI target port checks' 'SKIP' 'No iSCSI targets specified (add IscsiTargets to hyperv-check.psd1)'
     }
 
-    # ── L.6 SCVMM server (optional) ───────────────────────────────────────────
+    # ── M.6 SCVMM server (optional) ───────────────────────────────────────────
     if ($script:ScvmmServer -and $script:ScvmmServer -ne '') {
-        Check-Port $script:ScvmmServer 8100 'SCVMM Agent'  "SCVMM"
-        Check-Port $script:ScvmmServer  445 'SMB'          "SCVMM" -Optional
-        Check-Port $script:ScvmmServer 5985 'WinRM HTTP'   "SCVMM" -Optional
+        Test-PortEndpoint $script:ScvmmServer 8100 'SCVMM Agent'  "SCVMM"
+        Test-PortEndpoint $script:ScvmmServer  445 'SMB'          "SCVMM" -Optional
+        Test-PortEndpoint $script:ScvmmServer 5985 'WinRM HTTP'   "SCVMM" -Optional
     }
 
-    # ── L.7 Self-checks (services that must listen locally) ───────────────────
+    # ── M.7 Self-checks (services that must listen locally) ───────────────────
     foreach ($p in @(
         @{ Port = 135;  Desc = 'RPC EPM (local)' },
         @{ Port = 445;  Desc = 'SMB (local)' },
         @{ Port = 3343; Desc = 'Cluster Service (local)' }
     )) {
         $ok = Test-TcpPort '127.0.0.1' $p.Port
-        Add-Result $cat "Local $($p.Port)/TCP ($($p.Desc))" (if ($ok) { 'PASS' } else { 'WARN' }) (if ($ok) { 'Listening' } else { 'Not listening' })
+        Add-Result $cat "Local $($p.Port)/TCP ($($p.Desc))" $(if ($ok) { 'PASS' } else { 'WARN' }) $(if ($ok) { 'Listening' } else { 'Not listening' })
     }
 }
 
@@ -2651,6 +2679,21 @@ td{padding:7px 12px;border-bottom:1px solid #e0e0e0;font-size:.9em}
 
 #region ── Main ──────────────────────────────────────────────────────────────
 
+# Run a check section in isolation. With $ErrorActionPreference = 'Stop', an
+# unhandled terminating error inside a section would otherwise abort the entire
+# run; this wrapper records the failure and lets the remaining sections proceed.
+function Invoke-CheckSection {
+    param(
+        [string]$Name,
+        [scriptblock]$Body
+    )
+    try {
+        & $Body
+    } catch {
+        Add-Result $Name 'Section execution' 'FAIL' "Unhandled error — section aborted: $($_.Exception.Message)"
+    }
+}
+
 # Load config file or prompt interactively — populates all $script:* variables
 Initialize-Config
 
@@ -2661,33 +2704,33 @@ $runNode    = $script:Mode -in @('PreNode', 'Both')
 $runCluster = $script:Mode -in @('PreCluster', 'Both')
 
 if ($runNode) {
-    Test-OSCompatibility
-    Test-PlatformSecurity
-    Test-HardwareRequirements
-    Test-NetworkConfiguration
-    Test-ActiveDirectory
-    Test-DNSResolution
-    Test-TimeSync
-    Test-FirewallRules
-    Test-Storage
+    Invoke-CheckSection 'OS'                { Test-OSCompatibility }
+    Invoke-CheckSection 'Platform Security' { Test-PlatformSecurity }
+    Invoke-CheckSection 'Hardware'          { Test-HardwareRequirements }
+    Invoke-CheckSection 'Network'           { Test-NetworkConfiguration }
+    Invoke-CheckSection 'ActiveDirectory'   { Test-ActiveDirectory }
+    Invoke-CheckSection 'DNS'               { Test-DNSResolution }
+    Invoke-CheckSection 'TimeSync'          { Test-TimeSync }
+    Invoke-CheckSection 'Firewall'          { Test-FirewallRules }
+    Invoke-CheckSection 'Storage'           { Test-Storage }
 }
 
 if ($runCluster) {
-    Test-ClusterReadiness -Nodes $script:ClusterNodes
+    Invoke-CheckSection 'Cluster'           { Test-ClusterReadiness -Nodes $script:ClusterNodes }
 }
 
-# Section J: service account / OU — runs whenever configured
+# Section K: service account / OU — runs whenever configured
 if ($script:ServiceAccount -ne '' -or $script:ClusterOU -ne '') {
-    Test-ServiceAccountPermissions
+    Invoke-CheckSection 'ServiceAccount'    { Test-ServiceAccountPermissions }
 }
 
-# Section K: event log health (always for PreNode and Both)
+# Section L: event log health (always for PreNode and Both)
 if ($runNode) {
-    Test-EventLogHealth
+    Invoke-CheckSection 'EventLog'          { Test-EventLogHealth }
 }
 
-# Section L: port connectivity (always — needs infra endpoints from config)
-Test-PortConnectivity
+# Section M: port connectivity (always — needs infra endpoints from config)
+Invoke-CheckSection 'Ports'                 { Test-PortConnectivity }
 
 $failCount = Write-Summary
 
