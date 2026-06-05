@@ -208,6 +208,15 @@ function Initialize-Config {
 
     $script:SkipClusterValidation = [bool]($cfg['SkipClusterValidation'])
 
+    # Optional platform security requirements. When left disabled, the related
+    # checks are informational only; when enabled, missing/disabled features are
+    # reported as WARN/FAIL.
+    $script:RequireSecureBoot = [bool]($cfg['RequireSecureBoot'])
+    $script:RequireTpm        = [bool]($cfg['RequireTpm'])
+    $script:RequireBitLocker  = [bool]($cfg['RequireBitLocker'])
+    $script:RequireVbs        = [bool]($cfg['RequireVbs'])
+    $script:RequireHvci       = [bool]($cfg['RequireHvci'])
+
     # Log / report paths
     $logCfg = $cfg['LogFile']
     $script:LogFile = if ($logCfg -and $logCfg -ne '') { $logCfg } else {
@@ -239,6 +248,14 @@ function Initialize-Config {
     Write-Host "  WitnessShare  : $(if ($script:WitnessShare) { $script:WitnessShare } else { '(none)' })"
     Write-Host "  ServiceAccount: $(if ($script:ServiceAccount) { $script:ServiceAccount } else { '(none)' })"
     Write-Host "  DomainControllers: $(if ($script:DomainControllers) { $script:DomainControllers -join ', ' } else { '(none)' })"
+    $platformRequirements = @(
+        $(if ($script:RequireSecureBoot) { 'SecureBoot' }),
+        $(if ($script:RequireTpm) { 'TPM' }),
+        $(if ($script:RequireBitLocker) { 'BitLocker' }),
+        $(if ($script:RequireVbs) { 'VBS' }),
+        $(if ($script:RequireHvci) { 'HVCI' })
+    ) | Where-Object { $_ }
+    Write-Host "  PlatformSecurity: $(if ($platformRequirements) { $platformRequirements -join ', ' } else { 'informational only' })"
     Write-Host "  LogFile       : $($script:LogFile)"
     Write-Host ''
 }
@@ -344,7 +361,177 @@ function Test-OSCompatibility {
 
 #endregion
 
-#region ── B. Hardware & Virtualization Support ───────────────────────────────
+#region ── B. Platform Security ───────────────────────────────────────────────
+
+function Test-PlatformSecurity {
+    Section 'B. Platform Security'
+    $cat = 'Platform Security'
+
+    $anyRequirement = $script:RequireSecureBoot -or $script:RequireTpm -or $script:RequireBitLocker -or $script:RequireVbs -or $script:RequireHvci
+    if (-not $anyRequirement) {
+        Add-Result $cat 'Platform security requirements' 'INFO' 'No security baseline requirement enabled; checks below are informational only'
+    } else {
+        $enabledRequirements = @(
+            $(if ($script:RequireSecureBoot) { 'Secure Boot' }),
+            $(if ($script:RequireTpm) { 'TPM' }),
+            $(if ($script:RequireBitLocker) { 'BitLocker' }),
+            $(if ($script:RequireVbs) { 'VBS/Credential Guard' }),
+            $(if ($script:RequireHvci) { 'HVCI' })
+        ) | Where-Object { $_ }
+        Add-Result $cat 'Platform security requirements' 'INFO' "Required: $($enabledRequirements -join ', ')"
+    }
+
+    # UEFI / Legacy boot detection from firmware type. The registry value is
+    # generally available on modern Windows; bcdedit is a secondary fallback.
+    $firmwareType = 'Unknown'
+    try {
+        $peFirmware = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control' -Name 'PEFirmwareType' -ErrorAction SilentlyContinue
+        if ($peFirmware -and $null -ne $peFirmware.PEFirmwareType) {
+            $firmwareType = switch ([int]$peFirmware.PEFirmwareType) {
+                1 { 'BIOS/Legacy' }
+                2 { 'UEFI' }
+                default { "Unknown ($($peFirmware.PEFirmwareType))" }
+            }
+        }
+    } catch { }
+    if ($firmwareType -eq 'Unknown') {
+        try {
+            $bcdFirmware = (& bcdedit /enum '{current}' 2>$null | Select-String -Pattern 'winload\.efi|winload\.exe')
+            if ($bcdFirmware -match 'winload\.efi') { $firmwareType = 'UEFI' }
+            elseif ($bcdFirmware -match 'winload\.exe') { $firmwareType = 'BIOS/Legacy' }
+        } catch { }
+    }
+    $firmwareStatus = if ($firmwareType -eq 'BIOS/Legacy' -and $script:RequireSecureBoot) { 'FAIL' } elseif ($firmwareType -eq 'Unknown') { 'INFO' } else { 'INFO' }
+    Add-Result $cat 'Firmware boot mode' $firmwareStatus $firmwareType
+
+    # Secure Boot. Confirm-SecureBootUEFI returns $true/$false on UEFI systems
+    # and throws on unsupported platforms or insufficient access.
+    $secureBootState = $null
+    $secureBootDetail = ''
+    try {
+        $secureBootCmd = Get-Command Confirm-SecureBootUEFI -ErrorAction SilentlyContinue
+        if ($secureBootCmd) {
+            $secureBootState = [bool](Confirm-SecureBootUEFI -ErrorAction Stop)
+            $secureBootDetail = if ($secureBootState) { 'Enabled' } else { 'Disabled' }
+        } else {
+            $secureBootDetail = 'Confirm-SecureBootUEFI cmdlet unavailable'
+        }
+    } catch {
+        $secureBootDetail = "Unable to query Secure Boot: $($_.Exception.Message)"
+        if ($firmwareType -eq 'BIOS/Legacy') { $secureBootDetail = 'Not available in BIOS/Legacy boot mode' }
+    }
+    $secureBootStatus = if ($script:RequireSecureBoot) {
+        if ($secureBootState -eq $true) { 'PASS' } elseif ($secureBootState -eq $false -or $firmwareType -eq 'BIOS/Legacy') { 'FAIL' } else { 'WARN' }
+    } else { 'INFO' }
+    Add-Result $cat 'Secure Boot' $secureBootStatus $secureBootDetail
+
+    # TPM state.
+    $tpmReady = $null
+    $tpmDetail = ''
+    try {
+        $tpmCmd = Get-Command Get-Tpm -ErrorAction SilentlyContinue
+        if ($tpmCmd) {
+            $tpm = Get-Tpm -ErrorAction Stop
+            $tpmPresent = [bool]$tpm.TpmPresent
+            $tpmReady = $tpmPresent -and [bool]$tpm.TpmReady -and [bool]$tpm.TpmEnabled -and [bool]$tpm.TpmActivated
+            $tpmDetail = "Present=$($tpm.TpmPresent); Ready=$($tpm.TpmReady); Enabled=$($tpm.TpmEnabled); Activated=$($tpm.TpmActivated); Owned=$($tpm.TpmOwned)"
+        } else {
+            $tpmDetail = 'Get-Tpm cmdlet unavailable'
+        }
+    } catch {
+        $tpmDetail = "Unable to query TPM: $($_.Exception.Message)"
+    }
+    $tpmStatus = if ($script:RequireTpm) {
+        if ($tpmReady -eq $true) { 'PASS' } elseif ($tpmReady -eq $false) { 'FAIL' } else { 'WARN' }
+    } else { 'INFO' }
+    Add-Result $cat 'TPM' $tpmStatus $tpmDetail
+
+    # BitLocker state. Query only when the BitLocker module/cmdlet exists.
+    $bitLockerProtected = $null
+    $bitLockerDetail = ''
+    try {
+        $bitLockerCmd = Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue
+        if ($bitLockerCmd) {
+            $volumes = @(Get-BitLockerVolume -ErrorAction Stop)
+            $osVolume = $volumes | Where-Object { $_.MountPoint -eq $env:SystemDrive } | Select-Object -First 1
+            if (-not $osVolume) { $osVolume = $volumes | Select-Object -First 1 }
+            if ($osVolume) {
+                $protectionStatusText = [string]$osVolume.ProtectionStatus
+                $protectionStatusValue = if ($osVolume.ProtectionStatus -is [int]) { [int]$osVolume.ProtectionStatus } else { $null }
+                $protectionOn = $protectionStatusText -eq 'On' -or $protectionStatusValue -eq 1
+                $bitLockerProtected = [bool]$protectionOn
+                $bitLockerDetail = "Volume=$($osVolume.MountPoint); ProtectionStatus=$($osVolume.ProtectionStatus); VolumeStatus=$($osVolume.VolumeStatus); EncryptionPercentage=$($osVolume.EncryptionPercentage)%"
+            } else {
+                $bitLockerProtected = $false
+                $bitLockerDetail = 'No BitLocker volumes returned'
+            }
+        } else {
+            $bitLockerDetail = 'Get-BitLockerVolume cmdlet unavailable (BitLocker module not installed)'
+        }
+    } catch {
+        $bitLockerDetail = "Unable to query BitLocker: $($_.Exception.Message)"
+    }
+    $bitLockerStatus = if ($script:RequireBitLocker) {
+        if ($bitLockerProtected -eq $true) { 'PASS' } elseif ($bitLockerProtected -eq $false) { 'FAIL' } else { 'WARN' }
+    } else { 'INFO' }
+    Add-Result $cat 'BitLocker OS volume protection' $bitLockerStatus $bitLockerDetail
+
+    # Device Guard / VBS / Credential Guard / HVCI via CIM with registry fallback.
+    $vbsEnabled = $null
+    $credentialGuardRunning = $null
+    $hvciRunning = $null
+    $deviceGuardDetails = @()
+    try {
+        $dg = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' -ClassName Win32_DeviceGuard -ErrorAction Stop
+        $vbsEnabled = $dg.VirtualizationBasedSecurityStatus -gt 0
+        $credentialGuardRunning = 1 -in @($dg.SecurityServicesRunning)
+        $hvciRunning = 2 -in @($dg.SecurityServicesRunning)
+        $deviceGuardDetails += "CIM: VBSStatus=$($dg.VirtualizationBasedSecurityStatus); ServicesConfigured=$(@($dg.SecurityServicesConfigured) -join ','); ServicesRunning=$(@($dg.SecurityServicesRunning) -join ',')"
+    } catch {
+        $deviceGuardDetails += "CIM unavailable: $($_.Exception.Message)"
+    }
+
+    try {
+        $dgReg = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' -ErrorAction SilentlyContinue
+        if ($dgReg -and $null -ne $dgReg.EnableVirtualizationBasedSecurity -and $null -eq $vbsEnabled) {
+            $vbsEnabled = [int]$dgReg.EnableVirtualizationBasedSecurity -eq 1
+        }
+        if ($dgReg -and $null -ne $dgReg.EnableVirtualizationBasedSecurity) {
+            $deviceGuardDetails += "RegistryVBS=$($dgReg.EnableVirtualizationBasedSecurity)"
+        }
+    } catch { }
+
+    try {
+        $lsaReg = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'LsaCfgFlags' -ErrorAction SilentlyContinue
+        if ($lsaReg -and $null -ne $lsaReg.LsaCfgFlags -and $null -eq $credentialGuardRunning) {
+            $credentialGuardRunning = [int]$lsaReg.LsaCfgFlags -in @(1,2)
+        }
+        if ($lsaReg -and $null -ne $lsaReg.LsaCfgFlags) { $deviceGuardDetails += "LsaCfgFlags=$($lsaReg.LsaCfgFlags)" }
+    } catch { }
+
+    try {
+        $hvciReg = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' -Name 'Enabled' -ErrorAction SilentlyContinue
+        if ($hvciReg -and $null -ne $hvciReg.Enabled -and $null -eq $hvciRunning) {
+            $hvciRunning = [int]$hvciReg.Enabled -eq 1
+        }
+        if ($hvciReg -and $null -ne $hvciReg.Enabled) { $deviceGuardDetails += "RegistryHVCI=$($hvciReg.Enabled)" }
+    } catch { }
+
+    $deviceGuardDetail = if ($deviceGuardDetails.Count -gt 0) { $deviceGuardDetails -join '; ' } else { 'No Device Guard state detected' }
+    $vbsStatus = if ($script:RequireVbs) {
+        if ($vbsEnabled -eq $true -or $credentialGuardRunning -eq $true) { 'PASS' } elseif ($vbsEnabled -eq $false -and $credentialGuardRunning -eq $false) { 'FAIL' } else { 'WARN' }
+    } else { 'INFO' }
+    Add-Result $cat 'VBS / Credential Guard' $vbsStatus $deviceGuardDetail
+
+    $hvciStatus = if ($script:RequireHvci) {
+        if ($hvciRunning -eq $true) { 'PASS' } elseif ($hvciRunning -eq $false) { 'FAIL' } else { 'WARN' }
+    } else { 'INFO' }
+    Add-Result $cat 'HVCI (Memory Integrity)' $hvciStatus $deviceGuardDetail
+}
+
+#endregion
+
+#region ── C. Hardware & Virtualization Support ───────────────────────────────
 
 function Test-HardwareRequirements {
     Section 'B. Hardware & Virtualization Support'
@@ -2080,6 +2267,7 @@ $runCluster = $script:Mode -in @('PreCluster', 'Both')
 
 if ($runNode) {
     Test-OSCompatibility
+    Test-PlatformSecurity
     Test-HardwareRequirements
     Test-NetworkConfiguration
     Test-ActiveDirectory

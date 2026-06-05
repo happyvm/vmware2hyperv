@@ -23,6 +23,15 @@
     # CredSSP  — do not require Kerberos constrained delegation; warn if CredSSP is not enabled.
     LiveMigrationAuth = 'Kerberos'
 
+    # ── Platform security requirements ────────────────────────────────────────
+    # Leave these disabled ($false) to record the current state as INFO only.
+    # Enable a requirement to turn a missing/disabled control into WARN/FAIL.
+    RequireSecureBoot = $false
+    RequireTpm        = $false
+    RequireBitLocker  = $false
+    RequireVbs        = $false
+    RequireHvci       = $false
+
     # ── Cluster nodes ─────────────────────────────────────────────────────────
     # FQDNs or IPs of the OTHER nodes (this local node is always included).
     # Leave empty for single-node / PreNode validation.
