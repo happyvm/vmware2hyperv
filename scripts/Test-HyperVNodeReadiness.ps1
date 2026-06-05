@@ -8,7 +8,7 @@
       A. OS edition (Datacenter/Standard) and build — targets WS2022 and WS2025 only
       B. Hardware: CPU virtualization, SLAT, DEP, RAM, Hyper-V/Failover-Clustering features
       C. Network: NIC count, static IPs, RDMA (S2D), DNS, WinRM
-      D. Active Directory: domain membership, DC reachability, computer account, SPN, CredSSP
+      D. Active Directory: domain membership, DC reachability, computer account, SPN, Live Migration Kerberos delegation, CredSSP
       E. DNS: forward/reverse resolution, AD SRV records, dynamic update
       F. Time synchronization (W32TM, Kerberos < 5 minutes)
       G. Firewall: cluster/SMB/Live-Migration rules and critical TCP ports
@@ -191,6 +191,9 @@ function Initialize-Config {
     $script:StorageType  = Read-CfgValue $cfg 'StorageType'  'Storage type (SAN / S2D)' 'SAN'
     if ($script:StorageType -notin @('SAN','S2D')) { $script:StorageType = 'SAN' }
 
+    $script:LiveMigrationAuth = if ($cfg.ContainsKey('LiveMigrationAuth') -and $cfg['LiveMigrationAuth']) { $cfg['LiveMigrationAuth'] } else { 'Kerberos' }
+    if ($script:LiveMigrationAuth -notin @('Kerberos','CredSSP')) { $script:LiveMigrationAuth = 'Kerberos' }
+
     $script:ClusterNodes = Read-CfgValue $cfg 'ClusterNodes' 'Other cluster node FQDNs/IPs (comma-separated, empty = single node)' '' -IsArray
     $script:WitnessShare = Read-CfgValue $cfg 'WitnessShare' 'File share witness UNC (e.g. \\srv\witness, empty to skip)'
     $script:ClusterName  = Read-CfgValue $cfg 'ClusterName'  'Planned cluster NetBIOS name (e.g. CLHYPERV01, empty to skip)'
@@ -231,6 +234,7 @@ function Initialize-Config {
     Write-Host "[======] Configuration summary" -ForegroundColor Cyan
     Write-Host "  Mode          : $($script:Mode)"
     Write-Host "  StorageType   : $($script:StorageType)"
+    Write-Host "  LiveMigrationAuth: $($script:LiveMigrationAuth)"
     Write-Host "  ClusterNodes  : $(if ($script:ClusterNodes) { $script:ClusterNodes -join ', ' } else { '(none)' })"
     Write-Host "  WitnessShare  : $(if ($script:WitnessShare) { $script:WitnessShare } else { '(none)' })"
     Write-Host "  ServiceAccount: $(if ($script:ServiceAccount) { $script:ServiceAccount } else { '(none)' })"
@@ -624,6 +628,215 @@ function Test-NetworkConfiguration {
 
 #region ── D. Active Directory ───────────────────────────────────────────────
 
+function ConvertTo-LdapEscapedFilterValue {
+    param([string]$Value)
+
+    if ($null -eq $Value) { return '' }
+
+    return ($Value -replace '\\', '\5c' -replace '\*', '\2a' -replace '\(', '\28' -replace '\)', '\29' -replace "`0", '\00')
+}
+
+function Get-UniqueTextValues {
+    param([string[]]$Values)
+
+    $seen = @{}
+    foreach ($value in $Values) {
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+        $trimmed = $value.Trim()
+        $key = $trimmed.ToLowerInvariant()
+        if (-not $seen.ContainsKey($key)) {
+            $seen[$key] = $true
+            $trimmed
+        }
+    }
+}
+
+function Resolve-ClusterNodeIdentity {
+    param(
+        [string]$NodeName,
+        [string]$DomainName
+    )
+
+    $name = if ([string]::IsNullOrWhiteSpace($NodeName)) { $env:COMPUTERNAME } else { $NodeName.Trim() }
+    $fqdn = $null
+    $short = $name
+
+    if ($name -match '^\d{1,3}(\.\d{1,3}){3}$') {
+        try {
+            $resolvedName = [System.Net.Dns]::GetHostEntry($name).HostName
+            if ($resolvedName) {
+                $fqdn = $resolvedName
+                $short = ($resolvedName -split '\.')[0]
+            }
+        } catch {
+            $short = $name
+        }
+    } elseif ($name -match '\.') {
+        $fqdn = $name
+        $short = ($name -split '\.')[0]
+    } else {
+        $short = $name
+        if ($DomainName) { $fqdn = "$name.$DomainName" }
+    }
+
+    $hostNames = @(Get-UniqueTextValues -Values @($short, $fqdn))
+
+    [pscustomobject]@{
+        InputName     = $name
+        ShortName     = $short
+        Fqdn          = $fqdn
+        ExpectedHosts = $hostNames
+        Account       = $null
+    }
+}
+
+function Get-ADComputerForNode {
+    param([pscustomobject]$Node)
+
+    $clauses = @()
+    foreach ($candidate in @(Get-UniqueTextValues -Values @($Node.ShortName, $Node.Fqdn, $Node.InputName))) {
+        $escaped = ConvertTo-LdapEscapedFilterValue -Value $candidate
+        $clauses += "(name=$escaped)"
+        $clauses += "(dNSHostName=$escaped)"
+    }
+
+    if ($Node.ShortName -and $Node.ShortName -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        $sam = ConvertTo-LdapEscapedFilterValue -Value "$($Node.ShortName)$"
+        $clauses += "(sAMAccountName=$sam)"
+    }
+
+    $filter = if ($clauses.Count -gt 1) { "(&(objectCategory=computer)(|$($clauses -join '')))" } else { "(&(objectCategory=computer)$($clauses -join ''))" }
+    $searcher = [adsisearcher]$filter
+    $searcher.PropertiesToLoad.AddRange([string[]]@('distinguishedname', 'dnshostname', 'name', 'serviceprincipalname', 'msds-allowedtodelegateto', 'operatingsystem'))
+    $result = $searcher.FindOne()
+
+    if (-not $result) { return $null }
+
+    [pscustomobject]@{
+        DistinguishedName       = [string]$result.Properties['distinguishedname'][0]
+        DnsHostName             = if ($result.Properties['dnshostname']) { [string]$result.Properties['dnshostname'][0] } else { $null }
+        Name                    = if ($result.Properties['name']) { [string]$result.Properties['name'][0] } else { $Node.ShortName }
+        OperatingSystem         = if ($result.Properties['operatingsystem']) { [string]$result.Properties['operatingsystem'][0] } else { $null }
+        ServicePrincipalName    = @($result.Properties['serviceprincipalname'])
+        AllowedToDelegateTo     = @($result.Properties['msds-allowedtodelegateto'])
+    }
+}
+
+function Test-ServicePrincipalNamesForNode {
+    param(
+        [pscustomobject]$Node,
+        [string]$Category
+    )
+
+    $spns = @($Node.Account.ServicePrincipalName | ForEach-Object { [string]$_ })
+    $spnKeys = @{}
+    foreach ($spn in $spns) { $spnKeys[$spn.ToLowerInvariant()] = $true }
+
+    $hostSpns = @($spns | Where-Object { $_ -match '^HOST/' })
+    if ($hostSpns) {
+        Add-Result $Category "HOST SPN registered: $($Node.ShortName)" 'PASS' ($hostSpns -join '; ')
+    } else {
+        Add-Result $Category "HOST SPN registered: $($Node.ShortName)" 'WARN' 'No HOST SPN — may cause Kerberos failures for cluster communications'
+    }
+
+    $missingMigration = @()
+    $presentMigration = @()
+    $missingCifs = @()
+    $presentCifs = @()
+
+    foreach ($hostName in $Node.ExpectedHosts) {
+        $migrationSpn = "Microsoft Virtual System Migration Service/$hostName"
+        $cifsSpn = "cifs/$hostName"
+
+        if ($spnKeys.ContainsKey($migrationSpn.ToLowerInvariant())) { $presentMigration += $migrationSpn } else { $missingMigration += $migrationSpn }
+        if ($spnKeys.ContainsKey($cifsSpn.ToLowerInvariant())) { $presentCifs += $cifsSpn } else { $missingCifs += $cifsSpn }
+    }
+
+    if ($missingMigration.Count -eq 0) {
+        Add-Result $Category "Live Migration SPN: $($Node.ShortName)" 'PASS' ($presentMigration -join '; ')
+    } else {
+        Add-Result $Category "Live Migration SPN: $($Node.ShortName)" 'WARN' "Missing: $($missingMigration -join '; ')"
+    }
+
+    if ($missingCifs.Count -eq 0) {
+        Add-Result $Category "CIFS SPN for delegation: $($Node.ShortName)" 'PASS' ($presentCifs -join '; ')
+    } else {
+        $status = if ($script:LiveMigrationAuth -eq 'Kerberos') { 'WARN' } else { 'INFO' }
+        Add-Result $Category "CIFS SPN for delegation: $($Node.ShortName)" $status "Missing: $($missingCifs -join '; ') — required when Kerberos Live Migration also delegates SMB/CIFS access"
+    }
+}
+
+function Test-LiveMigrationDelegation {
+    param(
+        [pscustomobject[]]$Nodes,
+        [string]$Category
+    )
+
+    Add-Result $Category 'Live Migration authentication mode' 'INFO' "Configured target: $($script:LiveMigrationAuth)"
+
+    if ($script:LiveMigrationAuth -ne 'Kerberos') {
+        Add-Result $Category 'Kerberos constrained delegation' 'INFO' 'Skipped because LiveMigrationAuth is CredSSP; Kerberos constrained delegation is not mandatory in this mode'
+        return
+    }
+
+    if ($Nodes.Count -lt 2) {
+        Add-Result $Category 'Kerberos constrained delegation' 'INFO' 'Single-node configuration; no inter-node Live Migration delegation path to validate'
+        return
+    }
+
+    foreach ($source in $Nodes) {
+        if (-not $source.Account) { continue }
+
+        $delegation = @($source.Account.AllowedToDelegateTo | ForEach-Object { [string]$_ })
+        $delegationKeys = @{}
+        foreach ($entry in $delegation) { $delegationKeys[$entry.ToLowerInvariant()] = $true }
+
+        foreach ($target in $Nodes) {
+            if ($source.ShortName.ToLowerInvariant() -eq $target.ShortName.ToLowerInvariant()) { continue }
+            if (-not $target.Account) { continue }
+
+            $expected = @()
+            foreach ($hostName in $target.ExpectedHosts) {
+                $expected += "Microsoft Virtual System Migration Service/$hostName"
+                $expected += "cifs/$hostName"
+            }
+
+            $missing = @($expected | Where-Object { -not $delegationKeys.ContainsKey($_.ToLowerInvariant()) })
+            if ($missing.Count -eq 0) {
+                Add-Result $Category "Kerberos constrained delegation: $($source.ShortName) -> $($target.ShortName)" 'PASS' ($expected -join '; ')
+            } else {
+                Add-Result $Category "Kerberos constrained delegation: $($source.ShortName) -> $($target.ShortName)" 'WARN' "Missing msDS-AllowedToDelegateTo entries: $($missing -join '; ')"
+            }
+        }
+    }
+}
+
+function Test-CredSSPForLiveMigration {
+    param([string]$Category)
+
+    try {
+        $credSSP = Get-WSManCredSSP -ErrorAction SilentlyContinue
+        $credSSPEnabled = ($credSSP -and ($credSSP -match 'enabled'))
+
+        if ($script:LiveMigrationAuth -eq 'CredSSP') {
+            if ($credSSPEnabled) {
+                Add-Result $Category 'CredSSP delegation (Live Migration)' 'INFO' 'CredSSP is enabled and LiveMigrationAuth is CredSSP; verify the operational security trade-off is accepted'
+            } else {
+                Add-Result $Category 'CredSSP delegation (Live Migration)' 'WARN' 'LiveMigrationAuth is CredSSP but client-side CredSSP is not enabled'
+            }
+        } else {
+            if ($credSSPEnabled) {
+                Add-Result $Category 'CredSSP delegation (Live Migration)' 'INFO' 'CredSSP is enabled but not required because LiveMigrationAuth is Kerberos; Kerberos constrained delegation is validated separately'
+            } else {
+                Add-Result $Category 'CredSSP delegation (Live Migration)' 'INFO' 'CredSSP is not enabled and is not required because LiveMigrationAuth is Kerberos'
+            }
+        }
+    } catch {
+        $status = if ($script:LiveMigrationAuth -eq 'CredSSP') { 'WARN' } else { 'INFO' }
+        Add-Result $Category 'CredSSP delegation (Live Migration)' $status 'WSMan query unavailable; CredSSP cannot be verified locally'
+    }
+}
+
 function Test-ActiveDirectory {
     Section 'D. Active Directory'
     $cat = 'ActiveDirectory'
@@ -654,45 +867,42 @@ function Test-ActiveDirectory {
         Add-Result $cat 'Writable domain controller reachable' 'FAIL' "Cannot locate writable DC: $_"
     }
 
-    # Computer account exists
-    try {
-        $searcher = [adsisearcher]"(&(objectCategory=computer)(name=$($env:COMPUTERNAME)))"
-        $searcher.PropertiesToLoad.AddRange([string[]]@('distinguishedname', 'serviceprincipalname', 'operatingsystem'))
-        $result = $searcher.FindOne()
-        if ($result) {
-            $dn   = $result.Properties['distinguishedname'][0]
-            $osprop = $result.Properties['operatingsystem']
-            Add-Result $cat 'Computer account in AD' 'PASS' $dn
-            if ($osprop) { Add-Result $cat 'Computer AD OS attribute' 'INFO' $osprop[0] }
+    $localFqdn = if ($cs.DNSHostName -and $cs.Domain) { "$($cs.DNSHostName).$($cs.Domain)" } else { $env:COMPUTERNAME }
+    $nodeInputs = @(Get-UniqueTextValues -Values @($localFqdn, $script:ClusterNodes))
+    $nodes = @()
+    $seenNodeKeys = @{}
 
-            # HOST SPN
-            $spns     = $result.Properties['serviceprincipalname']
-            $hostSpns = $spns | Where-Object { $_ -match '^HOST/' }
-            if ($hostSpns) {
-                Add-Result $cat 'HOST SPN registered' 'PASS' ($hostSpns -join '; ')
+    foreach ($nodeInput in $nodeInputs) {
+        $node = Resolve-ClusterNodeIdentity -NodeName $nodeInput -DomainName $cs.Domain
+        $nodeKey = $node.ShortName.ToLowerInvariant()
+        if ($seenNodeKeys.ContainsKey($nodeKey)) { continue }
+        $seenNodeKeys[$nodeKey] = $true
+
+        try {
+            $account = Get-ADComputerForNode -Node $node
+            if ($account) {
+                $node.Account = $account
+                if ($account.DnsHostName) {
+                    $node.Fqdn = $account.DnsHostName
+                    $node.ExpectedHosts = @(Get-UniqueTextValues -Values @($node.ShortName, $account.DnsHostName))
+                }
+
+                Add-Result $cat "Computer account in AD: $($node.ShortName)" 'PASS' $account.DistinguishedName
+                if ($account.OperatingSystem) { Add-Result $cat "Computer AD OS attribute: $($node.ShortName)" 'INFO' $account.OperatingSystem }
+                Test-ServicePrincipalNamesForNode -Node $node -Category $cat
             } else {
-                Add-Result $cat 'HOST SPN registered' 'WARN' 'No HOST SPN — may cause Kerberos failures for cluster communications'
+                Add-Result $cat "Computer account in AD: $($node.ShortName)" 'FAIL' "Computer object for '$($node.InputName)' not found in AD"
             }
-        } else {
-            Add-Result $cat 'Computer account in AD' 'FAIL' "Computer object '$($env:COMPUTERNAME)' not found in AD"
+        } catch {
+            Add-Result $cat "Computer account in AD: $($node.ShortName)" 'WARN' "ADSI query failed: $_"
         }
-    } catch {
-        Add-Result $cat 'Computer account in AD' 'WARN' "ADSI query failed: $_"
+
+        $nodes += $node
     }
 
-    # CredSSP (required for Kerberos delegation in Live Migration)
-    try {
-        $credSSP = Get-WSManCredSSP -ErrorAction SilentlyContinue
-        if ($credSSP -and $credSSP[0] -match 'enabled') {
-            Add-Result $cat 'CredSSP delegation (Live Migration)' 'PASS' 'Client-side CredSSP enabled'
-        } else {
-            Add-Result $cat 'CredSSP delegation (Live Migration)' 'WARN' 'CredSSP not enabled — configure if using Kerberos-based Live Migration'
-        }
-    } catch {
-        Add-Result $cat 'CredSSP delegation (Live Migration)' 'SKIP' 'WSMan query unavailable'
-    }
+    Test-LiveMigrationDelegation -Nodes $nodes -Category $cat
+    Test-CredSSPForLiveMigration -Category $cat
 }
-
 #endregion
 
 #region ── E. DNS Resolution ──────────────────────────────────────────────────
