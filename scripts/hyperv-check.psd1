@@ -18,6 +18,24 @@
     # S2D — Storage Spaces Direct, internal disks, Datacenter edition required
     StorageType = 'SAN'
 
+    # ── SAN storage expectations (SAN mode only) ──────────────────────────────
+    # Expected number of shared SAN disks/LUNs visible on each node. Leave empty
+    # to record discovered disks without enforcing a count.
+    ExpectedSanDiskCount = ''    # e.g. 8
+
+    # Expected global MPIO policy reported by Get-MPIOSetting. Leave empty to
+    # inventory the current policy without enforcing a value. Examples depend on
+    # OS/vendor DSM: 'RR', 'Round Robin', 'Least Queue Depth', 'Fail Over Only'.
+    ExpectedMpioPolicy = ''
+
+    # Require ALUA/asymmetric access evidence from mpclaim/DSM inventory. Enable
+    # only when the SAN array and vendor DSM are expected to expose ALUA.
+    RequireAlua = $false
+
+    # SAN transport to validate. Both accepts iSCSI and Fibre Channel disks/HBAs.
+    # Supported values: 'iSCSI', 'FC', 'Both'
+    SanTransport = 'Both'
+
     # ── Network adapter roles ─────────────────────────────────────────────────
     # Map physical NIC names (Get-NetAdapter -Name) to traffic roles so network
     # checks only enforce requirements where they apply. Supported roles:
