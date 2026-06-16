@@ -1,4 +1,4 @@
-﻿@{
+@{
     VCenter = @{
         Server = "vcenter.domain.local"
     }
@@ -65,10 +65,33 @@
     }
 
     HyperV = @{
+        # Default target used when no VMware cluster mapping matches.
         Host1          = "hyperhost1.domain"
         Host2          = "hyperhost2.domain"   # Target host for LiveMigration
         Cluster        = "HypClusterName"
         ClusterStorage = "C:\ClusterStorage\Volume2"
+    }
+
+    MigrationMappings = @{
+        # Route VMs by source VMware cluster to the correct Hyper-V cluster and CSV volume.
+        # Values must match VMware/SCVMM objects exactly. Host1 is used for Instant Recovery,
+        # Host2 is used for the LiveMigration validation step.
+        ClusterMappings = @(
+            @{
+                VMwareCluster  = "VmwareClusterA"
+                HyperVCluster  = "HypClusterNameA"
+                Host1          = "hyperhost-a1.domain"
+                Host2          = "hyperhost-a2.domain"
+                ClusterStorage = "C:\ClusterStorage\Volume2"
+            },
+            @{
+                VMwareCluster  = "VmwareClusterB"
+                HyperVCluster  = "HypClusterNameB"
+                Host1          = "hyperhost-b1.domain"
+                Host2          = "hyperhost-b2.domain"
+                ClusterStorage = "C:\ClusterStorage\Volume3"
+            }
+        )
     }
 
     Veeam = @{

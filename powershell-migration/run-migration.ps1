@@ -221,10 +221,43 @@ Write-MigrationLog "Retrieving VMware VLANs for $($vmNames.Count) VMs..." -LogFi
 Import-RequiredModule -Name "VMware.VimAutomation.Core" -LogFile $LogFile -UseWindowsPowerShellFallback
 Connect-VCenter -Server $Config.VCenter.Server -LogFile $LogFile
 
+function Get-VMwareClusterNameForVm {
+    param(
+        [Parameter(Mandatory = $true)]
+        $VMObject
+    )
+
+    try {
+        $cluster = VMware.VimAutomation.Core\Get-Cluster -VM $VMObject -ErrorAction Stop | Select-Object -First 1
+        if ($cluster -and -not [string]::IsNullOrWhiteSpace([string]$cluster.Name)) {
+            return [string]$cluster.Name
+        }
+    } catch { }
+
+    $parent = $VMObject.VMHost.Parent
+    while ($parent) {
+        if ($parent.PSObject.Properties['Name'] -and -not [string]::IsNullOrWhiteSpace([string]$parent.Name)) {
+            if ([string]$parent.GetType().Name -match 'Cluster|ClusterImpl') {
+                return [string]$parent.Name
+            }
+        }
+
+        if ($parent.PSObject.Properties['Parent']) {
+            $parent = $parent.Parent
+        } else {
+            break
+        }
+    }
+
+    return $null
+}
+
 $vmVlans = @{}
 $vmAdapterVlans = @{}
 $vmOperatingSystems = @{}
 $vmRemarks = @{}
+$vmwareClusters = @{}
+$migrationTargets = @{}
 $distributedPortGroupCache = @{}
 $standardPortGroupCache = @{}
 
@@ -298,6 +331,10 @@ foreach ($vmName in $vmNames) {
     $adapterMappings = @()
     if ($VMObject) {
         $remark = [string]$VMObject.ExtensionData.Summary.Config.Annotation
+        $vmwareCluster = Get-VMwareClusterNameForVm -VMObject $VMObject
+        $vmwareClusters[$vmName] = $vmwareCluster
+        $migrationTargets[$vmName] = Resolve-MigrationTarget -Config $Config -VmwareClusterName $vmwareCluster -LogFile $LogFile
+        Write-MigrationLog "VMware cluster $vmName : $vmwareCluster" -LogFile $LogFile
         $networkAdapters = if ($networkAdaptersByVmName.ContainsKey($vmName)) {
             @($networkAdaptersByVmName[$vmName])
         } else {
@@ -337,6 +374,8 @@ foreach ($vmName in $vmNames) {
         }
     } else {
         $vlanId = "VM not found"
+        $vmwareClusters[$vmName] = $null
+        $migrationTargets[$vmName] = Resolve-MigrationTarget -Config $Config -VmwareClusterName $null -LogFile $LogFile
     }
 
     if ($adapterMappings.Count -gt 0) {
@@ -400,6 +439,11 @@ if ($runInstantRecoveryStartOutsideWorkers) {
             -AdapterVlanMapJson $adapterVlanMapJson `
             -OperatingSystem $vmOperatingSystems[$vmName] `
             -Remark $vmRemarks[$vmName] `
+            -VmwareCluster $vmwareClusters[$vmName] `
+            -HyperVHost $migrationTargets[$vmName].HyperVHost `
+            -HyperVHost2 $migrationTargets[$vmName].HyperVHost2 `
+            -HyperVCluster $migrationTargets[$vmName].HyperVCluster `
+            -ClusterStorage $migrationTargets[$vmName].ClusterStorage `
             -SkipInstantRecoveryFinalization `
             -SkipNetworkAndPostConfig `
             -LogFile $vmLogFile
@@ -462,6 +506,11 @@ foreach ($vmName in $vmNames) {
         AdapterVlanMapJson     = $adapterVlanMapJson
         OperatingSystem        = $vmOperatingSystems[$vmName]
         Remark                 = $vmRemarks[$vmName]
+        VmwareCluster          = $vmwareClusters[$vmName]
+        HyperVHost             = $migrationTargets[$vmName].HyperVHost
+        HyperVHost2            = $migrationTargets[$vmName].HyperVHost2
+        HyperVCluster          = $migrationTargets[$vmName].HyperVCluster
+        ClusterStorage         = $migrationTargets[$vmName].ClusterStorage
         ForceNetworkConfigOnly = $workerForceNetworkOnly
         SkipInstantRecoveryStart = $workerSkipInstantRecoveryStart
         VmLogFile              = $vmLogFile

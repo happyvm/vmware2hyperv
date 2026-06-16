@@ -127,3 +127,47 @@ Describe 'Get-VMUptime' {
         $result[0].Uptime | Should -Be 'Unavailable'
     }
 }
+
+Describe 'Resolve-MigrationTarget' {
+    BeforeAll {
+        $testConfig = @{
+            HyperV = @{
+                Host1          = 'default-hv01.domain'
+                Host2          = 'default-hv02.domain'
+                Cluster        = 'DefaultHyperVCluster'
+                ClusterStorage = 'C:\ClusterStorage\DefaultVolume'
+            }
+            MigrationMappings = @{
+                ClusterMappings = @(
+                    @{
+                        VMwareCluster  = 'VmwareClusterA'
+                        HyperVCluster  = 'HyperVClusterA'
+                        Host1          = 'hv-a01.domain'
+                        Host2          = 'hv-a02.domain'
+                        ClusterStorage = 'C:\ClusterStorage\VolumeA'
+                    }
+                )
+            }
+        }
+    }
+
+    It 'returns the mapped Hyper-V target for a VMware cluster' {
+        $target = Resolve-MigrationTarget -Config $testConfig -VmwareClusterName 'vmwareclustera'
+
+        $target.MappingMatched | Should -BeTrue
+        $target.HyperVHost | Should -Be 'hv-a01.domain'
+        $target.HyperVHost2 | Should -Be 'hv-a02.domain'
+        $target.HyperVCluster | Should -Be 'HyperVClusterA'
+        $target.ClusterStorage | Should -Be 'C:\ClusterStorage\VolumeA'
+    }
+
+    It 'falls back to the default HyperV block when no mapping matches' {
+        $target = Resolve-MigrationTarget -Config $testConfig -VmwareClusterName 'UnknownCluster'
+
+        $target.MappingMatched | Should -BeFalse
+        $target.HyperVHost | Should -Be 'default-hv01.domain'
+        $target.HyperVHost2 | Should -Be 'default-hv02.domain'
+        $target.HyperVCluster | Should -Be 'DefaultHyperVCluster'
+        $target.ClusterStorage | Should -Be 'C:\ClusterStorage\DefaultVolume'
+    }
+}
