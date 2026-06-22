@@ -171,3 +171,41 @@ Describe 'Resolve-MigrationTarget' {
         $target.ClusterStorage | Should -Be 'C:\ClusterStorage\DefaultVolume'
     }
 }
+
+Describe 'Connect-VCenter credential fallback' {
+    BeforeEach {
+        $script:VCenterCredentialFallback = $null
+        $script:ConnectVIServerCalls = @()
+        $script:GetCredentialCalls = 0
+
+        Mock -CommandName Import-RequiredModule -MockWith { }
+        Mock -CommandName Get-VCenterPowerCLIConfiguration -MockWith { [PSCustomObject]@{ DefaultVIServerMode = 'Multiple' } }
+        Mock -CommandName Invoke-VCenterVIServerConnection -MockWith {
+            param($Server, $Credential)
+
+            $script:ConnectVIServerCalls += [PSCustomObject]@{
+                Server        = $Server
+                HasCredential = $null -ne $Credential
+            }
+
+            if (-not $Credential) {
+                throw 'SSPI pass-through refused'
+            }
+
+            [PSCustomObject]@{ Name = $Server }
+        }
+        Mock -CommandName Request-VCenterFallbackCredential -MockWith {
+            $script:GetCredentialCalls++
+            [pscredential]::new('domain\migration', (ConvertTo-SecureString 'secret' -AsPlainText -Force))
+        }
+    }
+
+    It 'prompts only once and reuses the fallback credential for subsequent vCenter connections' {
+        Connect-VCenter -Server 'vcenter-a.domain.local'
+        Connect-VCenter -Server 'vcenter-b.domain.local'
+
+        $script:GetCredentialCalls | Should -Be 1
+        @($script:ConnectVIServerCalls | Where-Object HasCredential) | Should -HaveCount 2
+        @($script:ConnectVIServerCalls | Where-Object { -not $_.HasCredential }) | Should -HaveCount 2
+    }
+}
