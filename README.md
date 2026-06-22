@@ -63,6 +63,33 @@ Update at least:
   - `LogDir`: logs output directory
 
 
+### Configure multi-cluster target mapping
+
+You can migrate VMs from multiple VMware clusters to multiple Hyper-V clusters by configuring `MigrationMappings.ClusterMappings` in `powershell-migration/config.psd1`. Each mapping is selected from the source VMware cluster discovered for the VM.
+
+```powershell
+MigrationMappings = @{
+    ClusterMappings = @(
+        @{
+            VMwareCluster  = "VmwareClusterA"
+            HyperVCluster  = "HypClusterNameA"
+            Host1          = "hyperhost-a1.domain"
+            Host2          = "hyperhost-a2.domain"
+            ClusterStorage = "C:\ClusterStorage\Volume2"
+        },
+        @{
+            VMwareCluster  = "VmwareClusterB"
+            HyperVCluster  = "HypClusterNameB"
+            Host1          = "hyperhost-b1.domain"
+            Host2          = "hyperhost-b2.domain"
+            ClusterStorage = "C:\ClusterStorage\Volume3"
+        }
+    )
+}
+```
+
+If no mapping matches, the scripts keep using the default `HyperV` block, so existing single-cluster configurations remain compatible.
+
 ### Configure SCVMM operating systems
 
 If your batch CSV contains an `OperatingSystem` column, or your CMDB extract contains `OperatingSystem` / `Operating system` alongside `VMName` / `Name`, `step3-MigrateVM.ps1` can normalize that value, map it through `SCVMM.OperatingSystemMap`, and apply the matching SCVMM operating system with `Set-SCVirtualMachine`.

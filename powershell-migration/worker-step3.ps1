@@ -128,6 +128,11 @@ while ($true) {
             -AdapterVlanMapJson ([string]$task.AdapterVlanMapJson) `
             -OperatingSystem ([string]$task.OperatingSystem) `
             -Remark ([string]$task.Remark) `
+            -VmwareCluster ([string]$task.VmwareCluster) `
+            -HyperVHost ([string]$task.HyperVHost) `
+            -HyperVHost2 ([string]$task.HyperVHost2) `
+            -HyperVCluster ([string]$task.HyperVCluster) `
+            -ClusterStorage ([string]$task.ClusterStorage) `
             -SkipInstantRecoveryStart:$([bool]$task.SkipInstantRecoveryStart) `
             -ForceNetworkConfigOnly:$([bool]$task.ForceNetworkConfigOnly) `
             -LogFile ([string]$task.VmLogFile)

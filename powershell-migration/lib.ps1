@@ -248,6 +248,60 @@ function Ensure-RsatHyperVInstalled {
     Write-MigrationLog "Hyper-V RSAT/module availability validated and cached for current worker session." -Level SUCCESS -LogFile $LogFile
 }
 
+
+# ---------------------------------------------------------------------------
+# Resolve-MigrationTarget : resolves Hyper-V target settings from VMware cluster mapping
+# ---------------------------------------------------------------------------
+function Resolve-MigrationTarget {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Config,
+
+        [AllowNull()]
+        [string]$VmwareClusterName,
+
+        [string]$LogFile
+    )
+
+    $target = [ordered]@{
+        VMwareCluster  = $VmwareClusterName
+        HyperVHost     = [string]$Config.HyperV.Host1
+        HyperVHost2    = [string]$Config.HyperV.Host2
+        HyperVCluster  = [string]$Config.HyperV.Cluster
+        ClusterStorage = [string]$Config.HyperV.ClusterStorage
+        MappingMatched = $false
+    }
+
+    $clusterMappings = @()
+    if ($Config.ContainsKey('MigrationMappings') -and $Config.MigrationMappings -and $Config.MigrationMappings.ContainsKey('ClusterMappings') -and $Config.MigrationMappings.ClusterMappings) {
+        $clusterMappings = @($Config.MigrationMappings.ClusterMappings)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($VmwareClusterName) -and $clusterMappings.Count -gt 0) {
+        $mapping = $clusterMappings |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.VMwareCluster) -and [string]::Equals([string]$_.VMwareCluster, $VmwareClusterName, [System.StringComparison]::OrdinalIgnoreCase) } |
+            Select-Object -First 1
+
+        if ($mapping) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$mapping.Host1)) { $target.HyperVHost = [string]$mapping.Host1 }
+            if (-not [string]::IsNullOrWhiteSpace([string]$mapping.Host2)) { $target.HyperVHost2 = [string]$mapping.Host2 }
+            if (-not [string]::IsNullOrWhiteSpace([string]$mapping.HyperVCluster)) { $target.HyperVCluster = [string]$mapping.HyperVCluster }
+            if (-not [string]::IsNullOrWhiteSpace([string]$mapping.ClusterStorage)) { $target.ClusterStorage = [string]$mapping.ClusterStorage }
+            $target.MappingMatched = $true
+        }
+    }
+
+    if ($target.MappingMatched) {
+        Write-MigrationLog "Resolved target mapping for VMware cluster '$VmwareClusterName': Hyper-V cluster '$($target.HyperVCluster)', storage '$($target.ClusterStorage)', hosts '$($target.HyperVHost)'/'$($target.HyperVHost2)'." -LogFile $LogFile
+    } elseif (-not [string]::IsNullOrWhiteSpace($VmwareClusterName)) {
+        Write-MigrationLog "No target mapping found for VMware cluster '$VmwareClusterName'; using default Hyper-V target '$($target.HyperVCluster)' and storage '$($target.ClusterStorage)'." -Level WARNING -LogFile $LogFile
+    } else {
+        Write-MigrationLog "VMware cluster is unknown; using default Hyper-V target '$($target.HyperVCluster)' and storage '$($target.ClusterStorage)'." -Level WARNING -LogFile $LogFile
+    }
+
+    return [pscustomobject]$target
+}
+
 # ---------------------------------------------------------------------------
 # ConvertTo-HtmlEncoded : HTML-encode a string to prevent injection in mail templates
 # ---------------------------------------------------------------------------

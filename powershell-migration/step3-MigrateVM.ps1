@@ -16,6 +16,7 @@ param (
     [string]$HyperVHost2,
     [string]$HyperVCluster,
     [string]$ClusterStorage,
+    [string]$VmwareCluster,
     [string]$BackupTag,
     [int]$WaitingTimeoutSeconds = 1800,
     [int]$WaitingPollIntervalSeconds = 15,
@@ -75,12 +76,14 @@ if (-not (Get-Command -Name Resolve-OperatingSystemMapping -ErrorAction Silently
 $Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
 
 if (-not $SCVMMServer)   { $SCVMMServer   = $Config.SCVMM.Server }
-if (-not $HyperVHost)    { $HyperVHost    = $Config.HyperV.Host1 }
-if (-not $HyperVHost2)   { $HyperVHost2   = $Config.HyperV.Host2 }
-if (-not $HyperVCluster) { $HyperVCluster = $Config.HyperV.Cluster }
-if (-not $ClusterStorage){ $ClusterStorage = $Config.HyperV.ClusterStorage }
-if (-not $BackupTag)     { $BackupTag     = $Config.Tags.BackupTag }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step3-migrate-$VMName-$(Get-Date -Format 'yyyyMMdd').log" }
+
+$resolvedMigrationTarget = Resolve-MigrationTarget -Config $Config -VmwareClusterName $VmwareCluster -LogFile $LogFile
+if (-not $HyperVHost)    { $HyperVHost    = $resolvedMigrationTarget.HyperVHost }
+if (-not $HyperVHost2)   { $HyperVHost2   = $resolvedMigrationTarget.HyperVHost2 }
+if (-not $HyperVCluster) { $HyperVCluster = $resolvedMigrationTarget.HyperVCluster }
+if (-not $ClusterStorage){ $ClusterStorage = $resolvedMigrationTarget.ClusterStorage }
+if (-not $BackupTag)     { $BackupTag     = $Config.Tags.BackupTag }
 
 if ($ForceNetworkConfigOnly) {
     $SkipInstantRecoveryStart = $true
