@@ -64,6 +64,41 @@ function Assert-PathPresent {
 # ---------------------------------------------------------------------------
 # Connect-VCenter : vCenter connection using Multiple mode
 # ---------------------------------------------------------------------------
+$script:VCenterCredentialFallback = $null
+
+function Get-VCenterPowerCLIConfiguration {
+    return Get-PowerCLIConfiguration
+}
+
+function Set-VCenterPowerCLIConfigurationMultipleMode {
+    Set-PowerCLIConfiguration -DefaultVIServerMode Multiple -Confirm:$false | Out-Null
+}
+
+function Invoke-VCenterVIServerConnection {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Server,
+
+        [System.Management.Automation.PSCredential]$Credential
+    )
+
+    if ($Credential) {
+        Connect-VIServer -Server $Server -Credential $Credential -ErrorAction Stop | Out-Null
+    } else {
+        Connect-VIServer -Server $Server -ErrorAction Stop | Out-Null
+    }
+}
+
+function Request-VCenterFallbackCredential {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Server
+    )
+
+    return Get-Credential -Message "Enter credentials for vCenter $Server"
+}
+
 function Connect-VCenter {
     param(
         [Parameter(Mandatory = $true)]
@@ -74,15 +109,33 @@ function Connect-VCenter {
 
     Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 
-    if ((Get-PowerCLIConfiguration).DefaultVIServerMode -ne "Multiple") {
-        Set-PowerCLIConfiguration -DefaultVIServerMode Multiple -Confirm:$false | Out-Null
+    if ((Get-VCenterPowerCLIConfiguration).DefaultVIServerMode -ne "Multiple") {
+        Set-VCenterPowerCLIConfigurationMultipleMode
     }
 
     try {
-        Connect-VIServer -Server $Server | Out-Null
-        Write-MigrationLog "Connected to vCenter: $Server" -Level SUCCESS -LogFile $LogFile
+        Invoke-VCenterVIServerConnection -Server $Server
+        Write-MigrationLog "Connected to vCenter using current Windows credentials: $Server" -Level SUCCESS -LogFile $LogFile
+        return
     } catch {
-        $message = "Failed to connect to vCenter $Server : $_"
+        Write-MigrationLog "Windows credential pass-through failed for vCenter $Server. Falling back to an explicit credential prompt." -Level WARNING -LogFile $LogFile
+    }
+
+    if (-not $script:VCenterCredentialFallback) {
+        $script:VCenterCredentialFallback = Request-VCenterFallbackCredential -Server $Server
+    }
+
+    if (-not $script:VCenterCredentialFallback) {
+        $message = "Failed to connect to vCenter $Server: no fallback credential was provided."
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+        throw $message
+    }
+
+    try {
+        Invoke-VCenterVIServerConnection -Server $Server -Credential $script:VCenterCredentialFallback
+        Write-MigrationLog "Connected to vCenter using fallback credentials: $Server" -Level SUCCESS -LogFile $LogFile
+    } catch {
+        $message = "Failed to connect to vCenter $Server with fallback credentials: $_"
         Write-MigrationLog $message -Level ERROR -LogFile $LogFile
         throw $message
     }
