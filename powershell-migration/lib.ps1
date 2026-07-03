@@ -1,4 +1,4 @@
-﻿# lib.ps1 — Common functions for VMware → Hyper-V migration scripts
+# lib.ps1 — Common functions for VMware → Hyper-V migration scripts
 # Load: . "$PSScriptRoot\lib.ps1"
 
 # ---------------------------------------------------------------------------
@@ -152,6 +152,31 @@ function Disconnect-VCenter {
 }
 
 # ---------------------------------------------------------------------------
+# Get-ModuleImportStrategies : ordered import fallbacks for the current engine
+# ---------------------------------------------------------------------------
+function Get-ModuleImportStrategies {
+    param(
+        [switch]$UseWindowsPowerShellFallback
+    )
+
+    $strategies = @("Standard")
+
+    if ($PSVersionTable.PSEdition -eq "Core") {
+        if ($UseWindowsPowerShellFallback -and $IsWindows) {
+            # Windows-only management modules such as VirtualMachineManager/Veeam can
+            # throw .NET type-initializer errors when loaded directly in PowerShell 7.
+            # Prefer the Windows PowerShell compatibility session before trying
+            # SkipEditionCheck, which still loads the module into the pwsh process.
+            $strategies += "WindowsPowerShell"
+        }
+
+        $strategies += "SkipEditionCheck"
+    }
+
+    return $strategies
+}
+
+# ---------------------------------------------------------------------------
 # Import-RequiredModule : PowerShell 7-compatible module import
 # ---------------------------------------------------------------------------
 function Import-RequiredModule {
@@ -181,34 +206,31 @@ function Import-RequiredModule {
     function Import-ModuleCandidate {
         param([string]$CandidateName)
 
-        try {
-            Import-Module -Name $CandidateName -DisableNameChecking -ErrorAction Stop 3>$null
-            Write-MigrationLog "Module imported: $CandidateName" -LogFile $LogFile
-            return $true
-        } catch {
-            if ($PSVersionTable.PSEdition -eq "Core") {
-                try {
-                    Import-Module -Name $CandidateName -SkipEditionCheck -DisableNameChecking -ErrorAction Stop 3>$null
-                    Write-MigrationLog "Module imported via SkipEditionCheck fallback: $CandidateName" -Level WARNING -LogFile $LogFile
-                    return $true
-                } catch {
-                    if ($UseWindowsPowerShellFallback) {
-                        try {
-                            Import-Module -Name $CandidateName -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop 3>$null
-                            Write-MigrationLog "Module imported via Windows PowerShell compatibility mode: $CandidateName" -Level WARNING -LogFile $LogFile
-                            return $true
-                        } catch {
-                            Write-MigrationLog "Unable to import module $CandidateName (standard import, SkipEditionCheck, and Windows PowerShell compatibility mode failed): $_" -Level WARNING -LogFile $LogFile
-                        }
-                    } else {
-                        Write-MigrationLog "Unable to import module $CandidateName (standard import and SkipEditionCheck failed): $_" -Level WARNING -LogFile $LogFile
+        $importErrors = @()
+        foreach ($strategy in (Get-ModuleImportStrategies -UseWindowsPowerShellFallback:$UseWindowsPowerShellFallback)) {
+            try {
+                switch ($strategy) {
+                    "Standard" {
+                        Import-Module -Name $CandidateName -DisableNameChecking -ErrorAction Stop 3>$null
+                        Write-MigrationLog "Module imported: $CandidateName" -LogFile $LogFile
+                    }
+                    "WindowsPowerShell" {
+                        Import-Module -Name $CandidateName -UseWindowsPowerShell -DisableNameChecking -ErrorAction Stop 3>$null
+                        Write-MigrationLog "Module imported via Windows PowerShell compatibility mode: $CandidateName" -Level WARNING -LogFile $LogFile
+                    }
+                    "SkipEditionCheck" {
+                        Import-Module -Name $CandidateName -SkipEditionCheck -DisableNameChecking -ErrorAction Stop 3>$null
+                        Write-MigrationLog "Module imported via SkipEditionCheck fallback: $CandidateName" -Level WARNING -LogFile $LogFile
                     }
                 }
-            } else {
-                Write-MigrationLog "Unable to import module $CandidateName : $_" -Level WARNING -LogFile $LogFile
+
+                return $true
+            } catch {
+                $importErrors += "${strategy}: $_"
             }
         }
 
+        Write-MigrationLog "Unable to import module $CandidateName. Attempts failed: $($importErrors -join '; ')" -Level WARNING -LogFile $LogFile
         return $false
     }
 

@@ -35,6 +35,7 @@ If `step3` already restored the VM but failed during SCVMM network/OS/post-confi
 
 > Notes:
 > - If `VMware.PowerCLI`/`VCF.PowerCLI` is missing, scripts now attempt automatic installation in `CurrentUser` scope before failing.
+> - `VirtualMachineManager`, `Veeam.Backup.PowerShell`, and other Windows-only management modules are imported through PowerShell 7 Windows PowerShell compatibility mode when requested, before falling back to `-SkipEditionCheck`. This avoids known type-initializer failures from loading those modules directly into the PowerShell 7 process.
 > - During migration validation, scripts try to install/enable RSAT Hyper-V management tooling automatically when `Move-VM` is unavailable.
 
 ### Bootstrap PowerShell on Ubuntu
