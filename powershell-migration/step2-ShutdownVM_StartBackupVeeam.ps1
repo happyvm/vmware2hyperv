@@ -33,7 +33,25 @@ Write-MigrationLog "Starting step2 - VM shutdown and Veeam backup for tag $Tag" 
 Assert-PathPresent -Path $CsvFile -Label "batch CSV" -LogFile $LogFile
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
-$vmList = Import-Csv -Path $CsvFile -Delimiter ";"
+$csvRows = Import-Csv -Path $CsvFile -Delimiter ";"
+$vmList = @($csvRows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.VMName) })
+
+# Only shut down VMs belonging to this batch: filter on the CSV Tag column when it is populated.
+# CSVs without a Tag column keep the previous behavior (all rows).
+$rowsWithTag = @($vmList | Where-Object { $_.PSObject.Properties['Tag'] -and -not [string]::IsNullOrWhiteSpace($_.Tag) })
+if ($rowsWithTag) {
+    $taggedRows = @($rowsWithTag | Where-Object { $_.Tag.Trim() -eq $Tag })
+    if (-not $taggedRows) {
+        Write-MigrationLog "No CSV row carries tag '$Tag'; refusing to shut down VMs from other batches." -Level ERROR -LogFile $LogFile
+        exit 1
+    }
+
+    $excludedCount = $vmList.Count - $taggedRows.Count
+    if ($excludedCount -gt 0) {
+        Write-MigrationLog "$excludedCount CSV row(s) excluded from step2: tag differs from '$Tag' or tag missing." -Level WARNING -LogFile $LogFile
+    }
+    $vmList = $taggedRows
+}
 
 function Disconnect-VmNetworkAdapters {
     param(
@@ -97,19 +115,30 @@ foreach ($vmEntry in $vmList) {
     }
 
     Write-MigrationLog "Graceful shutdown requested for VM: $vmName" -LogFile $LogFile
-    Shutdown-VMGuest -VM $vmObj -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    VMware.VimAutomation.Core\Stop-VMGuest -VM $vmObj -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
 }
 
 if ($vmStates.Count -gt 0) {
+    # Escape hatch: after the graceful timeout plus this grace period following forced
+    # power-off, abort instead of looping forever on a VM that will not shut down.
+    $forcedStopGraceSeconds = 300
+
     do {
         $allPoweredOff = $true
+        $elapsedSeconds = [int]((Get-Date) - $startTime).TotalSeconds
+        $pendingNames = @($vmStates.Keys | Where-Object { -not $vmStates[$_].PoweredOffLogged })
 
-        foreach ($vmName in $vmStates.Keys) {
-            if ($vmStates[$vmName].PoweredOffLogged) {
-                continue
+        $pendingVmsByName = @{}
+        if ($pendingNames) {
+            foreach ($pendingVm in @(VMware.VimAutomation.Core\Get-VM -Name $pendingNames -ErrorAction SilentlyContinue)) {
+                if (-not $pendingVmsByName.ContainsKey($pendingVm.Name)) {
+                    $pendingVmsByName[$pendingVm.Name] = $pendingVm
+                }
             }
+        }
 
-            $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
+        foreach ($vmName in $pendingNames) {
+            $vmObj = $pendingVmsByName[$vmName]
             if (-not $vmObj) {
                 Write-MigrationLog "VM not found during shutdown follow-up: $vmName" -Level WARNING -LogFile $LogFile
                 $vmStates[$vmName].PoweredOffLogged = $true
@@ -127,7 +156,6 @@ if ($vmStates.Count -gt 0) {
             }
 
             $allPoweredOff = $false
-            $elapsedSeconds = [int]((Get-Date) - $startTime).TotalSeconds
 
             if ($elapsedSeconds -ge $timeoutSeconds -and -not $vmStates[$vmName].TimeoutHandled) {
                 Write-MigrationLog "VM $vmName not powered off after ${timeoutSeconds}s — forced power-off." -Level WARNING -LogFile $LogFile
@@ -137,6 +165,12 @@ if ($vmStates.Count -gt 0) {
         }
 
         if (-not $allPoweredOff) {
+            if ($elapsedSeconds -ge ($timeoutSeconds + $forcedStopGraceSeconds)) {
+                $stuckVms = @($vmStates.Keys | Where-Object { -not $vmStates[$_].PoweredOffLogged }) -join ', '
+                Write-MigrationLog "Still powered on ${forcedStopGraceSeconds}s after forced power-off: $stuckVms. Aborting step2 before starting the backup." -Level ERROR -LogFile $LogFile
+                exit 1
+            }
+
             Start-Sleep -Seconds $pollIntervalSeconds
         }
     } while (-not $allPoweredOff)

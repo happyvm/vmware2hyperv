@@ -393,6 +393,8 @@ function Send-HtmlMail {
         [string]$LogFile
     )
 
+    $mailMessage = $null
+    $smtpClient = $null
     try {
         $mailMessage = [System.Net.Mail.MailMessage]::new()
         $mailMessage.From = [System.Net.Mail.MailAddress]::new($From)
@@ -406,12 +408,12 @@ function Send-HtmlMail {
         $smtpClient = [System.Net.Mail.SmtpClient]::new($SmtpServer, $Port)
         $smtpClient.Send($mailMessage)
 
-        $mailMessage.Dispose()
-        $smtpClient.Dispose()
-
         Write-MigrationLog "Email sent to: $($To -join ', ')" -Level SUCCESS -LogFile $LogFile
     } catch {
         Write-MigrationLog "Failed to send email : $_" -Level ERROR -LogFile $LogFile
+    } finally {
+        if ($mailMessage) { $mailMessage.Dispose() }
+        if ($smtpClient) { $smtpClient.Dispose() }
     }
 }
 
