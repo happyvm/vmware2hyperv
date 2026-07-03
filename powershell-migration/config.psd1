@@ -149,7 +149,8 @@
     }
 
     Orchestrator = @{
-        Step3MaxParallelJobs    = 5  # Number of persistent step3 workers
-        Step3JobStartupDelaySec = 2  # Delay between worker starts to smooth SCVMM/Veeam load spikes
+        Step3MaxParallelJobs         = 5  # Number of persistent step3 workers
+        Step3JobStartupDelaySec      = 2  # Delay between worker starts to smooth SCVMM/Veeam load spikes
+        InstantRecoveryStartDelaySec = 2  # Delay between two bulk Instant Recovery starts (step3 phase 1)
     }
 }

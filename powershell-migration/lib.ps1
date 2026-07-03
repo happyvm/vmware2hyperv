@@ -491,6 +491,27 @@ function Invoke-SCVMMCommand {
 }
 
 # ---------------------------------------------------------------------------
+# Invoke-VeeamCommand : proxy for Veeam cmdlets (routes through WinPS compat session if present)
+# ---------------------------------------------------------------------------
+function Invoke-VeeamCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+
+        [object[]]$ArgumentList = @()
+    )
+
+    $compatSession = Get-PSSession -Name 'WinPSCompatSession' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
+    if ($compatSession) {
+        return Invoke-Command -Session $compatSession -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+    }
+
+    return & $ScriptBlock @ArgumentList
+}
+
+# ---------------------------------------------------------------------------
 # Get-FirstPropertyValue : return the first non-empty value from a list of candidate property names
 # ---------------------------------------------------------------------------
 function Get-FirstPropertyValue {
