@@ -53,25 +53,6 @@ if (-not $SkipInstantRecoveryStart -or -not $SkipInstantRecoveryFinalization) {
     Write-MigrationLog "[$VMName] Instant Recovery start/finalization disabled: skipping Veeam module import." -LogFile $LogFile
 }
 
-function Invoke-VeeamCommand {
-    param(
-        [Parameter(Mandatory = $true)]
-        [scriptblock]$ScriptBlock,
-
-        [object[]]$ArgumentList = @()
-    )
-
-    $compatSession = Get-PSSession -Name 'WinPSCompatSession' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-
-    if ($compatSession) {
-        return Invoke-Command -Session $compatSession -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
-    }
-
-    return & $ScriptBlock @ArgumentList
-}
-
-
 function Start-SCVMMHostMigration {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(

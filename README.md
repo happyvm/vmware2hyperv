@@ -13,7 +13,9 @@ The migration is split into 3 steps:
 
 1. **step1**: tag VMware resources and create the Veeam backup job.
 2. **step2**: stop source VMs, trigger backup, and send pre-migration email.
-3. **step3**: perform VM migration to Hyper-V (parallel execution per VM).
+3. **step3**: perform VM migration to Hyper-V in two phases:
+   - **phase 1** — `step3-StartInstantRecovery.ps1` starts the Veeam Instant Recovery of **all** VMs in bulk (asynchronous `-RunAsync` starts when supported) and follows every mount session from a single console until each reaches `WaitingForUserAction`;
+   - **phase 2** — persistent workers run the Instant Recovery commit and the SCVMM network/OS/post-configuration in parallel per VM.
 
 The orchestrator can start from any step (`step1`, `step2`, `step3`) to resume after interruption.
 If `step3` already restored the VM but failed during SCVMM network/OS/post-configuration, you can replay only that tail of `step3` with `-ForceNetworkConfigOnly`.
@@ -173,6 +175,16 @@ pwsh ./powershell-migration/step0-uptime_extract.ps1 -Tag HypMig-lot-118 -Output
 ```powershell
 pwsh ./powershell-migration/stepx-premigration_mail.ps1 -tagName HypMig-lot-118 -recipientGroup internal
 ```
+
+### Bulk Instant Recovery start (step3 phase 1 only)
+
+Start the Instant Recovery of several VMs at once and monitor every mount from one console (no extra PowerShell windows). The tasks file is a JSON array of `{ VMName, HyperVHost, ClusterStorage }` objects — `run-migration.ps1` generates one automatically in `Paths.LogDir` on each run.
+
+```powershell
+pwsh ./powershell-migration/step3-StartInstantRecovery.ps1 -BackupJobName Backup-HypMig-lot-118 -TasksFile D:\Scripts\Logs\step3-ir-tasks-HypMig-lot-118-20260703-090000.json
+```
+
+The delay between two starts is tunable with `-StartDelaySeconds` (or `Orchestrator.InstantRecoveryStartDelaySec` in config) to smooth the load on Veeam and the mount hosts. The script exits non-zero and lists the affected VMs if any mount fails or times out.
 
 
 ### Post-migration companion checks (SCVMM)

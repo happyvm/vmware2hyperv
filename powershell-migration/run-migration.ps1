@@ -452,28 +452,30 @@ switch ($Step3RecoveryMode) {
 # ── Instant Recovery outside workers (step3) ─────────────────────────────────
 
 if ($runInstantRecoveryStartOutsideWorkers) {
-    Write-MigrationLog "Step3 phase 1/2: launching Instant Recovery start outside workers (commit/bascule remains in workers)." -LogFile $LogFile
+    Write-MigrationLog "Step3 phase 1/2: bulk Instant Recovery start (all mounts launched from a single console, unified progress monitoring)." -LogFile $LogFile
 
-    foreach ($vmName in $vmNames) {
-        $vmLogFile = "$($Config.Paths.LogDir)\migration-$Tag-$vmName-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
-        $adapterVlanMapJson = ConvertTo-Json -InputObject $vmAdapterVlans[$vmName] -Depth 4 -Compress
+    $irTasks = @(foreach ($vmName in $vmNames) {
+        [pscustomobject]@{
+            VMName         = $vmName
+            HyperVHost     = $migrationTargets[$vmName].HyperVHost
+            ClusterStorage = $migrationTargets[$vmName].ClusterStorage
+        }
+    })
 
-        & "$PSScriptRoot\step3-MigrateVM.ps1" `
-            -BackupJobName "Backup-$Tag" `
-            -VMName $vmName `
-            -VlanId $vmVlans[$vmName] `
-            -AdapterVlanMapJson $adapterVlanMapJson `
-            -OperatingSystem $vmOperatingSystems[$vmName] `
-            -Remark $vmRemarks[$vmName] `
-            -VmwareCluster $vmwareClusters[$vmName] `
-            -HyperVHost $migrationTargets[$vmName].HyperVHost `
-            -HyperVHost2 $migrationTargets[$vmName].HyperVHost2 `
-            -HyperVCluster $migrationTargets[$vmName].HyperVCluster `
-            -ClusterStorage $migrationTargets[$vmName].ClusterStorage `
-            -SkipInstantRecoveryFinalization `
-            -SkipNetworkAndPostConfig `
-            -LogFile $vmLogFile
+    $irTasksFile = Join-Path $Config.Paths.LogDir ("step3-ir-tasks-{0}-{1}.json" -f (Convert-ToSafeFileName -Value $Tag), (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    ConvertTo-Json -InputObject $irTasks -Depth 4 | Set-Content -Path $irTasksFile -Encoding utf8
+
+    $irStartDelaySeconds = if ($Config.Orchestrator.ContainsKey('InstantRecoveryStartDelaySec') -and [int]$Config.Orchestrator.InstantRecoveryStartDelaySec -ge 0) {
+        [int]$Config.Orchestrator.InstantRecoveryStartDelaySec
+    } else {
+        2
     }
+
+    & "$PSScriptRoot\step3-StartInstantRecovery.ps1" `
+        -BackupJobName "Backup-$Tag" `
+        -TasksFile $irTasksFile `
+        -StartDelaySeconds $irStartDelaySeconds `
+        -LogFile $LogFile
 }
 
 # ── Worker-based commit+bascule and network/post-configuration execution (step3) ─────────
