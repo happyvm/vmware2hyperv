@@ -1,4 +1,4 @@
-# lib.ps1 — Common functions for VMware → Hyper-V migration scripts
+﻿# lib.ps1 — Common functions for VMware → Hyper-V migration scripts
 # Load: . "$PSScriptRoot\lib.ps1"
 
 # ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ function Connect-VCenter {
     }
 
     if (-not $script:VCenterCredentialFallback) {
-        $message = "Failed to connect to vCenter $Server: no fallback credential was provided."
+        $message = "Failed to connect to vCenter ${Server}: no fallback credential was provided."
         Write-MigrationLog $message -Level ERROR -LogFile $LogFile
         throw $message
     }
@@ -435,11 +435,10 @@ function Invoke-VMwareGetVM {
 function Get-VMUptime {
     param([string]$LogFile)
 
-    $vms = Invoke-VMwareGetVM | Where-Object { $_.PowerState -eq "PoweredOn" }
+    $vms = @(Invoke-VMwareGetVM | Where-Object { $_.PowerState -eq "PoweredOn" })
     Write-MigrationLog "Powered-on VMs: $($vms.Count)" -LogFile $LogFile
 
-    $results = @()
-    foreach ($vm in $vms) {
+    $results = foreach ($vm in $vms) {
         $guestInfo = $vm.ExtensionData.Guest
         $bootTime  = $null
 
@@ -456,7 +455,7 @@ function Get-VMUptime {
             "Unavailable"
         }
 
-        $results += [PSCustomObject]@{
+        [PSCustomObject]@{
             VMName   = $vm.Name
             OS       = $guestInfo.GuestFullName
             BootTime = $bootTime
@@ -464,7 +463,7 @@ function Get-VMUptime {
         }
     }
 
-    return $results
+    return @($results)
 }
 
 # ---------------------------------------------------------------------------

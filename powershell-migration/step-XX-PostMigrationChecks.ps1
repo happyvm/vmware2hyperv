@@ -1,4 +1,4 @@
-param (
+﻿param (
     [string]$ConfigFile,
     [string]$CsvFile,
     [string]$ExtractIpCsvFile,

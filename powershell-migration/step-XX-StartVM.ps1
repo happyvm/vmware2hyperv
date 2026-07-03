@@ -1,4 +1,4 @@
-param (
+﻿param (
     [string]$ConfigFile,
     [string]$CsvFile,
     [string]$Tag,
@@ -278,13 +278,13 @@ function Start-WinRmRemediationJob {
         $RetryDelaySeconds
     ) -ScriptBlock {
         param(
-            $ComputerName,
-            $JobLocalScriptPath,
-            $JobRemoteScriptPath,
-            $JobCredential,
-            $JobLogFile,
-            $JobMaxAttempts,
-            $JobRetryDelaySeconds
+            [string]$ComputerName,
+            [string]$JobLocalScriptPath,
+            [string]$JobRemoteScriptPath,
+            [PSCredential]$JobCredential,
+            [string]$JobLogFile,
+            [int]$JobMaxAttempts,
+            [int]$JobRetryDelaySeconds
         )
 
         function Write-JobLog {
@@ -516,7 +516,7 @@ function Show-PendingDashboard {
     )
 
     if ($Host.Name -notin @('ServerRemoteHost')) {
-        try { Clear-Host } catch {}
+        try { Clear-Host } catch { Write-Verbose "Clear-Host is not supported by the current host: $($_.Exception.Message)" }
     }
 
     Write-Information "Suivi lotissement - rafraîchissement $Iteration/$MaxIterations - éléments restants : $($pendingRows.Count)" -InformationAction Continue
