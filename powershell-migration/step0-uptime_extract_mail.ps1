@@ -1,4 +1,4 @@
-param (
+﻿param (
     [string]$VCenterServer,
     [string]$SMTPServer,
     [string]$MailFrom,

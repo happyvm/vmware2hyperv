@@ -1,4 +1,4 @@
-param (
+﻿param (
     [Parameter(Mandatory = $true)]
     [string]$tagName,             # Batch tag (e.g. HypMig-lot-118)
 
@@ -62,7 +62,12 @@ if ($null -eq $tag) {
     exit 1
 }
 
-$vms = VMware.VimAutomation.Core\Get-VM | Where-Object { Get-TagAssignment -Entity $_ | Where-Object { $_.Tag -eq $tag } }
+$taggedVmIds = @(
+    Get-TagAssignment -Tag $tag -ErrorAction SilentlyContinue |
+        Where-Object { $_.Entity -and $_.Entity.GetType().Name -eq 'VirtualMachine' } |
+        ForEach-Object { $_.Entity.Id }
+)
+$vms = if ($taggedVmIds) { @(VMware.VimAutomation.Core\Get-VM -Id $taggedVmIds) } else { @() }
 Write-MigrationLog "VMs found with tag '$tagName' : $($vms.Count)" -LogFile $LogFile
 
 if ($vms.Count -eq 0) {

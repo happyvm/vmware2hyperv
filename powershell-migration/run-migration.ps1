@@ -1,4 +1,4 @@
-# run-migration.ps1 — VMware → Hyper-V migration orchestrator
+﻿# run-migration.ps1 — VMware → Hyper-V migration orchestrator
 #
 # Usage:
 #   .\run-migration.ps1 -Tag HypMig-lot-118
@@ -154,7 +154,9 @@ function Resolve-AdapterVlanId {
                     return [string]$rawId
                 }
             }
-        } catch { }
+        } catch {
+            Write-Verbose "DVS VLAN spec unavailable for port group '$networkName': $($_.Exception.Message)"
+        }
 
         if ([string]$distributedPortGroup.VlanConfiguration -match '\d+') {
             return [string]$matches[0]
@@ -172,7 +174,9 @@ function Resolve-AdapterVlanId {
     }
 
     $backing = $null
-    try { $backing = $Adapter.ExtensionData.Backing } catch { }
+    try { $backing = $Adapter.ExtensionData.Backing } catch {
+        Write-Verbose "Adapter backing data unavailable: $($_.Exception.Message)"
+    }
     if ($backing -and $backing.PSObject.Properties['Port'] -and $backing.Port -and $backing.Port.PortgroupKey) {
         $portGroupView = Get-View -Id $backing.Port.PortgroupKey -ErrorAction SilentlyContinue
         if ($portGroupView -and $portGroupView.Config) {
@@ -184,7 +188,9 @@ function Resolve-AdapterVlanId {
                         return [string]$rawId
                     }
                 }
-            } catch { }
+            } catch {
+                Write-Verbose "Port group view VLAN spec unavailable: $($_.Exception.Message)"
+            }
             if ([string]$portGroupView.Config.DefaultPortConfig.Vlan -match '\d+') {
                 return [string]$matches[0]
             }
@@ -232,7 +238,9 @@ function Get-VMwareClusterNameForVm {
         if ($cluster -and -not [string]::IsNullOrWhiteSpace([string]$cluster.Name)) {
             return [string]$cluster.Name
         }
-    } catch { }
+    } catch {
+        Write-Verbose "Get-Cluster lookup failed for VM '$($VMObject.Name)'; falling back to parent traversal: $($_.Exception.Message)"
+    }
 
     $parent = $VMObject.VMHost.Parent
     while ($parent) {

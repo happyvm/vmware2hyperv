@@ -90,19 +90,20 @@ foreach ($entry in $csvData) {
         New-Tag -Name $tagName -Category $TagCategory
     }
 
-    $existingTags = Get-TagAssignment -Entity (VMware.VimAutomation.Core\Get-VM -Name $vmName) | Where-Object { $_.Tag.Category -eq $TagCategory }
-    foreach ($existingTag in $existingTags) {
-        Write-MigrationLog "Removing existing tag $($existingTag.Tag.Name) from $vmName" -Level WARNING -LogFile $LogFile
-        Remove-TagAssignment -TagAssignment $existingTag -Confirm:$false
+    $vm = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    if (-not $vm) {
+        Write-MigrationLog "VM not found: $vmName" -Level WARNING -LogFile $LogFile
+        continue
     }
 
-    $vm = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
-    if ($vm) {
-        Write-MigrationLog "Adding tag $tagName to $vmName" -LogFile $LogFile
-        New-TagAssignment -Tag $tagName -Entity $vm
-    } else {
-        Write-MigrationLog "VM not found: $vmName" -Level WARNING -LogFile $LogFile
+    $existingAssignments = Get-TagAssignment -Entity $vm | Where-Object { $_.Tag.Category -eq $TagCategory }
+    foreach ($existingAssignment in $existingAssignments) {
+        Write-MigrationLog "Removing existing tag $($existingAssignment.Tag.Name) from $vmName" -Level WARNING -LogFile $LogFile
+        Remove-TagAssignment -TagAssignment $existingAssignment -Confirm:$false
     }
+
+    Write-MigrationLog "Adding tag $tagName to $vmName" -LogFile $LogFile
+    New-TagAssignment -Tag $tagName -Entity $vm
 }
 
 # Creating Veeam jobs by tag from CSV (configurable and deterministic)
