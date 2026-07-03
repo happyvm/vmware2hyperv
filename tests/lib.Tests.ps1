@@ -209,3 +209,19 @@ Describe 'Connect-VCenter credential fallback' {
         @($script:ConnectVIServerCalls | Where-Object { -not $_.HasCredential }) | Should -HaveCount 2
     }
 }
+
+Describe 'Get-ModuleImportStrategies' {
+    It 'uses standard import before fallbacks' {
+        $strategies = @(Get-ModuleImportStrategies -UseWindowsPowerShellFallback)
+        $strategies[0] | Should -Be 'Standard'
+    }
+
+    It 'keeps SkipEditionCheck as a PowerShell Core fallback' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Get-ModuleImportStrategies | Should -Contain 'SkipEditionCheck'
+    }
+
+    It 'prefers Windows PowerShell compatibility before SkipEditionCheck on Windows PowerShell Core' -Skip:(-not ($PSVersionTable.PSEdition -eq 'Core' -and $IsWindows)) {
+        $strategies = @(Get-ModuleImportStrategies -UseWindowsPowerShellFallback)
+        [array]::IndexOf($strategies, 'WindowsPowerShell') | Should -BeLessThan ([array]::IndexOf($strategies, 'SkipEditionCheck'))
+    }
+}
