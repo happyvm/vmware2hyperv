@@ -1,4 +1,4 @@
-# lib.ps1 — Common functions for VMware → Hyper-V migration scripts
+﻿# lib.ps1 — Common functions for VMware → Hyper-V migration scripts
 # Load: . "$PSScriptRoot\lib.ps1"
 
 # ---------------------------------------------------------------------------
@@ -154,26 +154,41 @@ function Disconnect-VCenter {
 # ---------------------------------------------------------------------------
 # Get-ModuleImportStrategies : ordered import fallbacks for the current engine
 # ---------------------------------------------------------------------------
+# Modules that import fine into the PowerShell 7 process (their manifest allows it)
+# but whose cmdlets then fail at runtime with .NET type-initializer errors such as
+# "Microsoft.VirtualManager.Utils.TraceProviders.IndigoLayer". For these, the
+# Windows PowerShell compatibility session must be tried FIRST: a successful
+# in-process import would otherwise mask the broken runtime until the first call.
+$script:WindowsOnlyManagementModules = @(
+    'VirtualMachineManager',
+    'Veeam.Backup.PowerShell',
+    'FailoverClusters'
+)
+
 function Get-ModuleImportStrategies {
     param(
-        [switch]$UseWindowsPowerShellFallback
+        [switch]$UseWindowsPowerShellFallback,
+
+        [string]$ModuleName
     )
 
-    $strategies = @("Standard")
-
-    if ($PSVersionTable.PSEdition -eq "Core") {
-        if ($UseWindowsPowerShellFallback -and $IsWindows) {
-            # Windows-only management modules such as VirtualMachineManager/Veeam can
-            # throw .NET type-initializer errors when loaded directly in PowerShell 7.
-            # Prefer the Windows PowerShell compatibility session before trying
-            # SkipEditionCheck, which still loads the module into the pwsh process.
-            $strategies += "WindowsPowerShell"
-        }
-
-        $strategies += "SkipEditionCheck"
+    if ($PSVersionTable.PSEdition -ne "Core") {
+        return @("Standard")
     }
 
-    return $strategies
+    if ($UseWindowsPowerShellFallback -and $IsWindows) {
+        if ($ModuleName -and $script:WindowsOnlyManagementModules -contains $ModuleName) {
+            return @("WindowsPowerShell", "Standard", "SkipEditionCheck")
+        }
+
+        # Windows-only management modules such as VirtualMachineManager/Veeam can
+        # throw .NET type-initializer errors when loaded directly in PowerShell 7.
+        # Prefer the Windows PowerShell compatibility session before trying
+        # SkipEditionCheck, which still loads the module into the pwsh process.
+        return @("Standard", "WindowsPowerShell", "SkipEditionCheck")
+    }
+
+    return @("Standard", "SkipEditionCheck")
 }
 
 # ---------------------------------------------------------------------------
@@ -207,7 +222,7 @@ function Import-RequiredModule {
         param([string]$CandidateName)
 
         $importErrors = @()
-        foreach ($strategy in (Get-ModuleImportStrategies -UseWindowsPowerShellFallback:$UseWindowsPowerShellFallback)) {
+        foreach ($strategy in (Get-ModuleImportStrategies -UseWindowsPowerShellFallback:$UseWindowsPowerShellFallback -ModuleName $CandidateName)) {
             try {
                 switch ($strategy) {
                     "Standard" {
@@ -265,6 +280,36 @@ function Import-RequiredModule {
     $message = "Unable to import module $Name. Tried: $candidateList"
     Write-MigrationLog $message -Level ERROR -LogFile $LogFile
     throw $message
+}
+
+# ---------------------------------------------------------------------------
+# Repair-WindowsOnlyModuleImport : recover from an in-process import of a
+# Windows-only module whose cmdlets fail at runtime (e.g. SCVMM "IndigoLayer"
+# type-initializer errors). Re-imports the module through the Windows
+# PowerShell compatibility session; the compat proxy functions then take
+# precedence over the broken in-process cmdlets.
+# ---------------------------------------------------------------------------
+function Repair-WindowsOnlyModuleImport {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [string]$LogFile
+    )
+
+    if ($PSVersionTable.PSEdition -ne "Core" -or -not $IsWindows) {
+        return $false
+    }
+
+    try {
+        Remove-Module -Name $Name -Force -ErrorAction SilentlyContinue
+        Import-Module -Name $Name -UseWindowsPowerShell -DisableNameChecking -Force -ErrorAction Stop 3>$null
+        Write-MigrationLog "Module '$Name' re-imported through the Windows PowerShell compatibility session after an in-process runtime failure." -Level WARNING -LogFile $LogFile
+        return $true
+    } catch {
+        Write-MigrationLog "Unable to re-import module '$Name' through the Windows PowerShell compatibility session: $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
+        return $false
+    }
 }
 
 # ---------------------------------------------------------------------------

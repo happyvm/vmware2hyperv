@@ -211,7 +211,7 @@ Describe 'Connect-VCenter credential fallback' {
 }
 
 Describe 'Get-ModuleImportStrategies' {
-    It 'uses standard import before fallbacks' {
+    It 'uses standard import before fallbacks for regular modules' {
         $strategies = @(Get-ModuleImportStrategies -UseWindowsPowerShellFallback)
         $strategies[0] | Should -Be 'Standard'
     }
@@ -223,5 +223,22 @@ Describe 'Get-ModuleImportStrategies' {
     It 'prefers Windows PowerShell compatibility before SkipEditionCheck on Windows PowerShell Core' -Skip:(-not ($PSVersionTable.PSEdition -eq 'Core' -and $IsWindows)) {
         $strategies = @(Get-ModuleImportStrategies -UseWindowsPowerShellFallback)
         [array]::IndexOf($strategies, 'WindowsPowerShell') | Should -BeLessThan ([array]::IndexOf($strategies, 'SkipEditionCheck'))
+    }
+
+    It 'tries the Windows PowerShell compatibility session first for known Windows-only management modules' -Skip:(-not ($PSVersionTable.PSEdition -eq 'Core' -and $IsWindows)) {
+        foreach ($moduleName in @('VirtualMachineManager', 'Veeam.Backup.PowerShell', 'FailoverClusters')) {
+            $strategies = @(Get-ModuleImportStrategies -UseWindowsPowerShellFallback -ModuleName $moduleName)
+            $strategies[0] | Should -Be 'WindowsPowerShell' -Because "$moduleName imports in-process without error but fails at runtime (IndigoLayer)"
+        }
+    }
+
+    It 'keeps the standard-first order for modules outside the Windows-only list' -Skip:(-not ($PSVersionTable.PSEdition -eq 'Core' -and $IsWindows)) {
+        $strategies = @(Get-ModuleImportStrategies -UseWindowsPowerShellFallback -ModuleName 'VMware.PowerCLI')
+        $strategies[0] | Should -Be 'Standard'
+    }
+
+    It 'never uses the compatibility session when the fallback is not requested' {
+        $strategies = @(Get-ModuleImportStrategies -ModuleName 'VirtualMachineManager')
+        $strategies | Should -Not -Contain 'WindowsPowerShell'
     }
 }
