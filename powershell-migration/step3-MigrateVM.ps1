@@ -246,14 +246,14 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 [switch]$ForceRefresh
             )
 
-            function Test-ScvmmObjectMatchesLogicalSwitch {
+            function Get-ScvmmObjectLogicalSwitchMatchState {
                 param(
                     $InputObject,
                     [string]$LogicalSwitchName
                 )
 
                 if (-not $InputObject -or [string]::IsNullOrWhiteSpace($LogicalSwitchName)) {
-                    return $false
+                    return $null
                 }
 
                 $target = $LogicalSwitchName.Trim().ToLowerInvariant()
@@ -265,7 +265,9 @@ function Invoke-SCVMMNetworkAndPostConfig {
                     "VMLogicalSwitchName",
                     "VMLogicalSwitch",
                     "VirtualNetwork",
-                    "VirtualNetworkName"
+                    "VirtualNetworkName",
+                    "LogicalNetwork",
+                    "LogicalNetworkName"
                 )) {
                     if ($InputObject.PSObject.Properties[$propertyName]) {
                         $propertyValue = $InputObject.$propertyName
@@ -285,14 +287,29 @@ function Invoke-SCVMMNetworkAndPostConfig {
                     }
                 }
 
+                $hasLogicalSwitchMetadata = $false
                 foreach ($candidate in $candidateValues) {
                     if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                    $hasLogicalSwitchMetadata = $true
                     if ($candidate.Trim().ToLowerInvariant() -eq $target) {
                         return $true
                     }
                 }
 
-                return $false
+                if ($hasLogicalSwitchMetadata) {
+                    return $false
+                }
+
+                return $null
+            }
+
+            function Test-ScvmmObjectMatchesLogicalSwitch {
+                param(
+                    $InputObject,
+                    [string]$LogicalSwitchName
+                )
+
+                return ((Get-ScvmmObjectLogicalSwitchMatchState -InputObject $InputObject -LogicalSwitchName $LogicalSwitchName) -eq $true)
             }
 
             if (-not $script:ScvmmInventoryCacheByServer) {
@@ -345,8 +362,13 @@ function Invoke-SCVMMNetworkAndPostConfig {
 
                 if (-not [string]::IsNullOrWhiteSpace([string]$LogicalSwitch)) {
                     $targetLogicalSwitchName = [string]$LogicalSwitch
+                    # Some SCVMM versions do not expose a LogicalSwitch* property on VMNetwork/VMSubnet
+                    # objects even though the adapter configuration accepts the VMNetwork with the logical
+                    # switch. Only exclude objects when SCVMM explicitly reports a different switch; keep
+                    # objects with no switch metadata so valid networks are not filtered out prematurely.
                     $allVMNetworks = @($allVMNetworks | Where-Object {
-                        Test-ScvmmObjectMatchesLogicalSwitch -InputObject $_ -LogicalSwitchName $targetLogicalSwitchName
+                        $matchState = Get-ScvmmObjectLogicalSwitchMatchState -InputObject $_ -LogicalSwitchName $targetLogicalSwitchName
+                        ($null -eq $matchState -or $matchState -eq $true)
                     })
 
                     $vmNetworkIdSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -378,7 +400,8 @@ function Invoke-SCVMMNetworkAndPostConfig {
                             return $true
                         }
 
-                        return (Test-ScvmmObjectMatchesLogicalSwitch -InputObject $subnet -LogicalSwitchName $targetLogicalSwitchName)
+                        $subnetMatchState = Get-ScvmmObjectLogicalSwitchMatchState -InputObject $subnet -LogicalSwitchName $targetLogicalSwitchName
+                        return ($null -eq $subnetMatchState -or $subnetMatchState -eq $true)
                     })
 
                     if ($allVMNetworks.Count -eq 0) {
