@@ -212,6 +212,7 @@ function Get-WindowsYearFromText {
         return $null
     }
 
+    # Explicit year in the guest OS full name.
     switch -Regex ($Text) {
         "2003" { return 2003 }
         "2008" { return 2008 }
@@ -220,8 +221,24 @@ function Get-WindowsYearFromText {
         "2019" { return 2019 }
         "2022" { return 2022 }
         "2025" { return 2025 }
-        default { return $null }
     }
+
+    # vSphere GuestId families that do not spell out the year (the full name can
+    # be empty or stale when VMware Tools is old, which is common on 2003):
+    #   winNet*         -> Windows Server 2003 (".NET Server")
+    #   winLonghorn*    -> Windows Server 2008
+    #   windows7Server* -> Windows Server 2008 R2
+    #   windows8Server* -> Windows Server 2012 / 2012 R2
+    #   windows9Server* -> Windows Server 2016+
+    switch -Regex ($Text) {
+        "(?i)winNet(Standard|Enterprise|Datacenter|Web|Business)" { return 2003 }
+        "(?i)winLonghorn"                                         { return 2008 }
+        "(?i)windows7Server"                                      { return 2008 }
+        "(?i)windows8Server"                                      { return 2012 }
+        "(?i)windows9Server"                                      { return 2016 }
+    }
+
+    return $null
 }
 
 function Get-GuestFamily {
@@ -1048,7 +1065,7 @@ set CDROM_REMOVED=0
 set VOLUME_MARKER_FILES=0
 set VOLUME_MARKER_ERRORS=0
 set CDROM_REMOVE_ERRORS=0
-for /f "skip=1 tokens=1" %%V in ('wmic logicaldisk where "DriveType ^<^> 5" get DeviceID 2^>nul') do (
+for /f "skip=1 tokens=1" %%V in ('%windir%\system32\wbem\wmic.exe logicaldisk where "DriveType ^<^> 5" get DeviceID 2^>nul') do (
     if not "%%V"=="" (
         set "VOLUME_DRIVE=%%V"
         set "VOLUME_LETTER=!VOLUME_DRIVE:~0,1!"
@@ -1061,9 +1078,9 @@ for /f "skip=1 tokens=1" %%V in ('wmic logicaldisk where "DriveType ^<^> 5" get 
         )
     )
 )
-for /f "skip=1 tokens=1" %%D in ('wmic cdrom get Drive 2^>nul') do (
+for /f "skip=1 tokens=1" %%D in ('%windir%\system32\wbem\wmic.exe cdrom get Drive 2^>nul') do (
     if not "%%D"=="" (
-        mountvol %%D /D > nul
+        %windir%\system32\mountvol.exe %%D /D > nul
         if errorlevel 1 (
             set /a CDROM_REMOVE_ERRORS+=1
         ) else (
@@ -1130,7 +1147,7 @@ Write-Output ("LastBootUpTime={0}" -f $os.LastBootUpTime.ToString("yyyyMMddHHmms
                         }
                         else {
                             $windowsUptimeScript = @'
-wmic os get LastBootUpTime /value
+%windir%\system32\wbem\wmic.exe os get LastBootUpTime /value
 '@
                             $uptimeScriptType = "Bat"
                         }
@@ -1176,26 +1193,42 @@ wmic os get LastBootUpTime /value
                     # Windows 2003 / 2008 / 2008 R2: run ipconfig /all and store output in C:\temp.
                     # Newer versions: not applicable.
                     #
-                    # Known pitfalls that can prevent the file from being created:
-                    #   - Quoting the redirect path ("> "C:\path"") fails silently on old CMD
-                    #     versions when run from a VMware Tools guest process context.
+                    # Known pitfalls on these old guests that this script works around:
+                    #   - The VMware Tools guest process can start with a minimal PATH where
+                    #     "ipconfig" does not resolve; cmd still exits 0 and Invoke-VMScript
+                    #     reports Success=true. Fix: full %windir%\system32 executable paths.
+                    #   - Quoting the redirect path ("> "C:\path"") fails silently on old CMD.
                     #     Fix: no quotes (path has no spaces after sanitisation).
-                    #   - mkdir failure (permissions) is silent in batch; the subsequent
-                    #     redirect then also fails silently and Invoke-VMScript still
-                    #     reports Success=true (cmd exits 0 regardless).
-                    #     Fix: explicit post-execution file-existence verification.
+                    #   - md/redirect failures are silent in batch. Fix: the script verifies
+                    #     its own work and prints an IPCONFIG_RESULT marker parsed below,
+                    #     all in a single guest call.
                     #   - Buffer not fully flushed before the guest process exits.
-                    #     Fix: trailing ping adds ~1 s delay before cmd exits.
+                    #     Fix: trailing ping adds ~1 s delay before the file checks.
                     if ($isWindows2003 -or $isWindows2008) {
                         $safeVmFileName        = ($vmName -replace '[\\/:*?"<>|&^%!()\s]', '_')
                         $ipconfigPathCandidate = "C:\temp\ipconfig_all_$safeVmFileName.txt"
 
-                        # No quotes around the path: avoids silent redirect failure on old CMD.
-                        # Trailing ping gives the OS ~1 s to flush the redirect buffer.
                         $ipconfigScript = @"
+@echo off
 if not exist C:\temp md C:\temp
-ipconfig /all > $ipconfigPathCandidate
-ping -n 2 127.0.0.1 > nul
+if not exist C:\temp (
+    echo IPCONFIG_RESULT=TEMP_DIR_CREATE_FAILED
+    goto :done
+)
+%windir%\system32\ipconfig.exe /all > $ipconfigPathCandidate
+%windir%\system32\ping.exe -n 2 127.0.0.1 > nul
+if not exist $ipconfigPathCandidate (
+    echo IPCONFIG_RESULT=FILE_NOT_CREATED
+    goto :done
+)
+for %%A in ($ipconfigPathCandidate) do (
+    if %%~zA GTR 0 (
+        echo IPCONFIG_RESULT=OK
+    ) else (
+        echo IPCONFIG_RESULT=FILE_EMPTY
+    )
+)
+:done
 "@
 
                         $ipconfigResult = Invoke-WindowsGuestScriptWithCredentialFallback `
@@ -1211,25 +1244,29 @@ ping -n 2 127.0.0.1 > nul
                             $windowsCredentialUserUsed       = $ipconfigResult.CredentialUser
                             $preferredWindowsCredentialLabel = $ipconfigResult.CredentialLabel
 
-                            # Verify the file was actually created inside the guest.
-                            $verifyScript = "if exist $ipconfigPathCandidate (echo EXISTS) else (echo MISSING)"
-
-                            $verifyResult = Invoke-WindowsGuestScriptWithCredentialFallback `
-                                -VMObject $vmObject `
-                                -ScriptText $verifyScript `
-                                -ScriptType Bat `
-                                -AuthCandidates $windowsGuestCredentials `
-                                -PreferredAuthLabel $preferredWindowsCredentialLabel `
-                                -ToolsWaitSecs $ToolsWaitSecs
-
-                            if ($verifyResult.Success -and $verifyResult.Output -eq "EXISTS") {
+                            if ($ipconfigResult.Output -match "IPCONFIG_RESULT=OK") {
                                 $ipconfigPath   = $ipconfigPathCandidate
                                 $ipconfigStatus = "OK"
                             }
-                            else {
+                            elseif ($ipconfigResult.Output -match "IPCONFIG_RESULT=TEMP_DIR_CREATE_FAILED") {
+                                $ipconfigPath   = "NotPresent"
+                                $ipconfigStatus = "Error"
+                                $ipconfigError  = "C:\temp could not be created inside the guest (permissions, or C:\temp exists as a file)."
+                            }
+                            elseif ($ipconfigResult.Output -match "IPCONFIG_RESULT=FILE_EMPTY") {
                                 $ipconfigPath   = "NotPresent"
                                 $ipconfigStatus = "FileNotCreated"
-                                $ipconfigError  = "ipconfig script ran but file not found in guest: $ipconfigPathCandidate"
+                                $ipconfigError  = "Output file was created but is empty (ipconfig or redirect failed): $ipconfigPathCandidate"
+                            }
+                            elseif ($ipconfigResult.Output -match "IPCONFIG_RESULT=FILE_NOT_CREATED") {
+                                $ipconfigPath   = "NotPresent"
+                                $ipconfigStatus = "FileNotCreated"
+                                $ipconfigError  = "ipconfig ran but the output file was not created in the guest: $ipconfigPathCandidate"
+                            }
+                            else {
+                                $ipconfigPath   = "NotPresent"
+                                $ipconfigStatus = "VerificationError"
+                                $ipconfigError  = "Guest script did not return the expected IPCONFIG_RESULT marker. Output: $($ipconfigResult.Output)"
                             }
                         }
                         else {
@@ -1321,7 +1358,7 @@ ping -n 2 127.0.0.1 > nul
                 VMWithUptimeSkipped        = @($group | Where-Object { $_.UptimeStatus -like "Skipped*" -or $_.UptimeStatus -eq "NotApplicable" }).Count
                 VMWithUptimeOverThreshold  = @($group | Where-Object { $_.UptimeOverThreshold -eq $true }).Count
                 VMWithIpconfigOK           = @($group | Where-Object { $_.IpconfigStatus -eq "OK" }).Count
-                VMWithIpconfigError        = @($group | Where-Object { $_.IpconfigStatus -in @("Error", "FileNotCreated") }).Count
+                VMWithIpconfigError        = @($group | Where-Object { $_.IpconfigStatus -in @("Error", "FileNotCreated", "VerificationError") }).Count
                 VMWithCdRomDisabled        = @($group | Where-Object { $_.CdRomDisableStatus -eq "DriveLettersRemovedInGuest" }).Count
                 VMWithVolumeMarkerFile     = @($group | Where-Object { $_.VolumeMarkerFileCount -gt 0 }).Count
                 VMWithCdRomDisableError    = @($group | Where-Object { $_.CdRomDisableStatus -in @("Error", "VerificationError") }).Count
