@@ -75,6 +75,7 @@
 #>
 
 [CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive diagnostic tool: colored console output is the primary deliverable.')]
 param(
     # Path to hyperv-check.psd1. If empty, the script searches next to itself then CWD.
     # If still not found, interactive prompts are shown.
@@ -98,7 +99,7 @@ function Get-CachedCimInstance {
     return $script:CimCache[$ClassName]
 }
 
-function Write-Log {
+function Write-ReadinessLog {
     param(
         [string]$Message,
         [ValidateSet('INFO', 'OK', 'WARN', 'FAIL', 'SECTION')]
@@ -145,12 +146,12 @@ function Add-Result {
         'SKIP' { 'INFO' }
         default { 'INFO' }
     }
-    Write-Log "$Check — $Detail" -Level $logLevel
+    Write-ReadinessLog "$Check — $Detail" -Level $logLevel
 }
 
 function Section([string]$Title) {
-    Write-Log '' -Level INFO
-    Write-Log "──── $Title ────" -Level SECTION
+    Write-ReadinessLog '' -Level INFO
+    Write-ReadinessLog "──── $Title ────" -Level SECTION
 }
 
 # Prompt helper — returns config value if present, otherwise prompts interactively
@@ -280,7 +281,7 @@ function Initialize-Config {
                 $script:DomainControllers = $discovered
                 Write-Host "[ INFO ] Auto-discovered DCs: $($discovered -join ', ')" -ForegroundColor Gray
             }
-        } catch { }
+        } catch { Write-Verbose "Domain controller auto-discovery failed: $($_.Exception.Message)" }
     }
 
     # Summary of active config
@@ -378,7 +379,7 @@ function Test-OSCompatibility {
     try {
         $pfro = Get-ItemProperty $pfroPath -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
         if ($pfro -and $pfro.PendingFileRenameOperations) { $pendingReboot = $true; $rebootReasons += 'PendingFileRename' }
-    } catch {}
+    } catch { Write-Verbose "PendingFileRenameOperations probe failed: $($_.Exception.Message)" }
 
     if ($pendingReboot) {
         Add-Result $cat 'No pending reboot' 'FAIL' "Reboot required ($($rebootReasons -join ', ')) — must reboot before installing Hyper-V / Failover-Clustering"
@@ -446,13 +447,13 @@ function Test-PlatformSecurity {
                 default { "Unknown ($($peFirmware.PEFirmwareType))" }
             }
         }
-    } catch { }
+    } catch { Write-Verbose "PEFirmwareType kernel probe unavailable: $($_.Exception.Message)" }
     if ($firmwareType -eq 'Unknown') {
         try {
             $bcdFirmware = (& bcdedit /enum '{current}' 2>$null | Select-String -Pattern 'winload\.efi|winload\.exe')
             if ($bcdFirmware -match 'winload\.efi') { $firmwareType = 'UEFI' }
             elseif ($bcdFirmware -match 'winload\.exe') { $firmwareType = 'BIOS/Legacy' }
-        } catch { }
+        } catch { Write-Verbose "bcdedit firmware probe failed: $($_.Exception.Message)" }
     }
     $firmwareStatus = if ($firmwareType -eq 'BIOS/Legacy' -and $script:RequireSecureBoot) { 'FAIL' } else { 'INFO' }
     Add-Result $cat 'Firmware boot mode' $firmwareStatus $firmwareType
@@ -552,7 +553,7 @@ function Test-PlatformSecurity {
         if ($dgReg -and $null -ne $dgReg.EnableVirtualizationBasedSecurity) {
             $deviceGuardDetails += "RegistryVBS=$($dgReg.EnableVirtualizationBasedSecurity)"
         }
-    } catch { }
+    } catch { Write-Verbose "Device Guard VBS registry probe failed: $($_.Exception.Message)" }
 
     try {
         $lsaReg = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'LsaCfgFlags' -ErrorAction SilentlyContinue
@@ -560,7 +561,7 @@ function Test-PlatformSecurity {
             $credentialGuardRunning = [int]$lsaReg.LsaCfgFlags -in @(1,2)
         }
         if ($lsaReg -and $null -ne $lsaReg.LsaCfgFlags) { $deviceGuardDetails += "LsaCfgFlags=$($lsaReg.LsaCfgFlags)" }
-    } catch { }
+    } catch { Write-Verbose "LsaCfgFlags registry probe failed: $($_.Exception.Message)" }
 
     try {
         $hvciReg = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' -Name 'Enabled' -ErrorAction SilentlyContinue
@@ -568,7 +569,7 @@ function Test-PlatformSecurity {
             $hvciRunning = [int]$hvciReg.Enabled -eq 1
         }
         if ($hvciReg -and $null -ne $hvciReg.Enabled) { $deviceGuardDetails += "RegistryHVCI=$($hvciReg.Enabled)" }
-    } catch { }
+    } catch { Write-Verbose "HVCI registry probe failed: $($_.Exception.Message)" }
 
     $deviceGuardDetail = if ($deviceGuardDetails.Count -gt 0) { $deviceGuardDetails -join '; ' } else { 'No Device Guard state detected' }
     $vbsStatus = if ($script:RequireVbs) {
@@ -1611,7 +1612,7 @@ function Test-Storage {
             $lbPolicy = $null
             try {
                 $lbPolicy = (Get-MSDSMGlobalDefaultLoadBalancePolicy -ErrorAction Stop)
-            } catch { }
+            } catch { Write-Verbose "Get-MSDSMGlobalDefaultLoadBalancePolicy unavailable: $($_.Exception.Message)" }
             $policyDetail = if ($lbPolicy) { "DefaultLoadBalancePolicy=$lbPolicy; $policyDetail" } else { $policyDetail }
 
             if ($script:ExpectedMpioPolicy) {
@@ -2047,7 +2048,7 @@ function Test-ClusterReadiness {
         if (Get-Module -Name FailoverClusters -ListAvailable -ErrorAction SilentlyContinue) {
             Import-Module FailoverClusters -ErrorAction SilentlyContinue
             try {
-                Write-Log "Running Test-Cluster on: $($clusterNodeSet -join ', ') (may take several minutes)..." -Level INFO
+                Write-ReadinessLog "Running Test-Cluster on: $($clusterNodeSet -join ', ') (may take several minutes)..." -Level INFO
                 $rpt        = Join-Path $env:TEMP "ClusterValidation-$(Get-Date -Format 'yyyyMMdd-HHmmss').htm"
                 $validation = Test-Cluster -Node $clusterNodeSet -ReportName $rpt -ErrorAction Stop
                 $failed  = ($validation | Where-Object { $_.Status -eq 'Failed'  }).Count
@@ -2515,7 +2516,7 @@ function Test-TcpPort {
     } catch {
         return $false
     } finally {
-        if ($tcp) { try { $tcp.Close() } catch {} }
+        if ($tcp) { try { $tcp.Close() } catch { Write-Verbose "TCP socket close failed: $($_.Exception.Message)" } }
     }
 }
 
@@ -2653,28 +2654,28 @@ function Write-Summary {
     $failCount = ($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
     $infoCount = ($script:Results | Where-Object { $_.Status -in 'INFO', 'SKIP' }).Count
 
-    Write-Log '' -Level INFO
-    Write-Log '════════════════════════════════════════════════════════════════' -Level SECTION
-    Write-Log "  SUMMARY  |  PASS: $passCount  WARN: $warnCount  FAIL: $failCount  INFO/SKIP: $infoCount" -Level SECTION
-    Write-Log '════════════════════════════════════════════════════════════════' -Level SECTION
+    Write-ReadinessLog '' -Level INFO
+    Write-ReadinessLog '════════════════════════════════════════════════════════════════' -Level SECTION
+    Write-ReadinessLog "  SUMMARY  |  PASS: $passCount  WARN: $warnCount  FAIL: $failCount  INFO/SKIP: $infoCount" -Level SECTION
+    Write-ReadinessLog '════════════════════════════════════════════════════════════════' -Level SECTION
 
     if ($failCount -gt 0) {
-        Write-Log '' -Level INFO
-        Write-Log 'FAILURES:' -Level FAIL
+        Write-ReadinessLog '' -Level INFO
+        Write-ReadinessLog 'FAILURES:' -Level FAIL
         $script:Results | Where-Object { $_.Status -eq 'FAIL' } | ForEach-Object {
-            Write-Log "  [$($_.Category)] $($_.Check): $($_.Detail)" -Level FAIL
+            Write-ReadinessLog "  [$($_.Category)] $($_.Check): $($_.Detail)" -Level FAIL
         }
     }
     if ($warnCount -gt 0) {
-        Write-Log '' -Level INFO
-        Write-Log 'WARNINGS:' -Level WARN
+        Write-ReadinessLog '' -Level INFO
+        Write-ReadinessLog 'WARNINGS:' -Level WARN
         $script:Results | Where-Object { $_.Status -eq 'WARN' } | ForEach-Object {
-            Write-Log "  [$($_.Category)] $($_.Check): $($_.Detail)" -Level WARN
+            Write-ReadinessLog "  [$($_.Category)] $($_.Check): $($_.Detail)" -Level WARN
         }
     }
 
-    Write-Log '' -Level INFO
-    Write-Log "Log file: $script:LogFile" -Level INFO
+    Write-ReadinessLog '' -Level INFO
+    Write-ReadinessLog "Log file: $script:LogFile" -Level INFO
     return $failCount
 }
 
@@ -2720,7 +2721,7 @@ td{padding:7px 12px;border-bottom:1px solid #e0e0e0;font-size:.9em}
 <hr><small>Generated by Test-HyperVNodeReadiness.ps1 — vmware2hyperv</small>
 </body></html>
 "@ | Out-File -FilePath $Path -Encoding UTF8
-    Write-Log "HTML report: $Path" -Level INFO
+    Write-ReadinessLog "HTML report: $Path" -Level INFO
 }
 
 #endregion
@@ -2749,8 +2750,8 @@ if ($MyInvocation.InvocationName -eq '.') { return }
 # Load config file or prompt interactively — populates all $script:* variables
 Initialize-Config
 
-Write-Log "Test-HyperVNodeReadiness — Host: $env:COMPUTERNAME — Mode: $script:Mode — Storage: $script:StorageType" -Level SECTION
-Write-Log "Log: $script:LogFile" -Level INFO
+Write-ReadinessLog "Test-HyperVNodeReadiness — Host: $env:COMPUTERNAME — Mode: $script:Mode — Storage: $script:StorageType" -Level SECTION
+Write-ReadinessLog "Log: $script:LogFile" -Level INFO
 
 $runNode    = $script:Mode -in @('PreNode', 'Both')
 $runCluster = $script:Mode -in @('PreCluster', 'Both')

@@ -189,7 +189,7 @@ function Get-SCVMMVmRuntimeState {
     } -ArgumentList @($Name, $ServerName)
 }
 
-function Normalize-HostName {
+function ConvertTo-NormalizedHostName {
     param(
         [AllowNull()]
         [string]$Name
@@ -202,7 +202,7 @@ function Normalize-HostName {
     return $Name.Trim().ToLowerInvariant().Split('.')[0]
 }
 
-function Refresh-SCVMMVirtualMachine {
+function Update-SCVMMVirtualMachine {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Name,
@@ -558,7 +558,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         $adapterRetryDelaySeconds = 10
         $refreshVirtualMachineCommand = Get-Command -Name 'Read-SCVirtualMachine' -ErrorAction SilentlyContinue | Select-Object -First 1
 
-        function Normalize-MacAddress {
+        function ConvertTo-NormalizedMacAddress {
             param([AllowNull()][string]$Value)
 
             if ([string]::IsNullOrWhiteSpace($Value)) {
@@ -571,14 +571,14 @@ function Invoke-SCVMMNetworkAndPostConfig {
         function Test-IsZeroMacAddress {
             param([AllowNull()][string]$Value)
 
-            $normalized = Normalize-MacAddress -Value $Value
+            $normalized = ConvertTo-NormalizedMacAddress -Value $Value
             return ($normalized -and $normalized -eq '000000000000')
         }
 
         function Convert-ToScvmmStaticMacAddress {
             param([AllowNull()][string]$Value)
 
-            $normalized = Normalize-MacAddress -Value $Value
+            $normalized = ConvertTo-NormalizedMacAddress -Value $Value
             if (-not $normalized -or $normalized.Length -ne 12) {
                 return $null
             }
@@ -770,9 +770,9 @@ function Invoke-SCVMMNetworkAndPostConfig {
         for ($adapterIndex = 0; $adapterIndex -lt $networkAdapters.Count; $adapterIndex++) {
             $networkAdapter = $networkAdapters[$adapterIndex]
 
-            $adapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddressString)
+            $adapterMac = ConvertTo-NormalizedMacAddress -Value ([string]$networkAdapter.MACAddressString)
             if (-not $adapterMac) {
-                $adapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddress)
+                $adapterMac = ConvertTo-NormalizedMacAddress -Value ([string]$networkAdapter.MACAddress)
             }
 
             if (-not $adapterMac -or (Test-IsZeroMacAddress -Value $adapterMac)) {
@@ -785,7 +785,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 }
 
                 $sourceAdapter = $adapterMappings[$sourceIndex]
-                $sourceMac = Normalize-MacAddress -Value ([string]$sourceAdapter.MacAddress)
+                $sourceMac = ConvertTo-NormalizedMacAddress -Value ([string]$sourceAdapter.MacAddress)
 
                 if ($sourceMac -and $sourceMac -eq $adapterMac) {
                     $macMatchesByTargetIndex[$adapterIndex] = $sourceAdapter
@@ -917,9 +917,9 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 PortClassification    = $portClass
             }
 
-            $targetAdapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddressString)
+            $targetAdapterMac = ConvertTo-NormalizedMacAddress -Value ([string]$networkAdapter.MACAddressString)
             if (-not $targetAdapterMac) {
-                $targetAdapterMac = Normalize-MacAddress -Value ([string]$networkAdapter.MACAddress)
+                $targetAdapterMac = ConvertTo-NormalizedMacAddress -Value ([string]$networkAdapter.MACAddress)
             }
 
             if ((Test-IsZeroMacAddress -Value $targetAdapterMac) -and $selectedSourceAdapter) {
@@ -1050,7 +1050,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
             }
         }
 
-        Refresh-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
+        Update-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
         $vmStateAfterHa = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
         if (-not $vmStateAfterHa.IsHighlyAvailable) {
             if ($clusterVmRegistrationCommand) {
@@ -1064,7 +1064,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
     }
 
     try {
-        Refresh-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
+        Update-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
         $vmStateBeforeMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
         Write-MigrationLog "[$Name] Preparing host migration validation. Current host: '$($vmStateBeforeMove.HostName)'." -LogFile $LogFile
 
@@ -1074,7 +1074,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
         } catch {
             Write-MigrationLog "[$Name] SCVMM migration failed; retrying via Hyper-V Move-VM. Details: $_" -Level WARNING -LogFile $LogFile
 
-            Ensure-RsatHyperVInstalled -LogFile $LogFile
+            Install-RsatHyperV -LogFile $LogFile
             $hyperVMoveCommand = Get-Command -Name "Move-VM" -Module "Hyper-V" -ErrorAction SilentlyContinue |
                 Select-Object -First 1
 
@@ -1086,7 +1086,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
             }
         }
 
-        $destinationHostNormalized = Normalize-HostName -Name $DestinationHost
+        $destinationHostNormalized = ConvertTo-NormalizedHostName -Name $DestinationHost
         $migrationValidationTimeoutSeconds = 600
         $migrationValidationPollIntervalSeconds = 15
         $migrationValidationElapsedSeconds = 0
@@ -1095,9 +1095,9 @@ function Invoke-SCVMMNetworkAndPostConfig {
             Start-Sleep -Seconds $migrationValidationPollIntervalSeconds
             $migrationValidationElapsedSeconds += $migrationValidationPollIntervalSeconds
 
-            Refresh-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
+            Update-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
             $vmStateAfterMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
-            $currentHostNormalized = Normalize-HostName -Name $vmStateAfterMove.HostName
+            $currentHostNormalized = ConvertTo-NormalizedHostName -Name $vmStateAfterMove.HostName
 
             if ($currentHostNormalized -eq $destinationHostNormalized) {
                 Write-MigrationLog "[$Name] LiveMigration validated: VM is now running on '$($vmStateAfterMove.HostName)'." -Level SUCCESS -LogFile $LogFile

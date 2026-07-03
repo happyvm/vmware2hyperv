@@ -71,7 +71,7 @@ function Invoke-OrchestratorStep {
     }
 }
 
-function Ensure-DirectoryPresent {
+function Initialize-Directory {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
@@ -489,11 +489,11 @@ $processingDir = Join-Path $queueRoot "processing"
 $doneDir = Join-Path $queueRoot "done"
 $failedDir = Join-Path $queueRoot "failed"
 
-Ensure-DirectoryPresent -Path $queueRoot
-Ensure-DirectoryPresent -Path $pendingDir
-Ensure-DirectoryPresent -Path $processingDir
-Ensure-DirectoryPresent -Path $doneDir
-Ensure-DirectoryPresent -Path $failedDir
+Initialize-Directory -Path $queueRoot
+Initialize-Directory -Path $pendingDir
+Initialize-Directory -Path $processingDir
+Initialize-Directory -Path $doneDir
+Initialize-Directory -Path $failedDir
 
 Write-MigrationLog "Step3 queue root: $queueRoot" -LogFile $LogFile
 
