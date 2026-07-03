@@ -178,7 +178,7 @@ function Import-RequiredModule {
         }
     }
 
-    function Try-ImportModuleCandidate {
+    function Import-ModuleCandidate {
         param([string]$CandidateName)
 
         try {
@@ -213,7 +213,7 @@ function Import-RequiredModule {
     }
 
     foreach ($candidateName in $candidateNames) {
-        if (Try-ImportModuleCandidate -CandidateName $candidateName) {
+        if (Import-ModuleCandidate -CandidateName $candidateName) {
             return
         }
     }
@@ -233,7 +233,7 @@ function Import-RequiredModule {
         }
 
         foreach ($candidateName in $candidateNames) {
-            if (Try-ImportModuleCandidate -CandidateName $candidateName) {
+            if (Import-ModuleCandidate -CandidateName $candidateName) {
                 return
             }
         }
@@ -246,9 +246,10 @@ function Import-RequiredModule {
 }
 
 # ---------------------------------------------------------------------------
-# Ensure-RsatHyperVInstalled : install Hyper-V RSAT management tools when available
+# Install-RsatHyperV : install Hyper-V RSAT management tools when available
 # ---------------------------------------------------------------------------
-function Ensure-RsatHyperVInstalled {
+function Install-RsatHyperV {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = 'Validation result is intentionally cached per worker process, across dot-sourced script invocations.')]
     param([string]$LogFile)
 
     if ($global:Vmware2HyperV_RsatHyperVValidated) {
