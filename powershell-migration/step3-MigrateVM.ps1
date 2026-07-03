@@ -1211,8 +1211,8 @@ function Set-SCVMMOperatingSystem {
 
 # ── SCVMM connection ────────────────────────────────────────────────────────
 
-try {
-    $VMMServerName = Invoke-SCVMMCommand -ScriptBlock {
+$connectToScvmmServer = {
+    Invoke-SCVMMCommand -ScriptBlock {
         param($ServerName)
         $server = Get-SCVMMServer -ComputerName $ServerName
         if (-not $server) {
@@ -1221,12 +1221,29 @@ try {
 
         return $server.Name
     } -ArgumentList @($SCVMMServer)
+}
+
+try {
+    $VMMServerName = & $connectToScvmmServer
 } catch {
-    if ([string]$_ -match "IndigoLayer") {
-        Write-MigrationLog "[$VMName] SCVMM module error hints at a VMM console/runtime mismatch on the runner. Validate that Virtual Machine Manager Console matching the SCVMM server version is installed and restart the shell." -Level ERROR -LogFile $LogFile
+    # "IndigoLayer"/type-initializer errors mean the SCVMM module was loaded into the
+    # PowerShell 7 process but its WCF runtime cannot work there. Re-import it through
+    # the Windows PowerShell compatibility session and retry once before giving up.
+    if ([string]$_ -match "IndigoLayer|type initializer" -and (Repair-WindowsOnlyModuleImport -Name "VirtualMachineManager" -LogFile $LogFile)) {
+        try {
+            $VMMServerName = & $connectToScvmmServer
+            Write-MigrationLog "[$VMName] SCVMM connection recovered through the Windows PowerShell compatibility session." -Level SUCCESS -LogFile $LogFile
+        } catch {
+            Write-MigrationLog "[$VMName] SCVMM connection still failing after Windows PowerShell compatibility re-import. Validate that the Virtual Machine Manager Console matching the SCVMM server version is installed on the runner. Details: $_" -Level ERROR -LogFile $LogFile
+            throw
+        }
+    } else {
+        if ([string]$_ -match "IndigoLayer|type initializer") {
+            Write-MigrationLog "[$VMName] SCVMM module error hints at a VMM console/runtime mismatch on the runner. Validate that Virtual Machine Manager Console matching the SCVMM server version is installed and restart the shell." -Level ERROR -LogFile $LogFile
+        }
+        Write-MigrationLog "[$VMName] Failed to connect to SCVMM server '$SCVMMServer': $_" -Level ERROR -LogFile $LogFile
+        throw
     }
-    Write-MigrationLog "[$VMName] Failed to connect to SCVMM server '$SCVMMServer': $_" -Level ERROR -LogFile $LogFile
-    throw
 }
 
 # ── Instant Recovery: start ─────────────────────────────────────────────
