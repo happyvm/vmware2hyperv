@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     VMware migration batching pre-check script.
 
@@ -92,22 +92,53 @@ if (-not (Test-Path -LiteralPath $script:ConfigFilePath)) {
 
 $cfg = Import-PowerShellDataFile -LiteralPath $script:ConfigFilePath
 
-if (-not $PSBoundParameters.ContainsKey('VCenter'))             { $VCenter             = [string]($cfg.VCenter.Server ?? $cfg.VCenter) }
-if (-not $PSBoundParameters.ContainsKey('InputCsv'))            { $InputCsv            = [string]($cfg.Precheck.InputCsv ?? "") }
-if (-not $PSBoundParameters.ContainsKey('OutputFolder'))        { $OutputFolder        = [string]($cfg.Precheck.OutputFolder ?? ".") }
-if (-not $PSBoundParameters.ContainsKey('TagCategoryName'))     { $TagCategoryName     = [string]($cfg.Precheck.TagCategoryName ?? "MigrationLot") }
-if (-not $PSBoundParameters.ContainsKey('CustomAttributeName')) { $CustomAttributeName = [string]($cfg.Precheck.CustomAttributeName ?? "NB_last_backup") }
-if (-not $PSBoundParameters.ContainsKey('ToolsWaitSecs'))       { $ToolsWaitSecs       = [int]($cfg.Precheck.ToolsWaitSecs ?? 20) }
-if (-not $PSBoundParameters.ContainsKey('LogFile'))             { $LogFile             = [string]($cfg.Precheck.LogFile ?? "") }
-if (-not $PSBoundParameters.ContainsKey('UptimeThresholdDays')) { $UptimeThresholdDays = [int]($cfg.Precheck.UptimeThresholdDays ?? 45) }
-if (-not $PSBoundParameters.ContainsKey('CsvDelimiter'))        { $CsvDelimiter        = [string]($cfg.Precheck.CsvDelimiter ?? ";") }
+# Safe hashtable lookup. Avoids the ?? operator (PowerShell 7 only) so the script
+# still parses and runs under Windows PowerShell 5.1.
+function Get-PrecheckConfigValue {
+    param(
+        $Section,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Key,
+
+        $Default = $null
+    )
+
+    if ($Section -is [hashtable] -and $Section.ContainsKey($Key) -and $null -ne $Section[$Key]) {
+        return $Section[$Key]
+    }
+
+    return $Default
+}
+
+$precheckCfg = Get-PrecheckConfigValue -Section $cfg -Key 'Precheck' -Default @{}
+
+if (-not $PSBoundParameters.ContainsKey('VCenter')) {
+    $vcenterCfg = Get-PrecheckConfigValue -Section $cfg -Key 'VCenter'
+    $VCenter = if ($vcenterCfg -is [hashtable]) {
+        [string](Get-PrecheckConfigValue -Section $vcenterCfg -Key 'Server' -Default '')
+    }
+    else {
+        [string]$vcenterCfg
+    }
+}
+
+# Config overrides the parameter default; an explicit CLI parameter always wins.
+if (-not $PSBoundParameters.ContainsKey('InputCsv'))            { $InputCsv            = [string](Get-PrecheckConfigValue -Section $precheckCfg -Key 'InputCsv'            -Default $InputCsv) }
+if (-not $PSBoundParameters.ContainsKey('OutputFolder'))        { $OutputFolder        = [string](Get-PrecheckConfigValue -Section $precheckCfg -Key 'OutputFolder'        -Default $OutputFolder) }
+if (-not $PSBoundParameters.ContainsKey('TagCategoryName'))     { $TagCategoryName     = [string](Get-PrecheckConfigValue -Section $precheckCfg -Key 'TagCategoryName'     -Default $TagCategoryName) }
+if (-not $PSBoundParameters.ContainsKey('CustomAttributeName')) { $CustomAttributeName = [string](Get-PrecheckConfigValue -Section $precheckCfg -Key 'CustomAttributeName' -Default $CustomAttributeName) }
+if (-not $PSBoundParameters.ContainsKey('ToolsWaitSecs'))       { $ToolsWaitSecs       = [int](Get-PrecheckConfigValue    -Section $precheckCfg -Key 'ToolsWaitSecs'       -Default $ToolsWaitSecs) }
+if (-not $PSBoundParameters.ContainsKey('LogFile'))             { $LogFile             = [string](Get-PrecheckConfigValue -Section $precheckCfg -Key 'LogFile'             -Default $LogFile) }
+if (-not $PSBoundParameters.ContainsKey('UptimeThresholdDays')) { $UptimeThresholdDays = [int](Get-PrecheckConfigValue    -Section $precheckCfg -Key 'UptimeThresholdDays' -Default $UptimeThresholdDays) }
+if (-not $PSBoundParameters.ContainsKey('CsvDelimiter'))        { $CsvDelimiter        = [string](Get-PrecheckConfigValue -Section $precheckCfg -Key 'CsvDelimiter'        -Default $CsvDelimiter) }
 
 if ([string]::IsNullOrWhiteSpace($VCenter))  { throw "VCenter address is required (parameter -VCenter or config key 'VCenter.Server')." }
 if ([string]::IsNullOrWhiteSpace($InputCsv)) { throw "Input CSV path is required (parameter -InputCsv or config key 'Precheck.InputCsv')." }
 
 # Windows credentials — usernames and labels only; passwords are prompted at runtime.
 $WindowsCredentialDefinitions = @(
-    foreach ($entry in ($cfg.Precheck.WindowsCredentials ?? @())) {
+    foreach ($entry in @(Get-PrecheckConfigValue -Section $precheckCfg -Key 'WindowsCredentials' -Default @())) {
         [PSCustomObject]@{
             Label    = [string]$entry.Label
             UserName = [string]$entry.UserName
@@ -117,10 +148,12 @@ $WindowsCredentialDefinitions = @(
 )
 
 # Linux credential
+$linuxCredentialCfg = Get-PrecheckConfigValue -Section $precheckCfg -Key 'LinuxCredential' -Default @{}
+
 $LinuxCredentialDefinition = [PSCustomObject]@{
-    Label    = [string](($cfg.Precheck.LinuxCredential.Label) ?? "LINUX-ADMIN")
-    UserName = [string](($cfg.Precheck.LinuxCredential.UserName) ?? "root")
-    Enabled  = [bool](($cfg.Precheck.LinuxCredential.Enabled) ?? $true)
+    Label    = [string](Get-PrecheckConfigValue -Section $linuxCredentialCfg -Key 'Label'    -Default 'LINUX-ADMIN-01')
+    UserName = [string](Get-PrecheckConfigValue -Section $linuxCredentialCfg -Key 'UserName' -Default 'root')
+    Enabled  = [bool](Get-PrecheckConfigValue   -Section $linuxCredentialCfg -Key 'Enabled'  -Default $true)
 }
 
 # ============================================================
@@ -540,7 +573,7 @@ try {
     $backupField = $customFieldsManager.Field |
         Where-Object {
             $_.Name -eq $CustomAttributeName -and
-            ($_.ManagedObjectType -eq $null -or $_.ManagedObjectType -eq "VirtualMachine")
+            ($null -eq $_.ManagedObjectType -or $_.ManagedObjectType -eq "VirtualMachine")
         } |
         Select-Object -First 1
 
@@ -554,26 +587,45 @@ try {
 
     # Server-side name filter to avoid loading all VMs from vCenter.
     # Get-View filters by "contains"; $vmIndex enforces exact-name resolution.
-    $namePattern = ($inputRows.VMName | ForEach-Object { [regex]::Escape($_) }) -join '|'
+    # Names are queried in chunks so the regex filter stays small even for large
+    # CSVs, and views are de-duplicated by MoRef because a "contains" match can
+    # return the same VM from more than one chunk.
+    $viewProperties = @(
+        'Name',
+        'Runtime.PowerState',
+        'Summary.Config',
+        'Summary.Storage',
+        'Config.GuestFullName',
+        'Config.GuestId',
+        'Guest.GuestFullName',
+        'Guest.GuestId',
+        'Guest.ToolsStatus',
+        'Guest.ToolsRunningStatus',
+        'CustomValue'
+    )
 
-    $allVmViews = Get-View -ViewType VirtualMachine `
-        -Filter @{ "Name" = $namePattern } `
-        -Property `
-            Name,
-            Runtime.PowerState,
-            Summary.Config,
-            Summary.Storage,
-            Config.GuestFullName,
-            Config.GuestId,
-            Guest.GuestFullName,
-            Guest.GuestId,
-            Guest.ToolsStatus,
-            Guest.ToolsRunningStatus,
-            CustomValue
+    $vmNames       = @($inputRows.VMName)
+    $nameChunkSize = 100
+    $allVmViews    = [System.Collections.Generic.List[object]]::new()
 
-    $vmIndex = @{}
+    for ($chunkStart = 0; $chunkStart -lt $vmNames.Count; $chunkStart += $nameChunkSize) {
+        $chunkEnd    = [math]::Min($chunkStart + $nameChunkSize, $vmNames.Count) - 1
+        $namePattern = ($vmNames[$chunkStart..$chunkEnd] | ForEach-Object { [regex]::Escape($_) }) -join '|'
+
+        foreach ($view in @(Get-View -ViewType VirtualMachine -Filter @{ "Name" = $namePattern } -Property $viewProperties)) {
+            $allVmViews.Add($view)
+        }
+    }
+
+    $vmIndex      = @{}
+    $seenVmMoRefs = @{}
 
     foreach ($vmView in $allVmViews) {
+        $moRefKey = [string]$vmView.MoRef
+
+        if ($seenVmMoRefs.ContainsKey($moRefKey)) { continue }
+        $seenVmMoRefs[$moRefKey] = $true
+
         if (-not $vmIndex.ContainsKey($vmView.Name)) {
             $vmIndex[$vmView.Name] = [System.Collections.Generic.List[object]]::new()
         }
@@ -586,6 +638,26 @@ try {
     # ========================================================
 
     Write-ExecutionLog "Starting VM tagging"
+
+    # Single bulk query for the whole category instead of one Get-TagAssignment
+    # call per VM (N+1 avoidance). Entries are indexed by entity Id.
+    $assignmentsByEntityId = @{}
+
+    try {
+        foreach ($assignment in @(Get-TagAssignment -Category $tagCategory -ErrorAction Stop)) {
+            $entityId = [string]$assignment.Entity.Id
+
+            if (-not $assignmentsByEntityId.ContainsKey($entityId)) {
+                $assignmentsByEntityId[$entityId] = [System.Collections.Generic.List[object]]::new()
+            }
+
+            $assignmentsByEntityId[$entityId].Add($assignment)
+        }
+    }
+    catch {
+        Write-ExecutionLog "Bulk tag assignment lookup failed ($($_.Exception.Message)); falling back to per-VM queries." -Level WARN
+        $assignmentsByEntityId = $null
+    }
 
     $script:tagCache   = @{}
     $tagStatusByVmLot  = @{}
@@ -619,7 +691,13 @@ try {
             $vmObject = Get-VIObjectByVIView -VIView $resolved.View -ErrorAction Stop
             $vmObjectCache[$vmName] = $vmObject
             $lotTag = Resolve-LotTag -LotName $lotName -Category $tagCategory
-            $currentAssignments = @(Get-TagAssignment -Entity $vmObject -Category $tagCategory -ErrorAction SilentlyContinue)
+            $currentAssignments = if ($null -ne $assignmentsByEntityId) {
+                $vmEntityId = [string]$vmObject.Id
+                if ($assignmentsByEntityId.ContainsKey($vmEntityId)) { @($assignmentsByEntityId[$vmEntityId]) } else { @() }
+            }
+            else {
+                @(Get-TagAssignment -Entity $vmObject -Category $tagCategory -ErrorAction SilentlyContinue)
+            }
             $assignmentsToRemove = @($currentAssignments | Where-Object { $_.Tag.Name -ne $lotName })
 
             if ($assignmentsToRemove.Count -gt 0 -and $PSCmdlet.ShouldProcess($vmName, "Remove existing tag '$($assignmentsToRemove[0].Tag.Name)'")) {
@@ -1263,9 +1341,15 @@ ping -n 2 127.0.0.1 > nul
     $summaryRows |
         Export-Csv -Path $summaryCsv -NoTypeInformation -Encoding UTF8 -Delimiter $CsvDelimiter
 
-    # Always export the error file (at minimum with the header row)
-    $errorRows |
-        Export-Csv -Path $errorCsv -NoTypeInformation -Encoding UTF8 -Delimiter $CsvDelimiter
+    # Always export the error file (at minimum with the header row).
+    # Export-Csv writes nothing at all for an empty collection, so emit the header manually.
+    if ($errorRows.Count -gt 0) {
+        $errorRows |
+            Export-Csv -Path $errorCsv -NoTypeInformation -Encoding UTF8 -Delimiter $CsvDelimiter
+    }
+    else {
+        Set-Content -Path $errorCsv -Value ('"VMName"{0}"Lot"{0}"Error"' -f $CsvDelimiter) -Encoding UTF8
+    }
 
     Write-Information "" -InformationAction Continue
     Write-ExecutionLog ("VM detail export   : {0}" -f $detailCsv)
