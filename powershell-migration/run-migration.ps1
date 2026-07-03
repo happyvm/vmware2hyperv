@@ -207,6 +207,24 @@ function Resolve-AdapterVlanId {
 
 $csvRows = Import-Csv -Path $csvFile -Delimiter ";"
 $vmRows = @($csvRows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.VMName) })
+
+# Only migrate VMs belonging to this batch: filter on the CSV Tag column when it is populated.
+# CSVs without a Tag column keep the previous behavior (all rows).
+$rowsWithTag = @($vmRows | Where-Object { $_.PSObject.Properties['Tag'] -and -not [string]::IsNullOrWhiteSpace($_.Tag) })
+if ($rowsWithTag) {
+    $taggedRows = @($rowsWithTag | Where-Object { $_.Tag.Trim() -eq $Tag })
+    if (-not $taggedRows) {
+        Write-MigrationLog "No CSV row carries tag '$Tag'; nothing to migrate for this batch." -Level ERROR -LogFile $LogFile
+        exit 1
+    }
+
+    $excludedCount = $vmRows.Count - $taggedRows.Count
+    if ($excludedCount -gt 0) {
+        Write-MigrationLog "$excludedCount CSV row(s) excluded from step3 dispatch: tag differs from '$Tag' or tag missing." -Level WARNING -LogFile $LogFile
+    }
+    $vmRows = $taggedRows
+}
+
 $vmNames = @($vmRows | Select-Object -ExpandProperty VMName | Sort-Object -Unique)
 
 if ($Step3RecoveryMode -ne "Standard" -and [string]::IsNullOrWhiteSpace($Step3VmName)) {
