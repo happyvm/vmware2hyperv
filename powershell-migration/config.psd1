@@ -60,7 +60,7 @@
 
         # Source OS labels (for example from the batch CSV / CMDB) mapped to exact SCVMM OS names
         OperatingSystemMap = @{
-            # Windows récents
+            # Recent Windows versions
             "Windows Server 2025 Datacenter"                   = "Windows Server 2025 Datacenter"
             "Windows Server 2025 Standard"                     = "Windows Server 2025 Standard"
             "Windows Server 2022 Datacenter"                   = "Windows Server 2022 Datacenter"
@@ -161,7 +161,7 @@
 
     Paths = @{
         Scripts   = "D:\Scripts"
-        CsvFile        = "D:\Scripts\lotissement.csv"   # CSV of VMs per batch (columns: VMName, Tag, OperatingSystem optional)
+        CsvFile        = "D:\Scripts\batch.csv"   # CSV of VMs per batch (columns: VMName, Tag, OperatingSystem optional)
         ExtractIpCsv   = "D:\Scripts\extract-ip.csv"    # CSV used to map expected IPs (headers: VMName/Name + IP/IPAddress/ExpectedIP)
         CmdbExtractCsv = "D:\Scripts\cmdb_extract.csv"  # Optional CMDB extract used to enrich OS values (headers: VMName/Name and OperatingSystem/Operating system)
         LogDir    = "D:\Scripts\Logs"
@@ -188,6 +188,7 @@
     StartVm = @{
         IntegrationPollIntervalSeconds = 30
         IntegrationMaxIterations       = 0   # 0 = unlimited: loop until every VM is compliant (Ctrl+C to stop waiting)
+        InventoryBatchThreshold        = 25  # <= threshold: targeted VM lookups; > threshold: one full SCVMM inventory pass
     }
 
     Orchestrator = @{

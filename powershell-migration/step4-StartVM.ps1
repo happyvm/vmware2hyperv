@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Start Hyper-V VMs and validate post-migration compliance.
 
@@ -137,7 +137,11 @@ function Get-SCVMMVmInventory {
 
         [hashtable]$ExpectedIpMap = @{},
 
-        [string]$ExpectedBackupTag
+        [string]$ExpectedBackupTag,
+
+        [switch]$ForceRefresh,
+
+        [int]$BatchInventoryThreshold = 25
     )
 
     $names = @(
@@ -153,7 +157,7 @@ function Get-SCVMMVmInventory {
 
     return @(
         Invoke-SCVMMCommand -ScriptBlock {
-            param($VmmServerName, $Names, $IpMap, $BackupTag)
+            param($VmmServerName, $Names, $IpMap, $BackupTag, $ForceRefresh, $InventoryThreshold)
 
             function Get-IntegrationStatusSummary {
                 param($Vm)
@@ -181,10 +185,10 @@ function Get-SCVMMVmInventory {
                 }
 
                 $ready = $false
-                if ($summary -match 'OK|Operational|Up|Ready|Responding|Actif|Fonctionnel|Installed|Enabled|Version') {
+                if ($summary -match 'OK|Operational|Up|Ready|Responding|\u0041ctif|\u0046onctionnel|Installed|Enabled|Version') {
                     $ready = $true
                 }
-                if ($summary -match 'Not.?Detected|Disabled|Stopped|Error|Unknown|Unavailable|N.?A|Inconnu|Arrêté|Missing|Non détecté') {
+                if ($summary -match 'Not.?Detected|Disabled|Stopped|Error|Unknown|Unavailable|N.?A|Unknown|Arr\u00eat\u00e9|Missing|Non d\u00e9tect\u00e9') {
                     $ready = $false
                 }
 
@@ -195,9 +199,38 @@ function Get-SCVMMVmInventory {
             }
 
             $server = Get-SCVMMServer -ComputerName $VmmServerName
+            $nameLookup = @{}
+            foreach ($name in $Names) {
+                $nameLookup[$name.ToLowerInvariant()] = $name
+            }
+
+            # Performance: use the cheaper strategy for the lot size. For small lots,
+            # targeted lookups avoid enumerating every VM managed by SCVMM. For larger
+            # lots, one full inventory pass avoids hundreds of per-VM SCVMM calls.
+            $vmByName = @{}
+            if ($InventoryThreshold -gt 0 -and $Names.Count -le $InventoryThreshold) {
+                foreach ($name in $Names) {
+                    $candidateVm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
+                    if ($candidateVm) {
+                        $vmByName[$name.ToLowerInvariant()] = $candidateVm
+                    }
+                }
+            } else {
+                foreach ($candidateVm in @(Get-SCVirtualMachine -VMMServer $server)) {
+                    $candidateName = [string]$candidateVm.Name
+                    if ([string]::IsNullOrWhiteSpace($candidateName)) {
+                        continue
+                    }
+
+                    $candidateKey = $candidateName.ToLowerInvariant()
+                    if ($nameLookup.ContainsKey($candidateKey) -and -not $vmByName.ContainsKey($candidateKey)) {
+                        $vmByName[$candidateKey] = $candidateVm
+                    }
+                }
+            }
 
             foreach ($name in $Names) {
-                $vm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
+                $vm = $vmByName[$name.ToLowerInvariant()]
 
                 if (-not $vm) {
                     [pscustomobject]@{
@@ -209,7 +242,7 @@ function Get-SCVMMVmInventory {
                         StatusString            = $null
                         VMHostComputerName      = $null
                         IntegrationReady        = $false
-                        IntegrationDetails      = 'VM introuvable'
+                        IntegrationDetails      = 'VM not found'
                         NetworkConnected        = $false
                         CurrentIPs              = @()
                         IPMatches               = $false
@@ -220,15 +253,16 @@ function Get-SCVMMVmInventory {
                     continue
                 }
 
-                try {
-                    $refreshedVm = Read-SCVirtualMachine -VM $vm -Force -ErrorAction Stop
-                    if ($refreshedVm) {
-                        $vm = $refreshedVm
-                    } else {
-                        $vm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
+                if ($ForceRefresh) {
+                    try {
+                        $refreshedVm = Read-SCVirtualMachine -VM $vm -Force -ErrorAction Stop
+                        if ($refreshedVm) {
+                            $vm = $refreshedVm
+                        }
+                    } catch {
+                        # Keep the VM object from the batched inventory. Falling back to a
+                        # per-VM Get-SCVirtualMachine here would reintroduce the slow path.
                     }
-                } catch {
-                    $vm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
                 }
 
                 $statusRaw = @(
@@ -237,13 +271,13 @@ function Get-SCVMMVmInventory {
                     [string]$vm.VirtualMachineState
                 ) -join ' '
 
-                $running = $statusRaw -match 'Running|Power.*On|En cours d.?exécution|Démarré'
+                $running = $statusRaw -match 'Running|Power.*On|En cours d.?ex\u00e9cution|D\u00e9marr\u00e9'
                 $integrationStatus = Get-IntegrationStatusSummary -Vm $vm
 
                 $adapters = @(Get-SCVirtualNetworkAdapter -VM $vm -ErrorAction SilentlyContinue)
                 $connectedAdapters = @($adapters | Where-Object {
                     $state = [string]$_.ConnectionState
-                    $state -match 'Connected|Connecté|OK|On' -or
+                    $state -match 'Connected|Connect\u00e9|OK|On' -or
                     (-not [string]::IsNullOrWhiteSpace([string]$_.VMNetwork)) -or
                     (-not [string]::IsNullOrWhiteSpace([string]$_.VMSubnet))
                 })
@@ -292,30 +326,90 @@ function Get-SCVMMVmInventory {
                     BackupTagPresent        = [bool]$backupTagPresent
                 }
             }
-        } -ArgumentList @($ServerName, $names, $ExpectedIpMap, $ExpectedBackupTag)
+        } -ArgumentList @($ServerName, $names, $ExpectedIpMap, $ExpectedBackupTag, [bool]$ForceRefresh, $BatchInventoryThreshold)
     )
 }
 
-function Start-SCVMMVm {
+function Start-SCVMMVms {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ServerName,
 
         [Parameter(Mandatory = $true)]
-        [string]$VMName
+        [string[]]$VMNames,
+
+        [int]$BatchInventoryThreshold = 25
     )
 
+    $names = @(
+        $VMNames |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { $_.Trim() } |
+            Select-Object -Unique
+    )
+
+    if (-not $names) {
+        return @()
+    }
+
     Invoke-SCVMMCommand -ScriptBlock {
-        param($VmmServerName, $Name)
+        param($VmmServerName, $Names, $InventoryThreshold)
 
         $server = Get-SCVMMServer -ComputerName $VmmServerName
-        $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Select-Object -First 1
-        if (-not $vm) {
-            throw "VM '$Name' introuvable dans SCVMM."
+        $nameLookup = @{}
+        foreach ($name in $Names) {
+            $nameLookup[$name.ToLowerInvariant()] = $name
         }
 
-        Start-SCVirtualMachine -VM $vm -ErrorAction Stop | Out-Null
-    } -ArgumentList @($ServerName, $VMName)
+        $vmByName = @{}
+        if ($InventoryThreshold -gt 0 -and $Names.Count -le $InventoryThreshold) {
+            foreach ($name in $Names) {
+                $candidateVm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
+                if ($candidateVm) {
+                    $vmByName[$name.ToLowerInvariant()] = $candidateVm
+                }
+            }
+        } else {
+            foreach ($candidateVm in @(Get-SCVirtualMachine -VMMServer $server)) {
+                $candidateName = [string]$candidateVm.Name
+                if ([string]::IsNullOrWhiteSpace($candidateName)) {
+                    continue
+                }
+
+                $candidateKey = $candidateName.ToLowerInvariant()
+                if ($nameLookup.ContainsKey($candidateKey) -and -not $vmByName.ContainsKey($candidateKey)) {
+                    $vmByName[$candidateKey] = $candidateVm
+                }
+            }
+        }
+
+        foreach ($name in $Names) {
+            $vm = $vmByName[$name.ToLowerInvariant()]
+            if (-not $vm) {
+                [pscustomobject]@{
+                    VMName = $name
+                    Started = $false
+                    Error = "VM '$name' not found in SCVMM."
+                }
+                continue
+            }
+
+            try {
+                Start-SCVirtualMachine -VM $vm -ErrorAction Stop | Out-Null
+                [pscustomobject]@{
+                    VMName = $name
+                    Started = $true
+                    Error = $null
+                }
+            } catch {
+                [pscustomobject]@{
+                    VMName = $name
+                    Started = $false
+                    Error = $_.Exception.Message
+                }
+            }
+        }
+    } -ArgumentList @($ServerName, $names, $BatchInventoryThreshold)
 }
 
 function Resolve-OsActionPlan {
@@ -379,16 +473,16 @@ function Get-ComplianceIssues {
     )
 
     if (-not $VmItem.VmFound) {
-        return @('VM introuvable')
+        return @('VM not found')
     }
 
     $issues = @()
-    if (-not $VmItem.Started) { $issues += 'non démarrée' }
-    if (-not $VmItem.NetworkConnected) { $issues += 'NIC non connectée' }
-    if (-not $VmItem.IPMatches) { $issues += 'IP inattendue' }
-    if (-not $VmItem.IntegrationReady) { $issues += 'Integration Services non OK' }
-    if (-not $VmItem.HighAvailabilityEnabled) { $issues += 'HA non activée' }
-    if (-not $VmItem.BackupTagPresent) { $issues += 'tag backup absent' }
+    if (-not $VmItem.Started) { $issues += 'not started' }
+    if (-not $VmItem.NetworkConnected) { $issues += 'NIC not connected' }
+    if (-not $VmItem.IPMatches) { $issues += 'unexpected IP' }
+    if (-not $VmItem.IntegrationReady) { $issues += 'Integration Services not OK' }
+    if (-not $VmItem.HighAvailabilityEnabled) { $issues += 'HA not enabled' }
+    if (-not $VmItem.BackupTagPresent) { $issues += 'backup tag missing' }
 
     return $issues
 }
@@ -400,29 +494,29 @@ function Get-ActionDisplayText {
     )
 
     if (-not $VmItem.VmFound) {
-        return 'VM introuvable dans SCVMM'
+        return 'VM not found in SCVMM'
     }
 
     if (-not [string]::IsNullOrWhiteSpace($VmItem.StartError) -and -not $VmItem.Started) {
-        return "Démarrage SCVMM KO : à vérifier à la main"
+        return "SCVMM start failed: check manually"
     }
 
     switch ($VmItem.ActionPlan) {
-        'ManualUnknown' { return 'OS inconnu : à la main' }
-        'ManualLegacy'  { return "OS $($VmItem.OsGeneration) : à la main" }
-        'ManualOther'   { return "OS $($VmItem.OsGeneration) : à la main" }
+        'ManualUnknown' { return 'Unknown OS: manual action required' }
+        'ManualLegacy'  { return "OS $($VmItem.OsGeneration) : manual action required" }
+        'ManualOther'   { return "OS $($VmItem.OsGeneration) : manual action required" }
         'WinRM' {
             switch ($VmItem.ActionState) {
-                'Queued'        { return "OS $($VmItem.OsGeneration) : WinRM en attente" }
-                'Running'       { return "OS $($VmItem.OsGeneration) : WinRM en cours" }
+                'Queued'        { return "OS $($VmItem.OsGeneration) : WinRM pending" }
+                'Running'       { return "OS $($VmItem.OsGeneration) : WinRM running" }
                 'Success-HTTPS' { return "OS $($VmItem.OsGeneration) : WinRM HTTPS OK" }
                 'Success-HTTP'  { return "OS $($VmItem.OsGeneration) : WinRM HTTP OK" }
-                'Failed'        { return "OS $($VmItem.OsGeneration) : WinRM KO, à faire à la main" }
-                'Skipped'       { return "OS $($VmItem.OsGeneration) : WinRM non lancé, à faire à la main" }
-                default         { return "OS $($VmItem.OsGeneration) : WinRM en attente" }
+                'Failed'        { return "OS $($VmItem.OsGeneration) : WinRM failed, manual action required" }
+                'Skipped'       { return "OS $($VmItem.OsGeneration) : WinRM not started, manual action required" }
+                default         { return "OS $($VmItem.OsGeneration) : WinRM pending" }
             }
         }
-        default { return 'À déterminer' }
+        default { return 'To be determined' }
     }
 }
 
@@ -433,14 +527,14 @@ function Get-PowerStateDisplayText {
     )
 
     if (-not $VmItem.VmFound) {
-        return 'VM introuvable'
+        return 'VM not found'
     }
 
     if ($VmItem.Started) {
-        return 'Allumée'
+        return 'Powered on'
     }
 
-    return 'Éteinte'
+    return 'Powered off'
 }
 
 function Start-WinRmRemediationJob {
@@ -463,9 +557,9 @@ function Start-WinRmRemediationJob {
         [int]$RetryDelaySeconds = 15
     )
 
-    # Chaque job écrit dans son propre fichier de log : plusieurs ThreadJobs partageant
-    # le même fichier provoquent des collisions Add-Content (« file in use ») et des
-    # lignes perdues. Le log par VM est dérivé du log principal (suffixe -<VM>).
+    # Each job writes to its own log file: multiple ThreadJobs sharing
+    # the same file cause Add-Content collisions ("file in use") and
+    # lost lines. The per-VM log is derived from the main log (suffix -<VM>).
     $jobLogFile = $TargetLogFile
     if (-not [string]::IsNullOrWhiteSpace($TargetLogFile)) {
         $safeVmName = ($VMName -replace '[\\/:*?"<>|\s]', '_')
@@ -534,7 +628,7 @@ function Start-WinRmRemediationJob {
                     Session  = New-PSSession @httpsSessionParams
                 }
             } catch {
-                Write-JobLog -Message "WinRM HTTPS indisponible: $($_.Exception.Message)" -Level 'WARNING' -LogFile $JobLogFile
+                Write-JobLog -Message "WinRM HTTPS unavailable: $($_.Exception.Message)" -Level 'WARNING' -LogFile $JobLogFile
             }
 
             try {
@@ -544,7 +638,7 @@ function Start-WinRmRemediationJob {
                     Session  = New-PSSession @sessionParams
                 }
             } catch {
-                Write-JobLog -Message "WinRM HTTP indisponible: $($_.Exception.Message)" -Level 'WARNING' -LogFile $JobLogFile
+                Write-JobLog -Message "WinRM HTTP unavailable: $($_.Exception.Message)" -Level 'WARNING' -LogFile $JobLogFile
             }
 
             return $null
@@ -565,7 +659,7 @@ function Start-WinRmRemediationJob {
             )
 
             if (-not (Test-Path -Path $LocalScriptPath)) {
-                Write-JobLog -Message "Script distant introuvable: $LocalScriptPath" -Level 'WARNING' -LogFile $JobLogFile
+                Write-JobLog -Message "Remote script not found: $LocalScriptPath" -Level 'WARNING' -LogFile $JobLogFile
                 return 'ScriptAbsent'
             }
 
@@ -589,8 +683,8 @@ function Start-WinRmRemediationJob {
 
                 Copy-Item -Path $LocalScriptPath -Destination $RemoteScriptPath -ToSession $session -Force -ErrorAction Stop
 
-                # Le script distant est un .bat : powershell.exe -File n'accepte que des .ps1.
-                # Codes retour du batch : 0 = succès, 1 = erreur, 2 = cleanup VMware partiel.
+                # The remote script is a .bat file: powershell.exe -File only accepts .ps1 files.
+                # Batch exit codes: 0 = success, 1 = error, 2 = partial VMware cleanup.
                 $remoteExitCode = Invoke-Command -Session $session -ScriptBlock {
                     param($ScriptPath)
                     & cmd.exe /c "`"$ScriptPath`"" | Out-Null
@@ -598,18 +692,18 @@ function Start-WinRmRemediationJob {
                 } -ArgumentList @($RemoteScriptPath) -ErrorAction Stop
 
                 if ($remoteExitCode -eq 1) {
-                    Write-JobLog -Message "Script Integration Services terminé en erreur (exit code 1) via WinRM $protocol." -Level 'WARNING' -LogFile $JobLogFile
+                    Write-JobLog -Message "Integration Services script finished with an error (exit code 1) via WinRM $protocol." -Level 'WARNING' -LogFile $JobLogFile
                     return "ExecutionFailed-$protocol"
                 }
 
                 if ($remoteExitCode -eq 2) {
-                    Write-JobLog -Message "Script Integration Services terminé avec cleanup VMware partiel (exit code 2) via WinRM $protocol." -Level 'WARNING' -LogFile $JobLogFile
+                    Write-JobLog -Message "Integration Services script finished with partial VMware cleanup (exit code 2) via WinRM $protocol." -Level 'WARNING' -LogFile $JobLogFile
                 }
 
-                Write-JobLog -Message "Script Integration Services exécuté via WinRM $protocol (exit code $remoteExitCode)." -Level 'SUCCESS' -LogFile $JobLogFile
+                Write-JobLog -Message "Integration Services script executed via WinRM $protocol (exit code $remoteExitCode)." -Level 'SUCCESS' -LogFile $JobLogFile
                 return "Success-$protocol"
             } catch {
-                Write-JobLog -Message "Échec via WinRM $protocol : $($_.Exception.Message)" -Level 'WARNING' -LogFile $JobLogFile
+                Write-JobLog -Message "Failure over WinRM ${protocol}: $($_.Exception.Message)" -Level 'WARNING' -LogFile $JobLogFile
                 return "ExecutionFailed-$protocol"
             } finally {
                 if ($session) {
@@ -724,11 +818,11 @@ function Show-PendingDashboard {
             Sort-Object VMName |
             ForEach-Object {
                 [pscustomobject]@{
-                    'Nom de la VM'      = $_.VMName
+                    'VM name'      = $_.VMName
                     'Power state'       = Get-PowerStateDisplayText -VmItem $_
-                    'OS'                = if ([string]::IsNullOrWhiteSpace($_.DisplayOperatingSystem)) { 'Inconnu' } else { $_.DisplayOperatingSystem }
-                    'Non-conformités'   = (Get-ComplianceIssues -VmItem $_) -join ', '
-                    'Actions à mener'   = Get-ActionDisplayText -VmItem $_
+                    'OS'                = if ([string]::IsNullOrWhiteSpace($_.DisplayOperatingSystem)) { 'Unknown' } else { $_.DisplayOperatingSystem }
+                    'Non-compliance'   = (Get-ComplianceIssues -VmItem $_) -join ', '
+                    'Actions to take'   = Get-ActionDisplayText -VmItem $_
                 }
             }
     )
@@ -737,8 +831,8 @@ function Show-PendingDashboard {
         try { Clear-Host } catch { Write-Verbose "Clear-Host is not supported by the current host: $($_.Exception.Message)" }
     }
 
-    $iterationLabel = if ($MaxIterations -le 0) { "$Iteration (illimité, Ctrl+C pour arrêter)" } else { "$Iteration/$MaxIterations" }
-    Write-Information "Suivi lotissement - rafraîchissement $iterationLabel - éléments restants : $($pendingRows.Count)" -InformationAction Continue
+    $iterationLabel = if ($MaxIterations -le 0) { "$Iteration (unlimited, Ctrl+C to stop)" } else { "$Iteration/$MaxIterations" }
+    Write-Information "Batch tracking - refresh $iterationLabel - items remaining: $($pendingRows.Count)" -InformationAction Continue
     Write-Information "" -InformationAction Continue
 
     if ($pendingRows) {
@@ -747,7 +841,7 @@ function Show-PendingDashboard {
             Out-String -Width 4096 |
             ForEach-Object { Write-Information $_ -InformationAction Continue }
     } else {
-        Write-Information "Toutes les VM sont conformes (démarrées, réseau, IP, Integration Services, HA, tag backup)." -InformationAction Continue
+        Write-Information "All VMs are compliant (started, network, IP, Integration Services, HA, backup tag)." -InformationAction Continue
     }
 }
 
@@ -762,7 +856,7 @@ $targetRows = @(
 
 if (-not $targetRows) {
     $target = if ([string]::IsNullOrWhiteSpace($Tag)) { 'all rows' } else { "tag '$Tag'" }
-    Write-MigrationLog "Aucune VM trouvée dans le CSV pour $target." -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "No VM found in the CSV for $target." -Level ERROR -LogFile $LogFile
     exit 1
 }
 
@@ -776,6 +870,12 @@ if ($maxIterationsFromConfig -and [int]$maxIterationsFromConfig -gt 0) {
     $IntegrationMaxIterations = [int]$maxIterationsFromConfig
 }
 
+$inventoryBatchThreshold = 25
+$inventoryBatchThresholdFromConfig = $Config.StartVm.InventoryBatchThreshold
+if ($inventoryBatchThresholdFromConfig -and [int]$inventoryBatchThresholdFromConfig -gt 0) {
+    $inventoryBatchThreshold = [int]$inventoryBatchThresholdFromConfig
+}
+
 $winRmCredential = $null
 if ($Config.RemoteActions.WinRm.Credential) {
     $winRmCredential = $Config.RemoteActions.WinRm.Credential
@@ -785,7 +885,7 @@ $localWinRmScriptPath = [string]$Config.RemoteActions.WinRm.RemoveVmwareToolsScr
 $remoteWinRmScriptPath = [string]$Config.RemoteActions.WinRm.RemoveVmwareToolsScriptRemotePath
 $expectedBackupTag = [string]$Config.Tags.BackupTag
 
-$initialSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames ($targetRows.VMName) -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag
+$initialSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames ($targetRows.VMName) -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag -ForceRefresh -BatchInventoryThreshold $inventoryBatchThreshold
 $initialSnapshotByName = @{}
 foreach ($snapshot in $initialSnapshots) {
     $initialSnapshotByName[[string]$snapshot.VMName] = $snapshot
@@ -811,7 +911,7 @@ $vmInventory = foreach ($row in $targetRows) {
             Running                 = $false
             HypervConfiguredOs      = $null
             IntegrationReady        = $false
-            IntegrationDetails      = 'VM introuvable'
+            IntegrationDetails      = 'VM not found'
             NetworkConnected        = $false
             CurrentIPs              = @()
             IPMatches               = $false
@@ -833,7 +933,7 @@ $vmInventory = foreach ($row in $targetRows) {
         Started                 = [bool]$snapshot.Running
         StartError              = $null
         IntegrationReady        = [bool]$snapshot.IntegrationReady
-        IntegrationDetails      = if ($snapshot.Exists) { [string]$snapshot.IntegrationDetails } else { 'VM introuvable' }
+        IntegrationDetails      = if ($snapshot.Exists) { [string]$snapshot.IntegrationDetails } else { 'VM not found' }
         NetworkConnected        = [bool]$snapshot.NetworkConnected
         CurrentIPs              = @($snapshot.CurrentIPs)
         IPMatches               = [bool]$snapshot.IPMatches
@@ -844,23 +944,32 @@ $vmInventory = foreach ($row in $targetRows) {
     }
 }
 
-Write-MigrationLog "Lotissement chargé: $($vmInventory.Count) VM(s)." -LogFile $LogFile
+Write-MigrationLog "Batch loaded: $($vmInventory.Count) VM(s)." -LogFile $LogFile
 
-foreach ($vmItem in @($vmInventory | Where-Object { $_.VmFound -and -not $_.Started })) {
-    try {
-        Start-SCVMMVm -ServerName $Config.SCVMM.Server -VMName $vmItem.VMName
-        $vmItem.Started = $true
-        Write-MigrationLog "[$($vmItem.VMName)] Démarrage demandé dans SCVMM." -Level SUCCESS -LogFile $LogFile
-    } catch {
-        $vmItem.StartError = $_.Exception.Message
-        $vmItem.Started = $false
-        Write-MigrationLog "[$($vmItem.VMName)] Échec au démarrage SCVMM: $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
+$vmsToStart = @($vmInventory | Where-Object { $_.VmFound -and -not $_.Started })
+if ($vmsToStart) {
+    $startResults = @(Start-SCVMMVms -ServerName $Config.SCVMM.Server -VMNames ($vmsToStart.VMName) -BatchInventoryThreshold $inventoryBatchThreshold)
+    $startResultByName = @{}
+    foreach ($startResult in $startResults) {
+        $startResultByName[[string]$startResult.VMName] = $startResult
+    }
+
+    foreach ($vmItem in $vmsToStart) {
+        $startResult = $startResultByName[$vmItem.VMName]
+        if ($startResult -and $startResult.Started) {
+            $vmItem.Started = $true
+            Write-MigrationLog "[$($vmItem.VMName)] Start requested in SCVMM." -Level SUCCESS -LogFile $LogFile
+        } else {
+            $vmItem.StartError = if ($startResult) { [string]$startResult.Error } else { 'Missing SCVMM start result.' }
+            $vmItem.Started = $false
+            Write-MigrationLog "[$($vmItem.VMName)] SCVMM start failed: $($vmItem.StartError)" -Level WARNING -LogFile $LogFile
+        }
     }
 }
 
 $winRmScriptAvailable = -not [string]::IsNullOrWhiteSpace($localWinRmScriptPath) -and (Test-Path -Path $localWinRmScriptPath)
 if (-not $winRmScriptAvailable) {
-    Write-MigrationLog "Script WinRM introuvable ou non configuré: $localWinRmScriptPath" -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "WinRM script not found or not configured: $localWinRmScriptPath" -Level WARNING -LogFile $LogFile
 }
 
 foreach ($vmItem in @($vmInventory | Where-Object { $_.VmFound -and -not $_.DisplayCompleted })) {
@@ -888,7 +997,7 @@ foreach ($vmItem in @($vmInventory | Where-Object { $_.VmFound -and -not $_.Disp
             $job = Start-WinRmRemediationJob -VMName $vmItem.VMName -LocalScriptPath $localWinRmScriptPath -RemoteScriptPath $remoteWinRmScriptPath -Credential $winRmCredential -TargetLogFile $LogFile -MaxAttempts $WinRmMaxAttempts -RetryDelaySeconds $WinRmRetryDelaySeconds
             $vmItem.ActionJobId = $job.Id
             $vmItem.ActionState = 'Queued'
-            Write-MigrationLog "[$($vmItem.VMName)] Job WinRM lancé." -LogFile $LogFile
+            Write-MigrationLog "[$($vmItem.VMName)] WinRM job started." -LogFile $LogFile
         }
     }
 }
@@ -912,7 +1021,7 @@ while ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $
     )
 
     if ($namesToRefresh) {
-        $refreshedSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames $namesToRefresh -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag
+        $refreshedSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames $namesToRefresh -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag -BatchInventoryThreshold $inventoryBatchThreshold
         $snapshotByName = @{}
         foreach ($snapshot in $refreshedSnapshots) {
             $snapshotByName[[string]$snapshot.VMName] = $snapshot
@@ -951,7 +1060,7 @@ while ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $
 
             if (Test-VmCompliant -Exists $vmItem.VmFound -Running $vmItem.Started -NetworkConnected $vmItem.NetworkConnected -IntegrationReady $vmItem.IntegrationReady -HighAvailabilityEnabled $vmItem.HighAvailabilityEnabled -BackupTagPresent $vmItem.BackupTagPresent -IPMatches $vmItem.IPMatches) {
                 $vmItem.DisplayCompleted = $true
-                Write-MigrationLog "[$($vmItem.VMName)] Conforme (démarrée, réseau, IP, Integration Services, HA, tag backup)." -Level SUCCESS -LogFile $LogFile
+                Write-MigrationLog "[$($vmItem.VMName)] Compliant (started, network, IP, Integration Services, HA, backup tag)." -Level SUCCESS -LogFile $LogFile
             }
 
             if (
@@ -964,7 +1073,7 @@ while ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $
                 $job = Start-WinRmRemediationJob -VMName $vmItem.VMName -LocalScriptPath $localWinRmScriptPath -RemoteScriptPath $remoteWinRmScriptPath -Credential $winRmCredential -TargetLogFile $LogFile -MaxAttempts $WinRmMaxAttempts -RetryDelaySeconds $WinRmRetryDelaySeconds
                 $vmItem.ActionJobId = $job.Id
                 $vmItem.ActionState = 'Queued'
-                Write-MigrationLog "[$($vmItem.VMName)] Job WinRM relancé." -LogFile $LogFile
+                Write-MigrationLog "[$($vmItem.VMName)] WinRM job restarted." -LogFile $LogFile
             }
         }
     }
@@ -985,13 +1094,13 @@ foreach ($vmItem in @($vmInventory | Where-Object { $_.ActionPlan -eq 'WinRM' })
 
 $remainingAfterLoop = @($vmInventory | Where-Object { -not $_.DisplayCompleted })
 if ($remainingAfterLoop) {
-    Write-MigrationLog "$($remainingAfterLoop.Count) VM(s) non conformes après $iteration itération(s) (IntegrationMaxIterations atteint)." -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "$($remainingAfterLoop.Count) VM(s) non-compliant after $iteration iteration(s) (IntegrationMaxIterations reached)." -Level WARNING -LogFile $LogFile
     foreach ($vmItem in $remainingAfterLoop) {
         $issues = (Get-ComplianceIssues -VmItem $vmItem) -join '; '
         Write-MigrationLog "[$($vmItem.VMName)] $issues" -Level WARNING -LogFile $LogFile
     }
 } else {
-    Write-MigrationLog "Toutes les VM sont conformes après $iteration itération(s)." -Level SUCCESS -LogFile $LogFile
+    Write-MigrationLog "All VMs are compliant after $iteration iteration(s)." -Level SUCCESS -LogFile $LogFile
 }
 
 $results = foreach ($vmItem in $vmInventory) {
@@ -1026,8 +1135,8 @@ $results |
 
 $summaryPath = Join-Path -Path $Config.Paths.LogDir -ChildPath "step4-startvm-summary-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
 $results | Export-Csv -Path $summaryPath -Delimiter ';' -NoTypeInformation
-Write-MigrationLog "Résumé exporté: $summaryPath" -Level SUCCESS -LogFile $LogFile
-Write-MigrationLog "step4-startvm terminé." -Level SUCCESS -LogFile $LogFile
+Write-MigrationLog "Summary exported: $summaryPath" -Level SUCCESS -LogFile $LogFile
+Write-MigrationLog "step4-startvm completed." -Level SUCCESS -LogFile $LogFile
 
 if ($remainingAfterLoop -and $IntegrationMaxIterations -gt 0) {
     exit 2

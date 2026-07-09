@@ -1,6 +1,6 @@
-# step4-StartVM.ps1 — Démarrage VMs + validation post-migration
+# step4-StartVM.ps1 — VM startup and post-migration validation
 
-Démarre les VMs migrées et boucle jusqu'à ce qu'elles soient pleinement conformes.
+Starts migrated VMs and loops until they are fully compliant.
 
 ## Synopsis
 
@@ -11,57 +11,57 @@ Démarre les VMs migrées et boucle jusqu'à ce qu'elles soient pleinement confo
 
 ## Description
 
-Exécuté automatiquement par [run-migration.ps1](run-migration.md) après la pause de validation manuelle qui suit step3 (peut aussi être relancé seul, ou via `run-migration.ps1 -StartFrom step4`).
+Automatically run by [run-migration.ps1](run-migration.md) after the manual validation pause that follows step3. It can also be rerun standalone, or through `run-migration.ps1 -StartFrom step4`.
 
-Ce script réunit en un seul passage sur l'inventaire SCVMM ce qui était auparavant réparti entre le démarrage des VMs et une étape de vérification post-migration séparée (`step5-PostMigrationChecks.ps1`, supprimé). Il :
+This script automatically uses the lowest-cost SCVMM inventory strategy for the lot size (targeted lookups for small lots, indexed full inventory for large lots) and combines in one pass what used to be split between VM startup and a separate post-migration validation step (`step5-PostMigrationChecks.ps1`, removed). It:
 
-- Démarre chaque VM listée dans le CSV batch (`Start-SCVirtualMachine`)
-- Tente WinRM (HTTPS puis HTTP) sur Windows Server 2012+ pour uploader et exécuter un script de retrait VMware Tools ; pour les OS antérieurs (2003/2008) ou en cas d'échec WinRM, reporte une action manuelle
-- Boucle jusqu'à ce que chaque VM soit **conforme**, c'est-à-dire :
-  - démarrée et sa carte réseau connectée
-  - son IPv4 invitée correspond à l'IP attendue (`Paths.ExtractIpCsv`, si le fichier existe)
-  - ses Integration Services sont opérationnels (heartbeat, time sync, data exchange, guest agent)
-  - la Haute Disponibilité SCVMM est activée
-  - le tag de backup post-migration (`Tags.BackupTag`) est présent
-- Par défaut la boucle est **illimitée** (`-IntegrationMaxIterations 0`) : elle continue jusqu'à conformité totale ou jusqu'à interruption manuelle (Ctrl+C) — les VMs déjà démarrées ne sont pas affectées par l'interruption. Une valeur positive borne le nombre d'itérations ; dans ce cas, le script sort avec le code 2 s'il reste des VMs non conformes à la fin.
+- Starts VMs listed in the batch CSV in a single SCVMM session (`Start-SCVirtualMachine`), instead of opening one session per VM
+- Attempts WinRM (HTTPS, then HTTP) on Windows Server 2012+ to upload and run the VMware Tools removal script; for older OS versions (2003/2008), or when WinRM fails, it reports a manual action
+- Loops until each VM is **compliant**, meaning:
+  - it is started and its network adapter is connected
+  - its guest IPv4 address matches the expected IP (`Paths.ExtractIpCsv`, when the file exists)
+  - Integration Services are operational (heartbeat, time sync, data exchange, guest agent)
+  - SCVMM High Availability is enabled
+  - the post-migration backup tag (`Tags.BackupTag`) is present
+- By default the loop is **unlimited** (`-IntegrationMaxIterations 0`): it continues until full compliance or manual interruption (Ctrl+C). VMs that were already started are not affected by the interruption. A positive value caps the number of iterations; in that case, the script exits with code 2 if any VM remains non-compliant at the end.
 
-## Paramètres
+## Parameters
 
-| Paramètre | Type | Défaut | Description |
-|-----------|------|--------|-------------|
-| `-ConfigFile` | string | `config.psd1` | Fichier de configuration |
-| `-CsvFile` | string | `Config.Paths.CsvFile` | CSV batch |
-| `-ExtractIpCsvFile` | string | `Config.Paths.ExtractIpCsv` | CSV d'IP attendues (optionnel — ignoré si absent) |
-| `-Tag` | string | — | Tag pour filtrer les VMs |
-| `-LogFile` | string | auto-généré | Fichier de log |
-| `-IntegrationPollIntervalSeconds` | int | `30` | Intervalle entre deux vérifications de conformité |
-| `-IntegrationMaxIterations` | int | `0` | Itérations max (`0` = illimité) |
-| `-WinRmRetryDelaySeconds` | int | `15` | Délai entre tentatives WinRM |
-| `-WinRmMaxAttempts` | int | `20` | Tentatives max WinRM |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-ConfigFile` | string | `config.psd1` | Configuration file |
+| `-CsvFile` | string | `Config.Paths.CsvFile` | Batch CSV |
+| `-ExtractIpCsvFile` | string | `Config.Paths.ExtractIpCsv` | Expected-IP CSV (optional — ignored when missing) |
+| `-Tag` | string | — | Tag used to filter VMs |
+| `-LogFile` | string | auto-generated | Log file |
+| `-IntegrationPollIntervalSeconds` | int | `30` | Interval between compliance checks |
+| `-IntegrationMaxIterations` | int | `0` | Maximum iterations (`0` = unlimited) |
+| `-WinRmRetryDelaySeconds` | int | `15` | Delay between WinRM attempts |
+| `-WinRmMaxAttempts` | int | `20` | Maximum WinRM attempts |
 
-## Flux d'exécution
+## Execution flow
 
 ```
-Pour chaque VM du CSV (filtrée par Tag) :
-├─ Récupère l'inventaire SCVMM (état, OS configuré, réseau, HA, tag, IP)
-├─ Démarre la VM (Start-SCVirtualMachine)
-├─ Si OS ≥ 2012 :
-│  ├─ Tente WinRM HTTPS puis HTTP
-│  ├─ Upload + exécution script retrait VMware Tools
-│  └─ Si WinRM indisponible → reporte action manuelle
-├─ Si OS < 2012 ou inconnu → reporte action manuelle
-└─ Boucle de conformité (jusqu'à IntegrationMaxIterations, ou sans limite si 0) :
-   ├─ Démarrée + NIC connectée + IP attendue + Integration Services OK + HA + tag backup
-   └─ Retire la VM du tableau de suivi dès qu'elle est conforme
+For each VM in the CSV (filtered by Tag):
+├─ Retrieve SCVMM inventory in batch (state, configured OS, network, HA, tag, IP)
+├─ Start non-running VMs in batch (Start-SCVirtualMachine)
+├─ If OS ≥ 2012:
+│  ├─ Try WinRM HTTPS, then HTTP
+│  ├─ Upload and run the VMware Tools removal script
+│  └─ If WinRM is unavailable → report a manual action
+├─ If OS < 2012 or unknown → report a manual action
+└─ Compliance loop (until IntegrationMaxIterations, or unlimited when 0):
+   ├─ Started + connected NIC + expected IP + Integration Services OK + HA + backup tag
+   └─ Remove the VM from the tracking table as soon as it is compliant
 ```
 
 ## Dashboard
 
-À chaque itération, la console affiche les VMs encore non conformes avec la liste des non-conformités (`NIC non connectée`, `IP inattendue`, `Integration Services non OK`, `HA non activée`, `tag backup absent`, `non démarrée`).
+At each iteration, the script refreshes only VMs that are still non-compliant. Depending on `StartVm.InventoryBatchThreshold`, it uses either targeted name lookups or an indexed full SCVMM inventory, then displays the remaining non-compliant VMs with their issues (`NIC not connected`, `unexpected IP`, `Integration Services not OK`, `HA not enabled`, `backup tag missing`, `not started`).
 
-## Résumé de sortie
+## Output summary
 
-Un CSV `step4-startvm-summary-{yyyyMMdd-HHmmss}.csv` est exporté dans `Paths.LogDir`, avec une colonne `Compliant` par VM et le détail de chaque critère (réseau, IP, Integration Services, HA, tag backup).
+A `step4-startvm-summary-{yyyyMMdd-HHmmss}.csv` file is exported to `Paths.LogDir`, with one `Compliant` column per VM and details for each criterion (network, IP, Integration Services, HA, backup tag).
 
 ## Logs
 
@@ -70,13 +70,13 @@ Un CSV `step4-startvm-summary-{yyyyMMdd-HHmmss}.csv` est exporté dans `Paths.Lo
 {LogDir}/step4-startvm-summary-{yyyyMMdd-HHmmss}.csv
 ```
 
-## Dépendances
+## Dependencies
 
 - `lib.ps1`
 - `config.psd1` — sections `SCVMM`, `Tags`, `Paths`, `RemoteActions`, `StartVm`
-- Module `VirtualMachineManager`
+- `VirtualMachineManager` module
 
-## Voir aussi
+## See also
 
-- [run-migration.ps1](run-migration.md) — Orchestrateur, exécute cette étape après step3
-- [step6-CleanupVmware.ps1](step6-CleanupVmware.md) — Nettoyage VMware
+- [run-migration.ps1](run-migration.md) — Orchestrator, runs this step after step3
+- [step6-CleanupVmware.ps1](step6-CleanupVmware.md) — VMware cleanup
