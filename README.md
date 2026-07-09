@@ -312,3 +312,13 @@ Run Pester tests from repository root:
 ```powershell
 pwsh -NoProfile -Command "Invoke-Pester -Path ./tests"
 ```
+
+## Documentation détaillée
+
+Chaque script dispose d'une documentation détaillée dans le répertoire [doc/](doc/README.md) :
+
+- Paramètres, exemples, flux d'exécution
+- Dépendances et logs
+- Modes spéciaux (incident recovery, network-only)
+
+voir [doc/README.md](doc/README.md) pour l'index complet.
