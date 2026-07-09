@@ -111,6 +111,10 @@ Get-ChildItem "$PSScriptRoot\step3\Step3.*.ps1" |
     Where-Object Name -ne 'Step3.ScvmmSession.Functions.ps1' |
     ForEach-Object { . $_.FullName }
 
+Initialize-ScvmmSessionFunction -FunctionFiles @(
+    "$PSScriptRoot\step3\Step3.ScvmmSession.Functions.ps1"
+)
+
 $Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
 
 if (-not $SCVMMServer)   { $SCVMMServer   = $Config.SCVMM.Server }

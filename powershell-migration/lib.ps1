@@ -712,3 +712,56 @@ function Resolve-OperatingSystemMapping {
 
     return $null
 }
+
+# ---------------------------------------------------------------------------
+# Initialize-ScvmmSessionFunction : push function definitions into the WinPS compat session
+# ---------------------------------------------------------------------------
+<#
+.SYNOPSIS
+    Loads PowerShell function files into the WinPS compatibility session so
+    they are available inside Invoke-SCVMMCommand scriptblocks.
+
+.DESCRIPTION
+    Uses Invoke-Command -FilePath to push function-only .ps1 files into the
+    persistent WinPS compat session. Also dot-sources the same files locally
+    so they work in direct (non-compat) mode.
+
+    With persistent workers, functions are parsed only once per worker lifetime,
+    avoiding the current re-parse of ~800 lines of nested functions on every
+    Invoke-SCVMMCommand call.
+
+.PARAMETER FunctionFiles
+    Array of .ps1 file paths containing only function definitions (no inline
+    execution). These files are pushed into the WinPS compat session and
+    dot-sourced locally.
+
+.EXAMPLE
+    Initialize-ScvmmSessionFunction -FunctionFiles @(
+        "$PSScriptRoot\step3\Step3.ScvmmSession.Functions.ps1"
+    )
+#>
+function Initialize-ScvmmSessionFunction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$FunctionFiles
+    )
+
+    $compatSession = Get-PSSession -Name 'WinPSCompatSession' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
+    foreach ($file in $FunctionFiles) {
+        if (-not (Test-Path -Path $file -PathType Leaf)) {
+            Write-Warning "Initialize-ScvmmSessionFunction: file not found — '$file'"
+            continue
+        }
+
+        if ($compatSession) {
+            Write-Verbose "Initialize-ScvmmSessionFunction: loading '$file' into WinPS compat session"
+            Invoke-Command -Session $compatSession -FilePath $file
+        }
+
+        Write-Verbose "Initialize-ScvmmSessionFunction: dot-sourcing '$file' locally"
+        . $file
+    }
+}
