@@ -5,6 +5,7 @@ Orchestrateur de la pipeline de migration VMware → Hyper-V en 3 étapes.
 ## Synopsis
 
 ```powershell
+.\run-migration.ps1
 .\run-migration.ps1 -Tag HypMig-lot-118
 .\run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step3
 .\run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step2 -RecipientGroup internal -NonInteractive
@@ -20,11 +21,21 @@ Orchestrateur de la pipeline de migration VMware → Hyper-V en 3 étapes.
 
 L'orchestrateur supporte la reprise depuis n'importe quelle étape, le mode incident recovery mono-VM, et l'exécution non-interactive pour l'automatisation.
 
+### Mode interactif (aucun argument)
+
+Lancé sans le moindre paramètre, le script bascule en mode interactif :
+
+1. Vérifie `config.local.psd1` via `Get-MigrationConfigMissingKeys` ; s'il manque des valeurs (première utilisation, ou nouvelles clés introduites par une mise à jour des scripts), lance l'assistant `Invoke-MigrationConfigWizard` pour les compléter.
+2. Demande ensuite `-Tag`, `-StartFrom` et `-RecipientGroup` via des prompts simples (Entrée = valeur par défaut).
+3. Poursuit normalement la pipeline avec les valeurs saisies.
+
+Dès qu'un paramètre est passé explicitement (ou `-NonInteractive`), ce mode est court-circuité — seul `-Tag` manquant déclenche encore un simple `Read-Host` (sauf en `-NonInteractive`, où il lève une erreur). Voir [configure-migration.ps1](configure-migration.md) pour lancer l'assistant de configuration seul.
+
 ## Paramètres
 
 | Paramètre | Type | Requis | Défaut | Description |
 |-----------|------|--------|--------|-------------|
-| `-Tag` | string | Oui | — | Tag du lot à migrer (ex: `HypMig-lot-118`) |
+| `-Tag` | string | Oui* | — | Tag du lot à migrer (ex: `HypMig-lot-118`) — *peut être saisi de façon interactive si omis |
 | `-StartFrom` | string | Non | `step1` | Étape de départ : `step1`, `step2`, `step3` |
 | `-RecipientGroup` | string | Non | `infogerant` | Groupe de destinataires pour l'email pré-migration |
 | `-ConfigFile` | string | Non | `config.psd1` | Fichier de configuration alternatif |
@@ -101,10 +112,16 @@ Pour chaque VM, l'orchestrateur :
 .\run-migration.ps1 -Tag HypMig-lot-118 -NonInteractive -SkipManualValidation
 ```
 
+### Mode interactif (config + Tag demandés)
+```powershell
+.\run-migration.ps1
+```
+
 ## Dépendances
 
-- `lib.ps1` — fonctions partagées
-- `config.psd1` — configuration
+- `lib.ps1` — fonctions partagées, dont `Import-MigrationConfig`, `Get-MigrationConfigMissingKeys`, `Invoke-MigrationConfigWizard`
+- `config.psd1` — template de configuration versionné
+- `config.local.psd1` — overrides spécifiques à l'environnement (optionnel, généré par `configure-migration.ps1`)
 - `step1-TagResources_CreateVeeamJob.ps1` — exécuté pour step1
 - `step2-ShutdownVM_StartBackupVeeam.ps1` — exécuté pour step2
 - `step3-StartInstantRecovery.ps1` — exécuté pour la phase 1 de step3
@@ -125,6 +142,7 @@ Pour chaque VM, l'orchestrateur :
 
 ## Voir aussi
 
+- [configure-migration.ps1](configure-migration.md) — Assistant de configuration interactif
 - [worker-step3.ps1](worker-step3.md) — Détail du worker
 - [step3-StartInstantRecovery.ps1](step3-StartInstantRecovery.md) — Bulk IR
 - [step3-MigrateVM.ps1](step3-MigrateVM.md) — Migration par VM

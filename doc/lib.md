@@ -79,6 +79,19 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 |----------|-------------|
 | `Get-FirstPropertyValue` | Retourne la première valeur non-vide parmi des noms de colonnes candidats |
 
+### Config layering (config.psd1 + config.local.psd1)
+
+| Fonction | Description |
+|----------|-------------|
+| `Merge-Hashtable` | Fusion récursive de deux hashtables ; `Override` gagne sur les clés en conflit |
+| `Import-MigrationConfig` | Charge `config.psd1` puis fusionne `config.local.psd1` par-dessus s'il existe |
+| `Get-MigrationConfigMissingKeys` | Liste les entrées de `$script:MigrationConfigSchema` absentes de `config.local.psd1` |
+| `Invoke-MigrationConfigWizard` | Boucle de prompts interactifs ; écrit `config.local.psd1` via `Save-MigrationLocalConfig` |
+| `Save-MigrationLocalConfig` | Sérialise un hashtable `{ Section = { Clé = valeur } }` en `config.local.psd1` valide |
+| `ConvertTo-Psd1ScalarLiteral` | Convertit une valeur scalaire/tableau PowerShell en littéral PSD1 (string échappée, `$true`/`$false`, `@(...)`) |
+
+Voir [config.psd1](config.md#configpsd1-vs-configlocalpsd1) pour le rôle de chaque fichier et [configure-migration.ps1](configure-migration.md) pour l'outil interactif.
+
 ## Stratégie d'import des modules
 
 ```

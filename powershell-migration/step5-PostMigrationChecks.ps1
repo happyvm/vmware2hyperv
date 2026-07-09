@@ -29,7 +29,7 @@
     Path to the log file. Auto-generated if not provided.
 
 .EXAMPLE
-    .\step4-PostMigrationChecks.ps1 -Tag HypMig-lot-118
+    .\step5-PostMigrationChecks.ps1 -Tag HypMig-lot-118
 
 .NOTES
     Part of the vmware2hyperv migration toolkit.
@@ -50,7 +50,7 @@ param (
 if (-not $ConfigFile) { $ConfigFile = "$PSScriptRoot\config.psd1" }
 Assert-PathPresent -Path $ConfigFile -Label "Configuration file"
 
-$Config = Import-PowerShellDataFile $ConfigFile
+$Config = Import-MigrationConfig -ConfigFile $ConfigFile
 if (-not $CsvFile) { $CsvFile = $Config.Paths.CsvFile }
 Assert-PathPresent -Path $CsvFile -Label "Batch CSV"
 if (-not $ExtractIpCsvFile) {
@@ -65,7 +65,7 @@ Assert-PathPresent -Path $ExtractIpCsvFile -Label "Extract IP CSV"
 
 if (-not $LogFile) {
     $batchLabel = if ([string]::IsNullOrWhiteSpace($Tag)) { 'all' } else { $Tag }
-    $LogFile = "$($Config.Paths.LogDir)\step4-postcheck-$batchLabel-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $LogFile = "$($Config.Paths.LogDir)\step5-postcheck-$batchLabel-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 }
 
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback

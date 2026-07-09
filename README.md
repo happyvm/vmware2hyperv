@@ -20,6 +20,8 @@ The migration is split into 3 steps:
 The orchestrator can start from any step (`step1`, `step2`, `step3`) to resume after interruption.
 If `step3` already restored the VM but failed during SCVMM network/OS/post-configuration, you can replay only that tail of `step3` with `-ForceNetworkConfigOnly`.
 
+Run `run-migration.ps1` with no arguments at all for an interactive walkthrough: it completes `config.local.psd1` if needed (see [Configuration](#configuration)) then prompts for `-Tag` and the other run options.
+
 ### Workflow diagram
 
 ```mermaid
@@ -51,8 +53,8 @@ flowchart TD
     end
 
     subgraph POST["Post-migration"]
-        CHECKS[step4-PostMigrationChecks.ps1\nSCVMM compliance loop]
-        STARTVM[step5-StartVM.ps1\nStart VMs, Integration Services]
+        STARTVM[step4-StartVM.ps1\nStart VMs, Integration Services]
+        CHECKS[step5-PostMigrationChecks.ps1\nSCVMM compliance loop]
         CLEANUP[step6-CleanupVmware.ps1\nDelete source VMs]
     end
 
@@ -67,9 +69,9 @@ flowchart TD
     BULKIR --> WAIT
     WAIT --> WORKER
     WORKER --> MIGRATE
-    MIGRATE --> CHECKS
-    CHECKS --> STARTVM
-    STARTVM --> CLEANUP
+    MIGRATE --> STARTVM
+    STARTVM --> CHECKS
+    CHECKS --> CLEANUP
 ```
 
 ### Architecture: step3 worker pool
@@ -119,11 +121,19 @@ The script is idempotent: if PowerShell is already installed, it exits without c
 
 ## Configuration
 
-Default configuration is stored in:
+Default configuration is stored in the versioned template:
 
 - `powershell-migration/config.psd1`
 
-Update at least:
+Environment-specific values (vCenter/SCVMM servers, SMTP, paths, recipients...) belong in `powershell-migration/config.local.psd1` instead — a gitignored file merged on top of `config.psd1` at runtime by every script (`Import-MigrationConfig` in `lib.ps1`). The easiest way to fill it in is the interactive wizard:
+
+```powershell
+pwsh ./powershell-migration/configure-migration.ps1
+```
+
+It only asks about values still missing from `config.local.psd1`, so re-running it after a `git pull` that introduced new config keys only prompts for what's new. Use `-Full` to revisit every answer. `run-migration.ps1` launched with no arguments runs this same check automatically before asking for `-Tag`.
+
+At minimum you'll be asked for:
 
 - Infrastructure endpoints (`VCenter`, `SCVMM`, `HyperV`, `Veeam`)
   - In `Veeam`, `BackupProxy` is optional and lets you force the proxy used when creating backup jobs in step1
@@ -133,6 +143,8 @@ Update at least:
   - `CsvFile`: input CSV with `VMName` and `Tag` columns, plus optional `OperatingSystem`
   - `CmdbExtractCsv`: optional CMDB extract CSV path used to enrich VMs with `OperatingSystem` values by matching `VMName`/`Name`
   - `LogDir`: logs output directory
+
+More complex structures (`SCVMM.OperatingSystemMap`, `Precheck.WindowsCredentials`, `MigrationMappings.ClusterMappings`...) aren't covered by the wizard and stay hand-edited in `config.psd1`.
 
 
 ### Configure multi-cluster target mapping
@@ -239,9 +251,26 @@ pwsh ./powershell-migration/step3-StartInstantRecovery.ps1 -BackupJobName Backup
 The delay between two starts is tunable with `-StartDelaySeconds` (or `Orchestrator.InstantRecoveryStartDelaySec` in config) to smooth the load on Veeam and the mount hosts. The script exits non-zero and lists the affected VMs if any mount fails or times out.
 
 
+### Start migrated VMs + Integration Services / VMware Tools actions
+
+Use `step4-StartVM.ps1` to:
+
+- start each VM from `lotissement.csv` (optionally filtered by `-Tag`);
+- list VM state + SCVMM configured operating system;
+- mount an Integration Services ISO for Windows Server 2003/2008 (paths from `IntegrationServices.IsoByOsFamily` in config);
+- try WinRM HTTPS then HTTP on Windows Server 2012+ VMs to upload and execute a VMware Tools removal script;
+- loop on Integration Services health checks (SCVMM signals) until ready or timeout.
+
+```powershell
+pwsh ./powershell-migration/step4-StartVM.ps1 -Tag HypMig-lot-118
+```
+
+If OS is below 2012, or WinRM is unavailable for 2012+, the script reports that integration/manual cleanup actions must be done by hand.
+You can tune integration checks with `StartVm.IntegrationPollIntervalSeconds` and `StartVm.IntegrationMaxIterations` in config (or via script parameters).
+
 ### Post-migration companion checks (SCVMM)
 
-Run this script in parallel with `run-migration.ps1` (or just after) to loop until all VMs in the CSV are compliant on SCVMM:
+Run this script once VMs are started (or in parallel with `run-migration.ps1`) to loop until all VMs in the CSV are compliant on SCVMM:
 
 - VM exists and is running
 - NIC is connected
@@ -251,34 +280,17 @@ Run this script in parallel with `run-migration.ps1` (or just after) to loop unt
 - guest IPv4 still matches the expected IP from CSV (`ExpectedIP` / `IP` / `IPAddress` columns)
 
 ```powershell
-pwsh ./powershell-migration/step4-PostMigrationChecks.ps1 -Tag HypMig-lot-118
+pwsh ./powershell-migration/step5-PostMigrationChecks.ps1 -Tag HypMig-lot-118
 ```
 
 Useful options:
 
 ```powershell
-pwsh ./powershell-migration/step4-PostMigrationChecks.ps1 -Tag HypMig-lot-118 -PollIntervalSeconds 120 -MaxIterations 30
-pwsh ./powershell-migration/step4-PostMigrationChecks.ps1 -CsvFile D:\Scripts\lotissement.csv
+pwsh ./powershell-migration/step5-PostMigrationChecks.ps1 -Tag HypMig-lot-118 -PollIntervalSeconds 120 -MaxIterations 30
+pwsh ./powershell-migration/step5-PostMigrationChecks.ps1 -CsvFile D:\Scripts\lotissement.csv
 ```
 
 `-MaxIterations 0` means infinite loop until every VM is compliant.
-
-### Start migrated VMs + Integration Services / VMware Tools actions
-
-Use `step5-StartVM.ps1` to:
-
-- start each VM from `lotissement.csv` (optionally filtered by `-Tag`);
-- list VM state + SCVMM configured operating system;
-- mount an Integration Services ISO for Windows Server 2003/2008 (paths from `IntegrationServices.IsoByOsFamily` in config);
-- try WinRM HTTPS then HTTP on Windows Server 2012+ VMs to upload and execute a VMware Tools removal script;
-- loop on Integration Services health checks (SCVMM signals) until ready or timeout.
-
-```powershell
-pwsh ./powershell-migration/step5-StartVM.ps1 -Tag HypMig-lot-118
-```
-
-If OS is below 2012, or WinRM is unavailable for 2012+, the script reports that integration/manual cleanup actions must be done by hand.
-You can tune integration checks with `StartVm.IntegrationPollIntervalSeconds` and `StartVm.IntegrationMaxIterations` in config (or via script parameters).
 
 ## Logs
 

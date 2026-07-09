@@ -25,7 +25,8 @@
       and removes CD-ROM drive letters without requiring a reboot (Windows 2003 through 2025)
 
     All configurable values (defaults, guest account usernames) are read from
-    config.psd1 located in the same folder as the script.
+    config.psd1 located in the same folder as the script, layered with
+    config.local.psd1 if present (operator overrides — see configure-migration.ps1).
     Parameters supplied explicitly on the command line always take priority.
 
 .INPUT CSV
@@ -40,10 +41,12 @@
     migration_lot_errors.csv
 
 .PARAMETER VCenter
-    vCenter server hostname or IP. Can also be set via the VCenter.Server key in config.psd1.
+    vCenter server hostname or IP. Can also be set via the VCenter.Server key in
+    config.psd1 or config.local.psd1.
 
 .PARAMETER InputCsv
-    Path to the input CSV file. Can also be set via the Precheck.InputCsv key in config.psd1.
+    Path to the input CSV file. Can also be set via the Precheck.InputCsv key in
+    config.psd1 or config.local.psd1.
 
 .PARAMETER LogFile
     Path to a log file. If empty (default), output goes to the console only.
@@ -79,10 +82,13 @@ param(
 )
 
 # ============================================================
-# Load config.psd1
-# Explicit CLI parameters always take priority over the file.
+# Load config.psd1, layered with config.local.psd1 (operator overrides —
+# see Import-MigrationConfig in lib.ps1). Explicit CLI parameters always
+# take priority over both files.
 # Passwords are never stored in the config file.
 # ============================================================
+
+. "$PSScriptRoot\lib.ps1"
 
 $script:ConfigFilePath = Join-Path $PSScriptRoot "config.psd1"
 
@@ -90,7 +96,7 @@ if (-not (Test-Path -LiteralPath $script:ConfigFilePath)) {
     throw "Configuration file not found: $script:ConfigFilePath"
 }
 
-$cfg = Import-PowerShellDataFile -LiteralPath $script:ConfigFilePath
+$cfg = Import-MigrationConfig -ConfigFile $script:ConfigFilePath
 
 # Safe hashtable lookup. Avoids the ?? operator (PowerShell 7 only) so the script
 # still parses and runs under Windows PowerShell 5.1.

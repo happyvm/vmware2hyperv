@@ -65,7 +65,7 @@ param (
 
 # ── Initialisation ─────────────────────────────────────────────────────────
 . "$PSScriptRoot\lib.ps1"
-$Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
+$Config = Import-MigrationConfig -ConfigFile "$PSScriptRoot\config.psd1"
 
 if (-not $SCVMMServer)   { $SCVMMServer   = $Config.SCVMM.Server }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step3-migrate-$VMName-$(Get-Date -Format 'yyyyMMdd').log" }

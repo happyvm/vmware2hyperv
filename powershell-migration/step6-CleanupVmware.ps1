@@ -41,7 +41,7 @@ param (
 if (-not $ConfigFile) { $ConfigFile = "$PSScriptRoot\config.psd1" }
 Assert-PathPresent -Path $ConfigFile -Label "Configuration file"
 
-$Config = Import-PowerShellDataFile $ConfigFile
+$Config = Import-MigrationConfig -ConfigFile $ConfigFile
 $VCenterServer = $Config.VCenter.Server
 
 if (-not $LogFile) { $LogFile = "$($Config.Paths.LogDir)\step6-cleanup-vmware-$Tag-$(Get-Date -Format 'yyyyMMdd').log" }

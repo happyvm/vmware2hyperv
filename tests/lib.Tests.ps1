@@ -192,3 +192,117 @@ Describe 'Get-ModuleImportStrategies' {
         $strategies | Should -Not -Contain 'WindowsPowerShell'
     }
 }
+
+Describe 'Merge-Hashtable' {
+    It 'overrides scalar values while keeping untouched keys from Base' {
+        $base = @{ A = @{ X = 1; Y = 2 }; B = 'base' }
+        $override = @{ A = @{ X = 99 }; C = 'new' }
+
+        $merged = Merge-Hashtable -Base $base -Override $override
+
+        $merged.A.X | Should -Be 99
+        $merged.A.Y | Should -Be 2
+        $merged.B   | Should -Be 'base'
+        $merged.C   | Should -Be 'new'
+    }
+
+    It 'does not mutate the Base hashtable' {
+        $base = @{ A = @{ X = 1 } }
+        Merge-Hashtable -Base $base -Override @{ A = @{ X = 2 } } | Out-Null
+        $base.A.X | Should -Be 1
+    }
+}
+
+Describe 'ConvertTo-Psd1ScalarLiteral' {
+    It 'quotes strings and escapes embedded single quotes' {
+        ConvertTo-Psd1ScalarLiteral "O'Brien" | Should -Be "'O''Brien'"
+    }
+
+    It 'renders booleans and integers as PowerShell literals' {
+        ConvertTo-Psd1ScalarLiteral $true  | Should -Be '$true'
+        ConvertTo-Psd1ScalarLiteral $false | Should -Be '$false'
+        ConvertTo-Psd1ScalarLiteral 25     | Should -Be '25'
+    }
+
+    It 'renders arrays as @(...) of quoted items' {
+        ConvertTo-Psd1ScalarLiteral @('a@x.com', 'b@x.com') | Should -Be "@('a@x.com', 'b@x.com')"
+    }
+}
+
+Describe 'Import-MigrationConfig / Save-MigrationLocalConfig' {
+    It 'layers config.local.psd1 over config.psd1 without touching untouched keys' {
+        $dir = Join-Path $TestDrive 'layered'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $configFile = Join-Path $dir 'config.psd1'
+        Set-Content -Path $configFile -Value @'
+@{
+    VCenter = @{ Server = "template.domain.local" }
+    Smtp    = @{ Server = "smtp.template.local"; Port = 25; Enabled = $true }
+}
+'@
+
+        Save-MigrationLocalConfig -Path (Join-Path $dir 'config.local.psd1') -Data @{
+            VCenter = @{ Server = 'real-vcenter.corp.local' }
+        }
+
+        $merged = Import-MigrationConfig -ConfigFile $configFile
+        $merged.VCenter.Server | Should -Be 'real-vcenter.corp.local'
+        $merged.Smtp.Server    | Should -Be 'smtp.template.local'
+        $merged.Smtp.Port      | Should -Be 25
+    }
+
+    It 'returns the template unchanged when config.local.psd1 does not exist' {
+        $dir = Join-Path $TestDrive 'no-local'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $configFile = Join-Path $dir 'config.psd1'
+        Set-Content -Path $configFile -Value '@{ VCenter = @{ Server = "template.domain.local" } }'
+
+        $merged = Import-MigrationConfig -ConfigFile $configFile
+        $merged.VCenter.Server | Should -Be 'template.domain.local'
+    }
+
+    It 'round-trips arrays and booleans written by Save-MigrationLocalConfig' {
+        $dir = Join-Path $TestDrive 'roundtrip'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $configFile = Join-Path $dir 'config.psd1'
+        Set-Content -Path $configFile -Value '@{ Smtp = @{ Enabled = $true } }'
+
+        Save-MigrationLocalConfig -Path (Join-Path $dir 'config.local.psd1') -Data @{
+            Smtp       = @{ Enabled = $false }
+            Recipients = @{ internal = @('a@x.com', 'b@x.com') }
+        }
+
+        $merged = Import-MigrationConfig -ConfigFile $configFile
+        $merged.Smtp.Enabled            | Should -Be $false
+        $merged.Recipients.internal     | Should -HaveCount 2
+        $merged.Recipients.internal[1]  | Should -Be 'b@x.com'
+    }
+}
+
+Describe 'Get-MigrationConfigMissingKeys' {
+    It 'reports known schema entries when config.local.psd1 does not exist' {
+        $dir = Join-Path $TestDrive 'missing-local'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $configFile = Join-Path $dir 'config.psd1'
+        Set-Content -Path $configFile -Value '@{ VCenter = @{ Server = "template.domain.local" } }'
+
+        $missing = Get-MigrationConfigMissingKeys -ConfigFile $configFile
+        ($missing | Where-Object { $_.Section -eq 'VCenter' -and $_.Key -eq 'Server' }) | Should -Not -BeNullOrEmpty
+        ($missing | Where-Object { $_.Section -eq 'Smtp' -and $_.Key -eq 'Server' })    | Should -Not -BeNullOrEmpty
+    }
+
+    It 'excludes keys already answered in config.local.psd1' {
+        $dir = Join-Path $TestDrive 'partial-local'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $configFile = Join-Path $dir 'config.psd1'
+        Set-Content -Path $configFile -Value '@{ VCenter = @{ Server = "template.domain.local" } }'
+
+        Save-MigrationLocalConfig -Path (Join-Path $dir 'config.local.psd1') -Data @{
+            VCenter = @{ Server = 'real-vcenter.corp.local' }
+        }
+
+        $missing = Get-MigrationConfigMissingKeys -ConfigFile $configFile
+        ($missing | Where-Object { $_.Section -eq 'VCenter' -and $_.Key -eq 'Server' }) | Should -BeNullOrEmpty
+        ($missing | Where-Object { $_.Section -eq 'Smtp' -and $_.Key -eq 'Server' })    | Should -Not -BeNullOrEmpty
+    }
+}

@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Central library imported by all migration scripts via dot-sourcing
-    (`. "$PSScriptRoot\lib.ps1"`). Provides 22 reusable functions covering:
+    (`. "$PSScriptRoot\lib.ps1"`). Provides reusable functions covering:
 
     - **Logging**: Write-MigrationLog (timestamped, multi-stream with file output)
     - **Connections**: Connect-VCenter, Disconnect-VCenter, Import-RequiredModule
@@ -21,6 +21,9 @@
     - **VMware Tools**: Get-OsGeneration, guest IP extraction
     - **Email**: Send-HtmlMail via SMTP, ConvertTo-HtmlEncoded for safe HTML
     - **Validation**: Assert-PathPresent, file-system helpers
+    - **Config layering**: Import-MigrationConfig merges config.local.psd1 (operator
+      overrides, gitignored) over config.psd1; Invoke-MigrationConfigWizard drives
+      the interactive prompts behind configure-migration.ps1
 
     All functions use Write-MigrationLog for structured logging and support the
     -LogFile parameter for persistent audit trails.
@@ -713,4 +716,227 @@ function Initialize-ScvmmSessionFunction {
         Write-Verbose "Initialize-ScvmmSessionFunction: dot-sourcing '$file' locally"
         . $file
     }
+}
+
+# ---------------------------------------------------------------------------
+# Config layering : config.psd1 (versioned template) + config.local.psd1
+# (gitignored, operator-specific overrides). See configure-migration.ps1.
+# ---------------------------------------------------------------------------
+
+# Curated list of config values an operator is expected to customize per
+# environment. Add an entry here whenever a script starts depending on a new
+# config.psd1 key — configure-migration.ps1 will then prompt for it on the
+# next run instead of silently leaving it unset.
+$script:MigrationConfigSchema = @(
+    @{ Section = 'VCenter';    Key = 'Server';        Question = 'Serveur vCenter (nom ou IP)' }
+    @{ Section = 'SCVMM';      Key = 'Server';         Question = 'Serveur SCVMM (nom ou IP)' }
+    @{ Section = 'HyperV';     Key = 'Host1';          Question = "Hôte Hyper-V par défaut (Instant Recovery)" }
+    @{ Section = 'HyperV';     Key = 'Host2';          Question = "Hôte Hyper-V par défaut (LiveMigration)" }
+    @{ Section = 'HyperV';     Key = 'Cluster';        Question = "Cluster Hyper-V par défaut" }
+    @{ Section = 'HyperV';     Key = 'ClusterStorage'; Question = 'Cluster Shared Volume par défaut (ex: C:\ClusterStorage\Volume2)' }
+    @{ Section = 'Veeam';      Key = 'BackupRepo';     Question = 'Repository de backup Veeam' }
+    @{ Section = 'Veeam';      Key = 'BackupProxy';    Question = 'Proxy de backup Veeam'; Optional = $true }
+    @{ Section = 'Tags';       Key = 'Category';       Question = 'Catégorie de tag vSphere pour les lots de migration' }
+    @{ Section = 'Tags';       Key = 'BackupTag';      Question = 'Tag appliqué aux VMs après migration' }
+    @{ Section = 'Smtp';       Key = 'Server';         Question = 'Serveur SMTP' }
+    @{ Section = 'Smtp';       Key = 'Port';           Question = 'Port SMTP'; Type = 'Int' }
+    @{ Section = 'Smtp';       Key = 'From';           Question = 'Adresse expéditeur des emails' }
+    @{ Section = 'Smtp';       Key = 'Enabled';        Question = "Activer l'envoi d'email ? (o/n)"; Type = 'Bool' }
+    @{ Section = 'Recipients'; Key = 'internal';       Question = "Destinataires du groupe 'internal' (emails séparés par des virgules)"; Type = 'StringList' }
+    @{ Section = 'Recipients'; Key = 'infogerant';     Question = "Destinataires du groupe 'infogerant' (emails séparés par des virgules)"; Type = 'StringList' }
+    @{ Section = 'Paths';      Key = 'CsvFile';        Question = 'Chemin du CSV batch (colonnes VMName;Tag)' }
+    @{ Section = 'Paths';      Key = 'ExtractIpCsv';   Question = 'Chemin du CSV IP attendues'; Optional = $true }
+    @{ Section = 'Paths';      Key = 'CmdbExtractCsv'; Question = "Chemin de l'extrait CMDB"; Optional = $true }
+    @{ Section = 'Paths';      Key = 'LogDir';         Question = 'Dossier des logs' }
+)
+
+# ---------------------------------------------------------------------------
+# Merge-Hashtable : recursive merge, $Override wins on conflicting leaf keys
+# ---------------------------------------------------------------------------
+function Merge-Hashtable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Base,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Override
+    )
+
+    $merged = $Base.Clone()
+    foreach ($key in $Override.Keys) {
+        if ($merged.ContainsKey($key) -and $merged[$key] -is [hashtable] -and $Override[$key] -is [hashtable]) {
+            $merged[$key] = Merge-Hashtable -Base $merged[$key] -Override $Override[$key]
+        } else {
+            $merged[$key] = $Override[$key]
+        }
+    }
+    return $merged
+}
+
+function Get-MigrationLocalConfigPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigFile
+    )
+
+    return Join-Path -Path (Split-Path -Path $ConfigFile -Parent) -ChildPath "config.local.psd1"
+}
+
+# ---------------------------------------------------------------------------
+# Import-MigrationConfig : loads config.psd1, then layers config.local.psd1
+# on top when present. Use this instead of Import-PowerShellDataFile directly
+# so every script picks up operator overrides the same way.
+# ---------------------------------------------------------------------------
+function Import-MigrationConfig {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigFile
+    )
+
+    $config = Import-PowerShellDataFile -LiteralPath $ConfigFile
+    $localConfigFile = Get-MigrationLocalConfigPath -ConfigFile $ConfigFile
+    if (Test-Path -LiteralPath $localConfigFile) {
+        $localConfig = Import-PowerShellDataFile -LiteralPath $localConfigFile
+        $config = Merge-Hashtable -Base $config -Override $localConfig
+    }
+    return $config
+}
+
+# ---------------------------------------------------------------------------
+# Get-MigrationConfigMissingKeys : schema entries not yet answered in
+# config.local.psd1 (new questions introduced by a script update, or the
+# very first run before config.local.psd1 exists).
+# ---------------------------------------------------------------------------
+function Get-MigrationConfigMissingKeys {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigFile
+    )
+
+    $localConfigFile = Get-MigrationLocalConfigPath -ConfigFile $ConfigFile
+    $localConfig = if (Test-Path -LiteralPath $localConfigFile) { Import-PowerShellDataFile -LiteralPath $localConfigFile } else { @{} }
+
+    return @($script:MigrationConfigSchema | Where-Object {
+        -not ($localConfig.ContainsKey($_.Section) -and $localConfig[$_.Section].ContainsKey($_.Key))
+    })
+}
+
+function ConvertTo-Psd1ScalarLiteral {
+    param($Value)
+
+    if ($null -eq $Value) { return "''" }
+    if ($Value -is [bool]) { return $(if ($Value) { '$true' } else { '$false' }) }
+    if ($Value -is [int])  { return "$Value" }
+    if ($Value -is [array]) {
+        $items = @($Value | ForEach-Object { ConvertTo-Psd1ScalarLiteral $_ })
+        return "@(" + ($items -join ', ') + ")"
+    }
+    $escaped = [string]$Value -replace "'", "''"
+    return "'$escaped'"
+}
+
+# ---------------------------------------------------------------------------
+# Save-MigrationLocalConfig : writes a { Section = { Key = scalar/array } }
+# hashtable out as a valid config.local.psd1.
+# ---------------------------------------------------------------------------
+function Save-MigrationLocalConfig {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Data
+    )
+
+    $body = foreach ($section in $Data.Keys) {
+        "    $section = @{"
+        foreach ($key in $Data[$section].Keys) {
+            "        $key = $(ConvertTo-Psd1ScalarLiteral $Data[$section][$key])"
+        }
+        "    }"
+        ""
+    }
+
+    $content = @(
+        "# config.local.psd1 — valeurs spécifiques à cet environnement (vCenter, SCVMM, SMTP, chemins...)."
+        "# Généré/complété par configure-migration.ps1 — ne pas versionner (voir .gitignore)."
+        "# Fusionné par-dessus config.psd1 au chargement (Import-MigrationConfig dans lib.ps1)."
+        "@{"
+    ) + $body + @("}")
+
+    Set-Content -LiteralPath $Path -Value $content -Encoding UTF8
+}
+
+# ---------------------------------------------------------------------------
+# Invoke-MigrationConfigWizard : interactive prompt loop over
+# $script:MigrationConfigSchema. Only asks about entries missing from
+# config.local.psd1 unless -Full is passed to re-ask everything.
+# ---------------------------------------------------------------------------
+function Invoke-MigrationConfigWizard {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigFile,
+
+        [switch]$Full
+    )
+
+    $defaults = Import-PowerShellDataFile -LiteralPath $ConfigFile
+    $localConfigFile = Get-MigrationLocalConfigPath -ConfigFile $ConfigFile
+    $localConfig = if (Test-Path -LiteralPath $localConfigFile) { Import-PowerShellDataFile -LiteralPath $localConfigFile } else { @{} }
+
+    $entriesToAsk = if ($Full) {
+        $script:MigrationConfigSchema
+    } else {
+        @($script:MigrationConfigSchema | Where-Object {
+            -not ($localConfig.ContainsKey($_.Section) -and $localConfig[$_.Section].ContainsKey($_.Key))
+        })
+    }
+
+    if ($entriesToAsk.Count -eq 0) {
+        Write-Host "Configuration locale déjà complète ($localConfigFile) — rien à demander." -ForegroundColor Green
+        return
+    }
+
+    Write-Host ""
+    Write-Host "=== Configuration de la migration ($($entriesToAsk.Count) valeur(s) à renseigner) ===" -ForegroundColor Cyan
+    Write-Host "Entrée seule = garder la valeur entre crochets." -ForegroundColor DarkGray
+    Write-Host ""
+
+    foreach ($entry in $entriesToAsk) {
+        $currentValue = $null
+        if ($localConfig.ContainsKey($entry.Section) -and $localConfig[$entry.Section].ContainsKey($entry.Key)) {
+            $currentValue = $localConfig[$entry.Section][$entry.Key]
+        } elseif ($defaults.ContainsKey($entry.Section) -and $defaults[$entry.Section].ContainsKey($entry.Key)) {
+            $currentValue = $defaults[$entry.Section][$entry.Key]
+        }
+
+        $displayValue = if ($entry.Type -eq 'StringList' -and $currentValue) { $currentValue -join ', ' } else { $currentValue }
+        $suffix = if ($null -ne $displayValue -and "$displayValue" -ne '') { " [$displayValue]" } else { "" }
+        $optionalSuffix = if ($entry.Optional) { " (optionnel)" } else { "" }
+
+        do {
+            $answer = Read-Host "$($entry.Question)$optionalSuffix$suffix"
+            $value = if ([string]::IsNullOrWhiteSpace($answer)) {
+                $currentValue
+            } else {
+                switch ($entry.Type) {
+                    'Int'        { [int]$answer }
+                    'Bool'       { $answer -match '^(o|oui|y|yes|true|1)$' }
+                    'StringList' { @($answer -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+                    default      { $answer }
+                }
+            }
+            $isEmpty = ($null -eq $value) -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value)) -or ($value -is [array] -and $value.Count -eq 0)
+            if ($isEmpty -and -not $entry.Optional) {
+                Write-Host "Valeur obligatoire." -ForegroundColor Yellow
+            }
+        } while ($isEmpty -and -not $entry.Optional)
+
+        if (-not $localConfig.ContainsKey($entry.Section)) { $localConfig[$entry.Section] = @{} }
+        $localConfig[$entry.Section][$entry.Key] = $value
+    }
+
+    Save-MigrationLocalConfig -Path $localConfigFile -Data $localConfig
+    Write-Host ""
+    Write-Host "Configuration enregistrée dans: $localConfigFile" -ForegroundColor Green
 }

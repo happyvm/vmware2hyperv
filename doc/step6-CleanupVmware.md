@@ -56,5 +56,5 @@ Ce script doit être exécuté UNIQUEMENT après validation du bon fonctionnemen
 
 ## Voir aussi
 
-- [step4-PostMigrationChecks.ps1](step4-PostMigrationChecks.md) — Valider avant de nettoyer
-- [step5-StartVM.ps1](step5-StartVM.md) — Démarrer les VMs avant nettoyage
+- [step4-StartVM.ps1](step4-StartVM.md) — Démarrer les VMs avant nettoyage
+- [step5-PostMigrationChecks.ps1](step5-PostMigrationChecks.md) — Valider avant de nettoyer
