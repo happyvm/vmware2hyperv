@@ -103,9 +103,10 @@ Tags = @{
 
 ```powershell
 Smtp = @{
-    Server = "smtp.domain.local"
-    Port   = 25
-    From   = "migration@domain.local"
+    Server  = "smtp.domain.local"
+    Port    = 25
+    From    = "migration@domain.local"
+    Enabled = $true   # $false désactive l'envoi de tous les emails (pré-migration, uptime...)
 }
 ```
 
@@ -118,7 +119,7 @@ Recipients = @{
 }
 ```
 
-Groupes de destinataires pour les emails. Utilisé par `stepx-premigration_mail.ps1` et `-RecipientGroup`.
+Groupes de destinataires pour les emails. Utilisé par `step2-ShutdownVM_StartBackupVeeam.ps1` (email pré-migration) via `-RecipientGroup`.
 
 ### `Paths`
 
@@ -127,7 +128,6 @@ Paths = @{
     CsvFile        = "D:\Scripts\lotissement.csv"
     CmdbExtractCsv = "D:\Scripts\cmdb_extract.csv"  # Optionnel
     ExtractIpCsv   = "D:\Scripts\extract-ip.csv"
-    OutputCsv      = "D:\Scripts\uptime_vm.csv"
     LogDir         = "D:\Scripts\Logs"
 }
 ```
@@ -186,10 +186,10 @@ StartVm = @{
 }
 ```
 
-Réglages pour `step-XX-StartVM.ps1`.
+Réglages pour `step5-StartVM.ps1`.
 
 ## Voir aussi
 
 - [README.md](../README.md) — Documentation complète
-- [ADR-001](../docs/adr/001-architecture-decisions.md) — Décisions d'architecture
+- [ADR-001](adr/001-architecture-decisions.md) — Décisions d'architecture
 - [lib.ps1](lib.md) — Fonctions utilisant cette config

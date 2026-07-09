@@ -1,11 +1,11 @@
-# step-XX-StartVM.ps1 — Démarrage VMs + Integration Services
+# step5-StartVM.ps1 — Démarrage VMs + Integration Services
 
 Démarre les VMs migrées et configure les Integration Services, avec retrait des VMware Tools.
 
 ## Synopsis
 
 ```powershell
-.\step-XX-StartVM.ps1 -Tag HypMig-lot-118
+.\step5-StartVM.ps1 -Tag HypMig-lot-118
 ```
 
 ## Description
@@ -64,7 +64,7 @@ IntegrationServices = @{
 ## Logs
 
 ```
-{LogDir}/step-XX-startvm{-Tag}-{yyyyMMdd-HHmmss}.log
+{LogDir}/step5-startvm{-Tag}-{yyyyMMdd-HHmmss}.log
 ```
 
 ## Dépendances
@@ -75,5 +75,5 @@ IntegrationServices = @{
 
 ## Voir aussi
 
-- [step-XX-PostMigrationChecks.ps1](step-XX-PostMigrationChecks.md) — Vérifications post-migration
-- [step-XX-CleanupVmware.ps1](step-XX-CleanupVmware.md) — Nettoyage VMware
+- [step4-PostMigrationChecks.ps1](step4-PostMigrationChecks.md) — Vérifications post-migration
+- [step6-CleanupVmware.ps1](step6-CleanupVmware.md) — Nettoyage VMware

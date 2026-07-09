@@ -1,11 +1,11 @@
-# step-XX-CleanupVmware.ps1 — Nettoyage VMware
+# step6-CleanupVmware.ps1 — Nettoyage VMware
 
 Suppression des VMs sources VMware après une migration réussie vers Hyper-V.
 
 ## Synopsis
 
 ```powershell
-.\step-XX-CleanupVmware.ps1 -Tag HypMig-lot-118
+.\step6-CleanupVmware.ps1 -Tag HypMig-lot-118
 ```
 
 ## Description
@@ -39,7 +39,7 @@ Ce script doit être exécuté UNIQUEMENT après validation du bon fonctionnemen
 ## Logs
 
 ```
-{LogDir}/step-XX-cleanup-vmware-{Tag}-{yyyyMMdd}.log
+{LogDir}/step6-cleanup-vmware-{Tag}-{yyyyMMdd}.log
 ```
 
 ## Sécurité
@@ -56,5 +56,5 @@ Ce script doit être exécuté UNIQUEMENT après validation du bon fonctionnemen
 
 ## Voir aussi
 
-- [step-XX-PostMigrationChecks.ps1](step-XX-PostMigrationChecks.md) — Valider avant de nettoyer
-- [step-XX-StartVM.ps1](step-XX-StartVM.md) — Démarrer les VMs avant nettoyage
+- [step4-PostMigrationChecks.ps1](step4-PostMigrationChecks.md) — Valider avant de nettoyer
+- [step5-StartVM.ps1](step5-StartVM.md) — Démarrer les VMs avant nettoyage

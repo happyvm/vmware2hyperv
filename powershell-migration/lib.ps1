@@ -18,7 +18,7 @@
       Hyper-V clusters via config.psd1 MigrationMappings.ClusterMappings
     - **CSV helpers**: Read standard or CMDB-extract CSVs with auto-detection of
       French/English column names and delimiter variants
-    - **VMware Tools**: Get-VMUptime, Get-OsGeneration, guest IP extraction
+    - **VMware Tools**: Get-OsGeneration, guest IP extraction
     - **Email**: Send-HtmlMail via SMTP, ConvertTo-HtmlEncoded for safe HTML
     - **Validation**: Assert-PathPresent, file-system helpers
 
@@ -528,57 +528,6 @@ function Send-HtmlMail {
 }
 
 
-
-# ---------------------------------------------------------------------------
-# Invoke-VMwareGetPoweredOnVMView : indirection wrapper to simplify mocking in tests.
-# Server-side PowerState filter + property projection: Get-VM used to materialize
-# every VM of the vCenter as a full object before filtering client-side.
-# ---------------------------------------------------------------------------
-function Invoke-VMwareGetPoweredOnVMView {
-    [CmdletBinding()]
-    param()
-
-    return VMware.VimAutomation.Core\Get-View -ViewType VirtualMachine `
-        -Filter @{ 'Runtime.PowerState' = 'poweredOn' } `
-        -Property @('Name', 'Guest', 'Runtime.BootTime')
-}
-
-# ---------------------------------------------------------------------------
-# Get-VMUptime : retrieve uptime data for all powered-on VMs from vCenter
-# ---------------------------------------------------------------------------
-function Get-VMUptime {
-    param([string]$LogFile)
-
-    $vms = @(Invoke-VMwareGetPoweredOnVMView)
-    Write-MigrationLog "Powered-on VMs: $($vms.Count)" -LogFile $LogFile
-
-    $results = foreach ($vm in $vms) {
-        $guestInfo = $vm.Guest
-        $bootTime  = $null
-
-        if ($guestInfo.ToolsStatus -eq "toolsOk" -and $guestInfo.BootTime) {
-            $bootTime = $guestInfo.BootTime
-        } else {
-            $bootTime = $vm.Runtime.BootTime
-        }
-
-        $uptime = if ($bootTime) {
-            $uptimeSpan = (Get-Date) - $bootTime
-            "{0} days, {1} hours, {2} minutes" -f $uptimeSpan.Days, $uptimeSpan.Hours, $uptimeSpan.Minutes
-        } else {
-            "Unavailable"
-        }
-
-        [PSCustomObject]@{
-            VMName   = $vm.Name
-            OS       = $guestInfo.GuestFullName
-            BootTime = $bootTime
-            Uptime   = $uptime
-        }
-    }
-
-    return @($results)
-}
 
 # ---------------------------------------------------------------------------
 # Invoke-SCVMMCommand : proxy for SCVMM cmdlets (routes through WinPS compat session if present)

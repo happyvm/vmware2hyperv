@@ -91,4 +91,4 @@ Au démarrage, le worker pré-charge le module SCVMM (`VirtualMachineManager`) p
 
 - [run-migration.ps1](run-migration.md) — Lance les workers
 - [step3-MigrateVM.ps1](step3-MigrateVM.md) — Script exécuté par tâche
-- [ADR-001](../docs/adr/001-architecture-decisions.md) — Décision 2 : file-system queue
+- [ADR-001](adr/001-architecture-decisions.md) — Décision 2 : file-system queue

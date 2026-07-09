@@ -28,8 +28,7 @@ flowchart TD
     CFG[config.psd1\nEndpoints, Tags, SMTP, Paths]
 
     subgraph STEP0["Step 0 — Pre-flight"]
-        PRECHECK[step-precheck.ps1\nvCenter inventory, uptime, ipconfig]
-        UPTIME[step0-uptime_extract.ps1\nCSV export]
+        PRECHECK[step0-precheck.ps1\nvCenter inventory, uptime, ipconfig]
     end
 
     subgraph STEP1["Step 1 — Prepare"]
@@ -40,7 +39,7 @@ flowchart TD
     subgraph STEP2["Step 2 — Cutover"]
         SHUTDOWN[Shut down source VMs]
         BACKUP[Trigger Veeam backup]
-        MAIL[stepx-premigration_mail.ps1\nNotify recipients]
+        MAIL[Send pre-migration email\nNotify recipients]
     end
 
     subgraph STEP3["Step 3 — Migrate"]
@@ -52,9 +51,9 @@ flowchart TD
     end
 
     subgraph POST["Post-migration"]
-        CHECKS[step-XX-PostMigrationChecks.ps1\nSCVMM compliance loop]
-        STARTVM[step-XX-StartVM.ps1\nStart VMs, Integration Services]
-        CLEANUP[step-XX-CleanupVmware.ps1\nDelete source VMs]
+        CHECKS[step4-PostMigrationChecks.ps1\nSCVMM compliance loop]
+        STARTVM[step5-StartVM.ps1\nStart VMs, Integration Services]
+        CLEANUP[step6-CleanupVmware.ps1\nDelete source VMs]
     end
 
     CSV --> PRECHECK
@@ -229,24 +228,6 @@ pwsh ./powershell-migration/run-migration.ps1 -Tag HypMig-lot-118 -ConfigFile ./
 
 ## Useful standalone commands
 
-### Export VMware uptime data to CSV
-
-```powershell
-pwsh ./powershell-migration/step0-uptime_extract.ps1
-```
-
-Optional parameters:
-
-```powershell
-pwsh ./powershell-migration/step0-uptime_extract.ps1 -Tag HypMig-lot-118 -OutputCsvPath D:\Scripts\uptime_vm.csv
-```
-
-### Send pre-migration email only
-
-```powershell
-pwsh ./powershell-migration/stepx-premigration_mail.ps1 -tagName HypMig-lot-118 -recipientGroup internal
-```
-
 ### Bulk Instant Recovery start (step3 phase 1 only)
 
 Start the Instant Recovery of several VMs at once and monitor every mount from one console (no extra PowerShell windows). The tasks file is a JSON array of `{ VMName, HyperVHost, ClusterStorage }` objects — `run-migration.ps1` generates one automatically in `Paths.LogDir` on each run.
@@ -270,21 +251,21 @@ Run this script in parallel with `run-migration.ps1` (or just after) to loop unt
 - guest IPv4 still matches the expected IP from CSV (`ExpectedIP` / `IP` / `IPAddress` columns)
 
 ```powershell
-pwsh ./powershell-migration/step-XX-PostMigrationChecks.ps1 -Tag HypMig-lot-118
+pwsh ./powershell-migration/step4-PostMigrationChecks.ps1 -Tag HypMig-lot-118
 ```
 
 Useful options:
 
 ```powershell
-pwsh ./powershell-migration/step-XX-PostMigrationChecks.ps1 -Tag HypMig-lot-118 -PollIntervalSeconds 120 -MaxIterations 30
-pwsh ./powershell-migration/step-XX-PostMigrationChecks.ps1 -CsvFile D:\Scripts\lotissement.csv
+pwsh ./powershell-migration/step4-PostMigrationChecks.ps1 -Tag HypMig-lot-118 -PollIntervalSeconds 120 -MaxIterations 30
+pwsh ./powershell-migration/step4-PostMigrationChecks.ps1 -CsvFile D:\Scripts\lotissement.csv
 ```
 
 `-MaxIterations 0` means infinite loop until every VM is compliant.
 
 ### Start migrated VMs + Integration Services / VMware Tools actions
 
-Use `step-XX-StartVM.ps1` to:
+Use `step5-StartVM.ps1` to:
 
 - start each VM from `lotissement.csv` (optionally filtered by `-Tag`);
 - list VM state + SCVMM configured operating system;
@@ -293,7 +274,7 @@ Use `step-XX-StartVM.ps1` to:
 - loop on Integration Services health checks (SCVMM signals) until ready or timeout.
 
 ```powershell
-pwsh ./powershell-migration/step-XX-StartVM.ps1 -Tag HypMig-lot-118
+pwsh ./powershell-migration/step5-StartVM.ps1 -Tag HypMig-lot-118
 ```
 
 If OS is below 2012, or WinRM is unavailable for 2012+, the script reports that integration/manual cleanup actions must be done by hand.

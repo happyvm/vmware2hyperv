@@ -4,7 +4,7 @@
     }
 
     # ============================================================
-    # Precheck configuration (step-precheck.ps1)
+    # Precheck configuration (step0-precheck.ps1)
     # ============================================================
     Precheck = @{
         # Path to the input CSV file (vmname;tag columns required)
@@ -147,9 +147,10 @@
     }
 
     Smtp = @{
-        Server = "smtpd.domain"
-        Port   = 25
-        From   = "migrationhyperv-noreply@domain.com"
+        Server  = "smtpd.domain"
+        Port    = 25
+        From    = "migrationhyperv-noreply@domain.com"
+        Enabled = $true   # Set to $false to disable outgoing email (e.g. pre-migration notifications)
     }
 
     # Edit email lists before use
@@ -163,7 +164,6 @@
         CsvFile        = "D:\Scripts\lotissement.csv"   # CSV of VMs per batch (columns: VMName, Tag, OperatingSystem optional)
         ExtractIpCsv   = "D:\Scripts\extract-ip.csv"    # CSV used to map expected IPs (headers: VMName/Name + IP/IPAddress/ExpectedIP)
         CmdbExtractCsv = "D:\Scripts\cmdb_extract.csv"  # Optional CMDB extract used to enrich OS values (headers: VMName/Name and OperatingSystem/Operating system)
-        OutputCsv      = "D:\Scripts\uptime_vm.csv"
         LogDir    = "D:\Scripts\Logs"
     }
 

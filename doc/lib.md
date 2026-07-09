@@ -66,13 +66,6 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 |----------|-------------|
 | `Resolve-MigrationTarget` | Résout la cible Hyper-V depuis le cluster VMware source via `ClusterMappings` |
 
-### VMware Tools / Uptime
-
-| Fonction | Description |
-|----------|-------------|
-| `Invoke-VMwareGetPoweredOnVMView` | Wrapper indirection `Get-View` (VM allumées, propriétés projetées) pour faciliter le mocking en tests |
-| `Get-VMUptime` | Récupère l'uptime de toutes les VMs powered-on |
-
 ### Email
 
 | Fonction | Description |
@@ -107,4 +100,4 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 ## Voir aussi
 
 - [config.psd1](config.md) — Configuration centralisée
-- [ADR-001](../docs/adr/001-architecture-decisions.md) — Décision 3 : stratégie d'import
+- [ADR-001](adr/001-architecture-decisions.md) — Décision 3 : stratégie d'import
