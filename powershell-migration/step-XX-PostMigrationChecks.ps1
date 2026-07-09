@@ -138,116 +138,124 @@ function Test-SCVMMVmHealth {
         [Parameter(Mandatory = $true)]
         [string]$ServerName,
 
+        # Objects carrying at least VMName and ExpectedIP. The whole batch is checked in
+        # ONE SCVMM round-trip: the previous per-VM version paid one Get-SCVMMServer
+        # connection per VM per polling iteration (50 VMs -> 50 connections per minute).
         [Parameter(Mandatory = $true)]
-        [string]$VMName,
-
-        [string]$ExpectedIP,
+        [object[]]$VmEntries,
 
         [string]$ExpectedBackupTag
     )
 
-    return Invoke-SCVMMCommand -ScriptBlock {
-        param($VmmServerName, $Name, $IpExpected, $BackupTag)
+    return @(Invoke-SCVMMCommand -ScriptBlock {
+        param($VmmServerName, $Entries, $BackupTag)
 
         $server = Get-SCVMMServer -ComputerName $VmmServerName
-        $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Select-Object -First 1
 
-        if (-not $vm) {
-            return [pscustomobject]@{
-                VMName                   = $Name
-                ExistsInSCVMM            = $false
-                Running                  = $false
-                NetworkConnected         = $false
-                IntegrationServicesReady = $false
-                HighAvailabilityEnabled  = $false
-                BackupTagPresent         = $false
-                IPMatches                = $false
-                CurrentIPs               = @()
-                CurrentTag               = $null
-                Details                  = "VM introuvable dans SCVMM"
+        foreach ($entry in @($Entries)) {
+            $Name = [string]$entry.VMName
+            $IpExpected = [string]$entry.ExpectedIP
+
+            $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Select-Object -First 1
+
+            if (-not $vm) {
+                [pscustomobject]@{
+                    VMName                   = $Name
+                    ExistsInSCVMM            = $false
+                    Running                  = $false
+                    NetworkConnected         = $false
+                    IntegrationServicesReady = $false
+                    HighAvailabilityEnabled  = $false
+                    BackupTagPresent         = $false
+                    IPMatches                = $false
+                    CurrentIPs               = @()
+                    CurrentTag               = $null
+                    Details                  = "VM introuvable dans SCVMM"
+                }
+                continue
             }
-        }
 
-        $statusRaw = @([string]$vm.Status, [string]$vm.StatusString) -join ' '
-        $running = $statusRaw -match 'Running|Power.*On|En cours d.?exécution|Démarré'
+            $statusRaw = @([string]$vm.Status, [string]$vm.StatusString) -join ' '
+            $running = $statusRaw -match 'Running|Power.*On|En cours d.?exécution|Démarré'
 
-        $adapters = @(Get-SCVirtualNetworkAdapter -VM $vm -ErrorAction SilentlyContinue)
-        $connectedAdapters = @($adapters | Where-Object {
-            $state = [string]$_.ConnectionState
-            $state -match 'Connected|Connecté|OK|On' -or
-            (-not [string]::IsNullOrWhiteSpace([string]$_.VMNetwork)) -or
-            (-not [string]::IsNullOrWhiteSpace([string]$_.VMSubnet))
-        })
-        $networkConnected = $connectedAdapters.Count -gt 0
+            $adapters = @(Get-SCVirtualNetworkAdapter -VM $vm -ErrorAction SilentlyContinue)
+            $connectedAdapters = @($adapters | Where-Object {
+                $state = [string]$_.ConnectionState
+                $state -match 'Connected|Connecté|OK|On' -or
+                (-not [string]::IsNullOrWhiteSpace([string]$_.VMNetwork)) -or
+                (-not [string]::IsNullOrWhiteSpace([string]$_.VMSubnet))
+            })
+            $networkConnected = $connectedAdapters.Count -gt 0
 
-        $allIps = @(
-            foreach ($adapter in $adapters) {
-                foreach ($address in @($adapter.IPv4Addresses)) {
-                    if (-not [string]::IsNullOrWhiteSpace([string]$address)) {
-                        [string]$address
+            $allIps = @(
+                foreach ($adapter in $adapters) {
+                    foreach ($address in @($adapter.IPv4Addresses)) {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$address)) {
+                            [string]$address
+                        }
                     }
                 }
+            ) | Select-Object -Unique
+
+            $ipMatches = if ([string]::IsNullOrWhiteSpace($IpExpected)) {
+                $true
+            } else {
+                $allIps -contains $IpExpected
             }
-        ) | Select-Object -Unique
 
-        $ipMatches = if ([string]::IsNullOrWhiteSpace($IpExpected)) {
-            $true
-        } else {
-            $allIps -contains $IpExpected
-        }
+            $integrationSignals = @(
+                [string]$vm.HeartbeatStatus,
+                [string]$vm.HeartbeatEnabled,
+                [string]$vm.GuestAgentStatus,
+                [string]$vm.IntegrationServicesState,
+                [string]$vm.VMAddition,
+                [string]$vm.VirtualMachineState
+            ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
-        $integrationSignals = @(
-            [string]$vm.HeartbeatStatus,
-            [string]$vm.HeartbeatEnabled,
-            [string]$vm.GuestAgentStatus,
-            [string]$vm.IntegrationServicesState,
-            [string]$vm.VMAddition,
-            [string]$vm.VirtualMachineState
-        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-
-        $integrationText = ($integrationSignals -join ' ')
-        $integrationReady = $false
-        if (-not [string]::IsNullOrWhiteSpace($integrationText)) {
-            if ($integrationText -match 'OK|Running|Operational|Up|Ready|Responding|Actif|Fonctionnel') {
-                $integrationReady = $true
+            $integrationText = ($integrationSignals -join ' ')
+            $integrationReady = $false
+            if (-not [string]::IsNullOrWhiteSpace($integrationText)) {
+                if ($integrationText -match 'OK|Running|Operational|Up|Ready|Responding|Actif|Fonctionnel') {
+                    $integrationReady = $true
+                }
+                if ($integrationText -match 'Not|Disabled|Stopped|Error|Unknown|Unavailable|N.?A|Inconnu|Arrêté') {
+                    $integrationReady = $false
+                }
             }
-            if ($integrationText -match 'Not|Disabled|Stopped|Error|Unknown|Unavailable|N.?A|Inconnu|Arrêté') {
-                $integrationReady = $false
+
+            $highAvailabilityEnabled = [bool]$vm.IsHighlyAvailable
+
+            $currentTag = [string]$vm.Tag
+            $backupTagPresent = if ([string]::IsNullOrWhiteSpace($BackupTag)) {
+                $true
+            } else {
+                $currentTag -split ';|,' | ForEach-Object { $_.Trim() } | Where-Object { $_ -eq $BackupTag } | Measure-Object | Select-Object -ExpandProperty Count
+            }
+            $backupTagPresent = [bool]$backupTagPresent
+
+            $issues = @()
+            if (-not $running) { $issues += 'VM non démarrée' }
+            if (-not $networkConnected) { $issues += 'NIC non connectée' }
+            if (-not $integrationReady) { $issues += 'Integration Services non OK' }
+            if (-not $highAvailabilityEnabled) { $issues += 'High Availability non activée' }
+            if (-not $backupTagPresent) { $issues += "Tag backup absent ($BackupTag)" }
+            if (-not $ipMatches) { $issues += "IP attendue '$IpExpected' absente" }
+
+            [pscustomobject]@{
+                VMName                   = [string]$vm.Name
+                ExistsInSCVMM            = $true
+                Running                  = [bool]$running
+                NetworkConnected         = [bool]$networkConnected
+                IntegrationServicesReady = [bool]$integrationReady
+                HighAvailabilityEnabled  = [bool]$highAvailabilityEnabled
+                BackupTagPresent         = [bool]$backupTagPresent
+                IPMatches                = [bool]$ipMatches
+                CurrentIPs               = @($allIps)
+                CurrentTag               = $currentTag
+                Details                  = if ($issues) { $issues -join '; ' } else { 'OK' }
             }
         }
-
-        $highAvailabilityEnabled = [bool]$vm.IsHighlyAvailable
-
-        $currentTag = [string]$vm.Tag
-        $backupTagPresent = if ([string]::IsNullOrWhiteSpace($BackupTag)) {
-            $true
-        } else {
-            $currentTag -split ';|,' | ForEach-Object { $_.Trim() } | Where-Object { $_ -eq $BackupTag } | Measure-Object | Select-Object -ExpandProperty Count
-        }
-        $backupTagPresent = [bool]$backupTagPresent
-
-        $issues = @()
-        if (-not $running) { $issues += 'VM non démarrée' }
-        if (-not $networkConnected) { $issues += 'NIC non connectée' }
-        if (-not $integrationReady) { $issues += 'Integration Services non OK' }
-        if (-not $highAvailabilityEnabled) { $issues += 'High Availability non activée' }
-        if (-not $backupTagPresent) { $issues += "Tag backup absent ($BackupTag)" }
-        if (-not $ipMatches) { $issues += "IP attendue '$IpExpected' absente" }
-
-        [pscustomobject]@{
-            VMName                   = [string]$vm.Name
-            ExistsInSCVMM            = $true
-            Running                  = [bool]$running
-            NetworkConnected         = [bool]$networkConnected
-            IntegrationServicesReady = [bool]$integrationReady
-            HighAvailabilityEnabled  = [bool]$highAvailabilityEnabled
-            BackupTagPresent         = [bool]$backupTagPresent
-            IPMatches                = [bool]$ipMatches
-            CurrentIPs               = @($allIps)
-            CurrentTag               = $currentTag
-            Details                  = if ($issues) { $issues -join '; ' } else { 'OK' }
-        }
-    } -ArgumentList @($ServerName, $VMName, $ExpectedIP, $ExpectedBackupTag)
+    } -ArgumentList @($ServerName, $VmEntries, $ExpectedBackupTag))
 }
 
 $expectedIpMap = Get-ExpectedIpMap -Path $ExtractIpCsvFile
@@ -273,9 +281,7 @@ while ($pendingVms.Count -gt 0) {
     $iteration++
     Write-MigrationLog "----- Validation iteration #$iteration (pending: $($pendingVms.Count)) -----" -LogFile $LogFile
 
-    $results = foreach ($vmRow in $pendingVms) {
-        Test-SCVMMVmHealth -ServerName $Config.SCVMM.Server -VMName $vmRow.VMName -ExpectedIP $vmRow.ExpectedIP -ExpectedBackupTag $Config.Tags.BackupTag
-    }
+    $results = Test-SCVMMVmHealth -ServerName $Config.SCVMM.Server -VmEntries $pendingVms -ExpectedBackupTag $Config.Tags.BackupTag
 
     $results |
         Sort-Object -Property VMName |

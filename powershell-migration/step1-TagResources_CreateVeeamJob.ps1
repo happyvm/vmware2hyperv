@@ -85,15 +85,17 @@ $csvTags = $csvData |
 
 # VMware cleanup: remove tag assignments from any VM currently carrying one of the tags defined in the CSV.
 # This ensures we reset the batching scope before re-applying the desired CSV state.
-foreach ($csvTag in $csvTags) {
+# Assignments are collected for all tags first, then their VMs are resolved in a single
+# bulk Get-VM call (the previous version issued one Get-VM per assignment).
+$cleanupEntries = @(foreach ($csvTag in $csvTags) {
     $existingCsvTag = Get-Tag -Name $csvTag -Category $TagCategory -ErrorAction SilentlyContinue
     if (-not $existingCsvTag) {
         Write-MigrationLog "Cleanup: tag '$csvTag' does not exist yet in VMware. Nothing to remove for this tag." -LogFile $LogFile
         continue
     }
 
-    $taggedVmAssignments = Get-TagAssignment -Tag $existingCsvTag -ErrorAction SilentlyContinue |
-        Where-Object { $_.Entity -and $_.Entity.GetType().Name -eq 'VirtualMachine' }
+    $taggedVmAssignments = @(Get-TagAssignment -Tag $existingCsvTag -ErrorAction SilentlyContinue |
+        Where-Object { $_.Entity -and $_.Entity.GetType().Name -eq 'VirtualMachine' })
 
     if (-not $taggedVmAssignments) {
         Write-MigrationLog "Cleanup: no VMware VM found with tag '$csvTag'." -LogFile $LogFile
@@ -101,22 +103,69 @@ foreach ($csvTag in $csvTags) {
     }
 
     foreach ($assignment in $taggedVmAssignments) {
-        $taggedVm = VMware.VimAutomation.Core\Get-VM -Id $assignment.Entity.Id -ErrorAction SilentlyContinue
-        if (-not $taggedVm) {
+        [pscustomobject]@{ Tag = $csvTag; Assignment = $assignment }
+    }
+})
+
+if ($cleanupEntries) {
+    $cleanupVmNamesByEntityId = @{}
+    $cleanupEntityIds = @($cleanupEntries | ForEach-Object { [string]$_.Assignment.Entity.Id } | Select-Object -Unique)
+    foreach ($cleanupVm in @(VMware.VimAutomation.Core\Get-VM -Id $cleanupEntityIds -ErrorAction SilentlyContinue)) {
+        $cleanupVmNamesByEntityId[[string]$cleanupVm.Id] = [string]$cleanupVm.Name
+    }
+
+    foreach ($cleanupEntry in $cleanupEntries) {
+        $csvTag = $cleanupEntry.Tag
+        $entityId = [string]$cleanupEntry.Assignment.Entity.Id
+        if (-not $cleanupVmNamesByEntityId.ContainsKey($entityId)) {
             Write-MigrationLog "Cleanup: unable to resolve VM from tag assignment for tag '$csvTag'. Skipping." -Level WARNING -LogFile $LogFile
             continue
         }
 
-        Write-MigrationLog "Cleanup: removing CSV tag '$csvTag' from VMware VM '$($taggedVm.Name)'." -Level WARNING -LogFile $LogFile
-        Remove-TagAssignment -TagAssignment $assignment -Confirm:$false -ErrorAction Stop
-        Write-MigrationLog "Cleanup: tag '$csvTag' removed from VMware VM '$($taggedVm.Name)'." -Level SUCCESS -LogFile $LogFile
+        $taggedVmName = $cleanupVmNamesByEntityId[$entityId]
+        Write-MigrationLog "Cleanup: removing CSV tag '$csvTag' from VMware VM '$taggedVmName'." -Level WARNING -LogFile $LogFile
+        Remove-TagAssignment -TagAssignment $cleanupEntry.Assignment -Confirm:$false -ErrorAction Stop
+        Write-MigrationLog "Cleanup: tag '$csvTag' removed from VMware VM '$taggedVmName'." -Level SUCCESS -LogFile $LogFile
     }
 }
 
+# Bulk lookups before the assignment loop (previously one Get-VM and one
+# Get-TagAssignment per CSV row): resolve all batch VMs in one call and load every
+# assignment of the category once, indexed by entity Id.
+$csvVmNames = @($csvData | ForEach-Object { $_.VMName } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+$vmsByName = @{}
+if ($csvVmNames) {
+    foreach ($vmObject in @(VMware.VimAutomation.Core\Get-VM -Name $csvVmNames -ErrorAction SilentlyContinue)) {
+        if ($vmObject -and -not $vmsByName.ContainsKey($vmObject.Name)) {
+            $vmsByName[$vmObject.Name] = $vmObject
+        }
+    }
+}
+
+$assignmentsByEntityId = @{}
+try {
+    foreach ($assignment in @(Get-TagAssignment -Category $TagCategory -ErrorAction Stop)) {
+        $entityId = [string]$assignment.Entity.Id
+        if (-not $assignmentsByEntityId.ContainsKey($entityId)) {
+            $assignmentsByEntityId[$entityId] = New-Object System.Collections.ArrayList
+        }
+        [void]$assignmentsByEntityId[$entityId].Add($assignment)
+    }
+} catch {
+    Write-MigrationLog "Bulk tag assignment lookup failed ($($_.Exception.Message)); falling back to per-VM queries." -Level WARNING -LogFile $LogFile
+    $assignmentsByEntityId = $null
+}
+
+$processedVmNames = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($entry in $csvData) {
     $vmName  = $entry.VMName
     if ([string]::IsNullOrWhiteSpace($entry.Tag)) {
         Write-MigrationLog "Missing tag in CSV for VM '$vmName'. Skipping this entry." -Level WARNING -LogFile $LogFile
+        continue
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($vmName) -and -not $processedVmNames.Add($vmName)) {
+        Write-MigrationLog "Duplicate CSV row for VM '$vmName'. Skipping this entry." -Level WARNING -LogFile $LogFile
         continue
     }
 
@@ -128,13 +177,21 @@ foreach ($entry in $csvData) {
         $existingTag = New-Tag -Name $tagName -Category $TagCategory
     }
 
-    $vm = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    $vm = $null
+    if (-not [string]::IsNullOrWhiteSpace($vmName) -and $vmsByName.ContainsKey($vmName)) {
+        $vm = $vmsByName[$vmName]
+    }
     if (-not $vm) {
         Write-MigrationLog "VM not found: $vmName" -Level WARNING -LogFile $LogFile
         continue
     }
 
-    $existingAssignments = Get-TagAssignment -Entity $vm | Where-Object { $_.Tag.Category -eq $TagCategory }
+    $existingAssignments = if ($null -ne $assignmentsByEntityId) {
+        $vmEntityId = [string]$vm.Id
+        if ($assignmentsByEntityId.ContainsKey($vmEntityId)) { @($assignmentsByEntityId[$vmEntityId]) } else { @() }
+    } else {
+        @(Get-TagAssignment -Entity $vm -ErrorAction SilentlyContinue | Where-Object { $_.Tag.Category -eq $TagCategory })
+    }
     foreach ($existingAssignment in $existingAssignments) {
         Write-MigrationLog "Removing existing tag $($existingAssignment.Tag.Name) from $vmName" -Level WARNING -LogFile $LogFile
         Remove-TagAssignment -TagAssignment $existingAssignment -Confirm:$false

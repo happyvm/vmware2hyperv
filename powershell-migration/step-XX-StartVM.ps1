@@ -309,6 +309,15 @@ function Start-WinRmRemediationJob {
         [int]$RetryDelaySeconds = 15
     )
 
+    # Chaque job écrit dans son propre fichier de log : plusieurs ThreadJobs partageant
+    # le même fichier provoquent des collisions Add-Content (« file in use ») et des
+    # lignes perdues. Le log par VM est dérivé du log principal (suffixe -<VM>).
+    $jobLogFile = $TargetLogFile
+    if (-not [string]::IsNullOrWhiteSpace($TargetLogFile)) {
+        $safeVmName = ($VMName -replace '[\\/:*?"<>|\s]', '_')
+        $jobLogFile = ($TargetLogFile -replace '\.log$', '') + "-$safeVmName.log"
+    }
+
     # Start-ThreadJob is used instead of Start-Job to avoid PSUseUsingScopeModifierInNewRunspaces warnings.
     # ThreadJob is available in PS 7+ and provides better performance for parallel workloads.
     return Start-ThreadJob -Name "startvm-$VMName" -ArgumentList @(
@@ -316,7 +325,7 @@ function Start-WinRmRemediationJob {
         $LocalScriptPath,
         $RemoteScriptPath,
         $Credential,
-        $TargetLogFile,
+        $jobLogFile,
         $MaxAttempts,
         $RetryDelaySeconds
     ) -ScriptBlock {
