@@ -73,6 +73,35 @@ function Find-VmRestoreSession {
     return $restoreSession
 }
 
+# ---------------------------------------------------------------------------
+# New-VeeamScriptBlock — compose a scriptblock with Find-VmRestoreSession pre-loaded
+# ---------------------------------------------------------------------------
+<#
+.SYNOPSIS
+    Creates a scriptblock with Find-VmRestoreSession pre-loaded for use inside
+    Invoke-VeeamCommand. Eliminates inline duplication of the restore session
+    query across call sites.
+.DESCRIPTION
+    Accepts a scriptblock literal, extracts its source text, prepends the
+    Find-VmRestoreSession function definition, and returns a composed scriptblock.
+    The result can be passed directly to Invoke-VeeamCommand -ScriptBlock.
+.EXAMPLE
+    $sb = New-VeeamScriptBlock {
+        param($Vm)
+        $session = Find-VmRestoreSession -VMName $Vm
+    }
+    Invoke-VeeamCommand -ScriptBlock $sb -ArgumentList @($VMName)
+#>
+function New-VeeamScriptBlock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock
+    )
+    $funcDef = ${function:Find-VmRestoreSession}.ToString()
+    return [scriptblock]::Create("$funcDef`n$($ScriptBlock.ToString())")
+}
+
 # ============================================================================
 # Start-VeeamInstantRecovery
 # Validate Veeam prerequisites and start the Instant Recovery mount.
@@ -249,7 +278,7 @@ function Wait-VeeamInstantRecoveryMount {
 
     $elapsed = 0
     do {
-        $waitCheck = Invoke-VeeamCommand -ScriptBlock {
+        $waitCheck = Invoke-VeeamCommand -ScriptBlock (New-VeeamScriptBlock {
             param($Vm)
 
             $instantRecoverySession = Get-VBRInstantRecovery |
@@ -267,17 +296,7 @@ function Wait-VeeamInstantRecoveryMount {
             }
 
             if (-not $waitingDetected) {
-                # Same bounded matching used by Find-VmRestoreSession: never follow a
-                # session belonging to another VM whose name shares this VM's prefix.
-                $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($Vm)
-                $restoreSession = Get-VBRRestoreSession |
-                    Where-Object {
-                        $_.Name -eq $Vm -or
-                        $_.Name -eq "$Vm-migrationhyp" -or
-                        $_.Name -match $vmSessionPattern
-                    } |
-                    Sort-Object -Property CreationTime -Descending |
-                    Select-Object -First 1
+                $restoreSession = Find-VmRestoreSession -VMName $Vm
 
                 if ($restoreSession) {
                     $restoreSessionState = [string]$restoreSession.State
@@ -303,7 +322,7 @@ function Wait-VeeamInstantRecoveryMount {
                 RestoreSessionState = $restoreSessionState
                 DetectionSource     = $detectionSource
             }
-        } -ArgumentList @($VMName)
+        }) -ArgumentList @($VMName)
 
         Write-MigrationLog "[$VMName] Current states: InstantRecovery='$($waitCheck.CurrentState)', RestoreSession='$($waitCheck.RestoreSessionState)' (elapsed: ${elapsed}s)." -LogFile $LogFile
 
@@ -454,18 +473,10 @@ function Wait-VeeamRestoreSession {
 
     $elapsed = 0
     do {
-        $check = Invoke-VeeamCommand -ScriptBlock {
+        $check = Invoke-VeeamCommand -ScriptBlock (New-VeeamScriptBlock {
             param($Vm)
 
-            $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($Vm)
-            $restoreSession = Get-VBRRestoreSession |
-                Where-Object {
-                    $_.Name -eq $Vm -or
-                    $_.Name -eq "$Vm-migrationhyp" -or
-                    $_.Name -match $vmSessionPattern
-                } |
-                Sort-Object -Property CreationTime -Descending |
-                Select-Object -First 1
+            $restoreSession = Find-VmRestoreSession -VMName $Vm
 
             if (-not $restoreSession) {
                 return [PSCustomObject]@{
@@ -482,7 +493,7 @@ function Wait-VeeamRestoreSession {
                 State  = [string]$restoreSession.State
                 Result = [string]$restoreSession.Result
             }
-        } -ArgumentList @($VMName)
+        }) -ArgumentList @($VMName)
 
         if (-not $check.Found) {
             Write-MigrationLog "[$VMName] Restore session not yet visible (elapsed: ${elapsed}s)." -Level WARNING -LogFile $LogFile

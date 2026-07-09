@@ -62,6 +62,10 @@ param (
 )
 
 . "$PSScriptRoot\lib.ps1"
+. "$PSScriptRoot\Step3.VeeamRecovery.ps1"
+Get-ChildItem "$PSScriptRoot\step3\Step3.*.ps1" |
+    Where-Object Name -ne 'Step3.ScvmmSession.Functions.ps1' |
+    ForEach-Object { . $_.FullName }
 $Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
 
 if (-not $LogFile) { $LogFile = "$($Config.Paths.LogDir)\step3-ir-start-$(Get-Date -Format 'yyyyMMdd-HHmmss').log" }
@@ -188,21 +192,14 @@ while ($true) {
         break
     }
 
-    $snapshots = @(Invoke-VeeamCommand -ScriptBlock {
+    $snapshots = @(Invoke-VeeamCommand -ScriptBlock (New-VeeamScriptBlock {
         param($VmNames)
 
         $irSessions = @(Get-VBRInstantRecovery)
-        $restoreSessions = @(Get-VBRRestoreSession)
 
         foreach ($vmName in @($VmNames)) {
             $irSession = $irSessions | Where-Object { $_.VMName -eq $vmName } | Select-Object -First 1
-            # Exact names plus a bounded pattern: a plain "$vmName*" wildcard would also
-            # match another batch VM whose name shares the prefix (WEB1 vs WEB10).
-            $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($vmName)
-            $restoreSession = $restoreSessions |
-                Where-Object { $_.Name -eq $vmName -or $_.Name -eq "$vmName-migrationhyp" -or $_.Name -match $vmSessionPattern } |
-                Sort-Object -Property CreationTime -Descending |
-                Select-Object -First 1
+            $restoreSession = Find-VmRestoreSession -VMName $vmName
 
             $waitingDetected = $false
             $detectionSource = $null
@@ -248,7 +245,7 @@ while ($true) {
                 DetectionSource = $detectionSource
             }
         }
-    } -ArgumentList @(, [string[]]$pendingNames))
+    }) -ArgumentList @(, [string[]]$pendingNames))
 
     foreach ($snapshot in $snapshots) {
         $tracked = $vmStatuses[[string]$snapshot.VMName]
