@@ -30,7 +30,13 @@ param (
     # - FullStep3: re-run complete step3
     # - CommitAndNetwork: re-run only instant recovery commit + network/post-config
     [ValidateSet("Standard", "FullStep3", "CommitAndNetwork")]
-    [string]$Step3RecoveryMode = "Standard"
+    [string]$Step3RecoveryMode = "Standard",
+
+    # Disable all interactive prompts (automation-friendly mode)
+    [switch]$NonInteractive,
+
+    # Skip the manual validation pause between step2 and step3
+    [switch]$SkipManualValidation
 )
 
 . "$PSScriptRoot\lib.ps1"
@@ -215,7 +221,7 @@ if ($rowsWithTag) {
     $taggedRows = @($rowsWithTag | Where-Object { $_.Tag.Trim() -eq $Tag })
     if (-not $taggedRows) {
         Write-MigrationLog "No CSV row carries tag '$Tag'; nothing to migrate for this batch." -Level ERROR -LogFile $LogFile
-        exit 1
+        throw "No CSV row carries tag '$Tag'; nothing to migrate for this batch."
     }
 
     $excludedCount = $vmRows.Count - $taggedRows.Count
@@ -238,7 +244,7 @@ if (-not [string]::IsNullOrWhiteSpace($Step3VmName)) {
 
 if (-not $vmNames) {
     Write-MigrationLog "No VM found in CSV." -Level ERROR -LogFile $LogFile
-    exit 1
+    throw "No VM found in CSV."
 }
 
 Write-MigrationLog "Retrieving VMware VLANs for $($vmNames.Count) VMs..." -LogFile $LogFile
@@ -659,7 +665,7 @@ if ($networkStateSummary.Count -gt 0) {
 if ($finalPendingCount -gt 0 -or $finalProcessingCount -gt 0) {
     $message = "Worker execution stopped before the queue fully drained (pending=$finalPendingCount, processing=$finalProcessingCount)."
     Write-MigrationLog $message -Level ERROR -LogFile $LogFile
-    exit 1
+    throw $message
 }
 
 if ($finalFailedCount -gt 0) {
@@ -680,7 +686,7 @@ if ($finalFailedCount -gt 0) {
 
     $failedVmList = if ($failedTasks) { $failedTasks -join ", " } else { "<unknown>" }
     Write-MigrationLog "Worker-based step3 execution reported failures for: $failedVmList" -Level ERROR -LogFile $LogFile
-    exit 1
+    throw "Worker-based step3 execution reported failures for: $failedVmList"
 }
 
 Write-MigrationLog "======================================================" -LogFile $LogFile
