@@ -1,4 +1,49 @@
-﻿param (
+﻿<#
+.SYNOPSIS
+    Send a pre-migration email notification to the configured recipient group.
+
+.DESCRIPTION
+    Queries vCenter for all VMs tagged with the given tag and sends an HTML email
+    with the VM list to the specified recipient group. The email includes VM names
+    and a notification that the migration will begin shortly.
+
+    Recipient groups (e.g. 'internal', 'provider') are defined in config.psd1
+    under the Recipients hashtable.
+
+.PARAMETER tagName
+    Batch tag identifying the migration lot (e.g. HypMig-lot-118).
+
+.PARAMETER recipientGroup
+    Recipient group key from config.psd1 Recipients (e.g. 'internal', 'provider').
+
+.PARAMETER SkipVCenterLogin
+    Bypass vCenter connection if already connected from a parent session.
+
+.PARAMETER vCenterServer
+    vCenter server name or IP. Defaults to Config.VCenter.Server.
+
+.PARAMETER smtpServer
+    SMTP server for sending the email. Defaults to Config.Smtp.Server.
+
+.PARAMETER smtpPort
+    SMTP port. Defaults to Config.Smtp.Port.
+
+.PARAMETER mailFrom
+    Sender email address. Defaults to Config.Smtp.From.
+
+.PARAMETER LogFile
+    Path to the log file. Auto-generated if not provided.
+
+.EXAMPLE
+    .\stepx-premigration_mail.ps1 -tagName HypMig-lot-118 -recipientGroup internal
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+ with VMware.PowerCLI module.
+    SMTP configuration must be present in config.psd1.
+#>
+
+param (
     [Parameter(Mandatory = $true)]
     [string]$tagName,             # Batch tag (e.g. HypMig-lot-118)
 

@@ -1,3 +1,34 @@
+<#
+.SYNOPSIS
+    Clean up VMware resources after a successful Hyper-V migration.
+
+.DESCRIPTION
+    Deletes VMware VMs that are tagged with the given migration batch tag and are
+    powered off. Powered-on VMs are skipped (and reported) to avoid accidental
+    deletion of active workloads. Also removes the VMware tag itself after all VMs
+    are processed.
+
+    This script is meant to run AFTER step3 has completed and all migrated VMs have
+    been validated in the Hyper-V environment.
+
+.PARAMETER Tag
+    Batch tag identifying the migration lot to clean up (e.g. HypMig-lot-118).
+
+.PARAMETER ConfigFile
+    Optional path to a PSD1 configuration file override.
+
+.PARAMETER LogFile
+    Path to the log file. Auto-generated if not provided.
+
+.EXAMPLE
+    .\step-XX-CleanupVmware.ps1 -Tag HypMig-lot-118
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+ with VMware.PowerCLI module.
+    Always verify migrated VMs are operational before running this script.
+#>
+
 param (
     [Parameter(Mandatory = $true)]
     [string]$Tag,
