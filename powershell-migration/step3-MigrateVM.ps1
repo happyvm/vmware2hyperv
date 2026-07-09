@@ -85,7 +85,7 @@ if ($ForceNetworkConfigOnly) {
 # ── Chargement des modules step3/ ──────────────────────────────────────────
 $step3Dir = "$PSScriptRoot\step3"
 foreach ($mod in @('Step3.TaskResult','Step3.VeeamRecovery','Step3.NetworkMapping',
-                   'Step3.NetworkConfig','Step3.PostConfig','Step3.ScvmmConnection',
+                   'Step3.NetworkConfig','Step3.PostConfig','Step3.ConnectScvmm',
                    'Step3.ScvmmSession.Functions')) {
     $path = Join-Path $step3Dir "$mod.ps1"
     if (Test-Path $path) { . $path }
