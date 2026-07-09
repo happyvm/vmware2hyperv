@@ -1,27 +1,27 @@
-# config.psd1 — Configuration centralisée
+# config.psd1 — Centralized configuration
 
-Fichier de configuration PowerShell Data File (`.psd1`) contenant tous les paramètres de la migration.
+PowerShell Data File (`.psd1`) containing all migration settings.
 
 ## Synopsis
 
 ```powershell
-# Chargement direct (valeurs du template uniquement) :
+# Direct load (template values only):
 $Config = Import-PowerShellDataFile ".\config.psd1"
 
-# Chargement avec les overrides locaux (utilisé par tous les scripts de la pipeline) :
+# Load with local overrides (used by all pipeline scripts):
 . .\lib.ps1
 $Config = Import-MigrationConfig -ConfigFile ".\config.psd1"
 ```
 
 ## config.psd1 vs config.local.psd1
 
-`config.psd1` est le **template versionné** : il contient toutes les clés connues avec des valeurs d'exemple (`vcenter.domain.local`, `D:\Scripts\...`). Il est mis à jour par les développeurs quand un script a besoin d'une nouvelle valeur de configuration.
+`config.psd1` is the **versioned template**: it contains all known keys with sample values (`vcenter.domain.local`, `D:\Scripts\...`). Developers update it whenever a script requires a new configuration value.
 
-`config.local.psd1` (à côté de `config.psd1`, absent par défaut, jamais versionné — voir `.gitignore`) contient les **valeurs réelles de l'environnement**. `Import-MigrationConfig` (`lib.ps1`) charge `config.psd1` puis fusionne `config.local.psd1` par-dessus (clé par clé, récursivement) s'il existe.
+`config.local.psd1` (next to `config.psd1`, missing by default, never versioned — see `.gitignore`) contains the **real environment values**. `Import-MigrationConfig` (`lib.ps1`) loads `config.psd1`, then merges `config.local.psd1` over it (key by key, recursively) when it exists.
 
-Cette séparation évite qu'un `git pull` n'écrase les valeurs personnalisées, et permet de détecter automatiquement quand un script mis à jour introduit une nouvelle clé attendue : elle apparaît dans `config.psd1` (template) mais reste absente de `config.local.psd1` tant qu'elle n'a pas été renseignée.
+This separation prevents `git pull` from overwriting customized values, and makes it easy to detect when an updated script introduces a new expected key: it appears in `config.psd1` (template) but remains absent from `config.local.psd1` until it has been filled in.
 
-Pour générer/compléter `config.local.psd1` de façon interactive plutôt qu'à la main, voir [configure-migration.ps1](configure-migration.md) — déclenché aussi automatiquement par `run-migration.ps1` sans argument.
+To generate or complete `config.local.psd1` interactively instead of editing it manually, see [configure-migration.ps1](configure-migration.md). It is also triggered automatically by `run-migration.ps1` when no argument is provided.
 
 ## Sections
 
@@ -54,9 +54,9 @@ SCVMM = @{
 }
 ```
 
-Le mapping OS est utilisé par `step3-MigrateVM.ps1` pour appliquer le bon OS SCVMM. Les labels source sont normalisés avant lookup (case-insensitive, séparateurs, préfixe `Microsoft`).
+The OS mapping is used by `step3-MigrateVM.ps1` to apply the correct SCVMM OS. Source labels are normalized before lookup (case-insensitive, separators, `Microsoft` prefix).
 
-`AllowedVmNetworkNames` / `AllowedVmSubnetNames` limitent la découverte réseau SCVMM aux objets configurés.
+`AllowedVmNetworkNames` / `AllowedVmSubnetNames` limit SCVMM network discovery to configured objects.
 
 ### `HyperV`
 
@@ -69,7 +69,7 @@ HyperV = @{
 }
 ```
 
-Configuration par défaut. Peut être surchargée par `MigrationMappings.ClusterMappings`.
+Default configuration. Can be overridden by `MigrationMappings.ClusterMappings`.
 
 ### `MigrationMappings`
 
@@ -94,14 +94,14 @@ MigrationMappings = @{
 }
 ```
 
-Mapping optionnel multi-cluster. Si aucun mapping ne correspond, le bloc `HyperV` par défaut est utilisé.
+Optional multi-cluster mapping. If no mapping matches, the default `HyperV` block is used.
 
 ### `Veeam`
 
 ```powershell
 Veeam = @{
     BackupRepo  = "Backup Repository Name"
-    BackupProxy = "ProxyName"  # Optionnel
+    BackupProxy = "ProxyName"  # Optional
 }
 ```
 
@@ -121,7 +121,7 @@ Smtp = @{
     Server  = "smtp.domain.local"
     Port    = 25
     From    = "migration@domain.local"
-    Enabled = $true   # $false désactive l'envoi de tous les emails (pré-migration, uptime...)
+    Enabled = $true   # $false disables all outgoing email (pre-migration, uptime, etc.)
 }
 ```
 
@@ -134,22 +134,22 @@ Recipients = @{
 }
 ```
 
-Groupes de destinataires pour les emails. Utilisé par `step2-ShutdownVM_StartBackupVeeam.ps1` (email pré-migration) via `-RecipientGroup`.
+Recipient groups for email notifications. Used by `step2-ShutdownVM_StartBackupVeeam.ps1` (pre-migration email) via `-RecipientGroup`.
 
 ### `Paths`
 
 ```powershell
 Paths = @{
-    CsvFile        = "D:\Scripts\lotissement.csv"
-    CmdbExtractCsv = "D:\Scripts\cmdb_extract.csv"  # Optionnel
-    ExtractIpCsv   = "D:\Scripts\extract-ip.csv"    # Optionnel
+    CsvFile        = "D:\Scripts\batch.csv"
+    CmdbExtractCsv = "D:\Scripts\cmdb_extract.csv"  # Optional
+    ExtractIpCsv   = "D:\Scripts\extract-ip.csv"    # Optional
     LogDir         = "D:\Scripts\Logs"
 }
 ```
 
-- `CsvFile` : CSV batch avec `VMName` et `Tag`, plus optionnel `OperatingSystem`, `ExpectedIP`, `IP`, `IPAddress`
-- `CmdbExtractCsv` : extrait CMDB optionnel pour enrichir les VMs avec `OperatingSystem`
-- `ExtractIpCsv` : CSV optionnel d'IP attendues (colonnes `VMName`/`Name` + `IP`/`IPAddress`/`ExpectedIP`), utilisé par `step4-StartVM.ps1` pour valider l'IP invitée après migration. Si absent, ce check est simplement ignoré.
+- `CsvFile`: batch CSV with `VMName` and `Tag`, plus optional `OperatingSystem`, `ExpectedIP`, `IP`, `IPAddress`
+- `CmdbExtractCsv`: optional CMDB extract used to enrich VMs with `OperatingSystem`
+- `ExtractIpCsv`: optional expected-IP CSV (columns `VMName`/`Name` + `IP`/`IPAddress`/`ExpectedIP`), used by `step4-StartVM.ps1` to validate the guest IP after migration. If missing, this check is simply skipped.
 
 ### `Orchestrator`
 
@@ -178,7 +178,7 @@ Precheck = @{
 }
 ```
 
-Les mots de passe ne sont jamais stockés — demandés interactivement.
+Passwords are never stored — they are requested interactively.
 
 ### `IntegrationServices`
 
@@ -191,22 +191,22 @@ IntegrationServices = @{
 }
 ```
 
-Chemins des ISO Integration Services par famille d'OS.
+Integration Services ISO paths by OS family.
 
 ### `StartVm`
 
 ```powershell
 StartVm = @{
     IntegrationPollIntervalSeconds = 30
-    IntegrationMaxIterations       = 0   # 0 = illimité
-    InventoryBatchThreshold        = 25  # seuil auto pour l'inventaire SCVMM
+    IntegrationMaxIterations       = 0   # 0 = unlimited
+    InventoryBatchThreshold        = 25  # automatic threshold for SCVMM inventory
 }
 ```
 
-Réglages pour `step4-StartVM.ps1`. `IntegrationMaxIterations = 0` fait boucler le script jusqu'à ce que toutes les VMs soient conformes (réseau, IP, Integration Services, HA, tag backup) — interrompre avec Ctrl+C pour arrêter d'attendre sans perdre les VMs déjà démarrées. Une valeur positive borne le nombre d'itérations. `InventoryBatchThreshold` choisit automatiquement la stratégie d'inventaire SCVMM : lots jusqu'au seuil = recherches ciblées par nom (évite d'énumérer tout SCVMM), lots au-dessus du seuil = une passe complète indexée (évite trop d'appels par VM).
+Settings for `step4-StartVM.ps1`. `IntegrationMaxIterations = 0` makes the script loop until all VMs are compliant (network, IP, Integration Services, HA, backup tag). Interrupt with Ctrl+C to stop waiting without affecting VMs that were already started. A positive value caps the number of iterations. `InventoryBatchThreshold` automatically selects the SCVMM inventory strategy: lots up to the threshold use targeted name lookups (avoids enumerating all SCVMM VMs), while lots above the threshold use one indexed full inventory pass (avoids too many per-VM calls).
 
-## Voir aussi
+## See also
 
-- [README.md](../README.md) — Documentation complète
-- [ADR-001](adr/001-architecture-decisions.md) — Décisions d'architecture
-- [lib.ps1](lib.md) — Fonctions utilisant cette config
+- [README.md](../README.md) — Complete documentation
+- [ADR-001](adr/001-architecture-decisions.md) — Architecture decisions
+- [lib.ps1](lib.md) — Functions that use this configuration
