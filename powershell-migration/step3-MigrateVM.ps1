@@ -25,14 +25,7 @@
     # Rejeu Incident recovery (commit sur mount existant)
     .\step3-MigrateVM.ps1 -BackupJobName ... -VMName SRV-WEB01 -VlanId 100 -SkipInstantRecoveryStart
 .NOTES
-<<<<<<< HEAD
-    Part of the vmware2hyperv migration toolkit.
-    Requires PowerShell 7+ with Veeam.Backup.PowerShell and VirtualMachineManager modules.
-    Refactored in BEA-261/268: internal functions moved to step3/ modules;
-    this script is now a pure orchestrator (~150 lines).
-=======
     Part of vmware2hyperv — BEA-276 / BEA-261.7. PowerShell 7+.
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 #>
 
 param (
@@ -70,21 +63,8 @@ param (
     [string]$LogFile
 )
 
-<<<<<<< HEAD
-# ── Bootstrap ────────────────────────────────────────────────────────────────
-. "$PSScriptRoot\lib.ps1"
-Get-ChildItem "$PSScriptRoot\step3\Step3.*.ps1" |
-    Where-Object Name -ne 'Step3.ScvmmSession.Functions.ps1' |
-    ForEach-Object { . $_.FullName }
-
-Initialize-ScvmmSessionFunction -FunctionFiles @(
-    "$PSScriptRoot\step3\Step3.ScvmmSession.Functions.ps1"
-)
-
-=======
 # ── Initialisation ─────────────────────────────────────────────────────────
 . "$PSScriptRoot\lib.ps1"
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 $Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
 
 if (-not $SCVMMServer)   { $SCVMMServer   = $Config.SCVMM.Server }
@@ -121,32 +101,6 @@ if (-not $SkipInstantRecoveryStart -or -not $SkipInstantRecoveryFinalization) {
     Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
 }
 
-<<<<<<< HEAD
-# ── SCVMM connection ──────────────────────────────────────────────────────────
-$VMMServerName = Connect-Step3Scvmm -SCVMMServer $SCVMMServer -VMName $VMName -LogFile $LogFile
-
-# ── Veeam Instant Recovery ────────────────────────────────────────────────────
-try {
-    Invoke-VeeamRecoveryPhase -BackupJobName $BackupJobName `
-        -VMName $VMName `
-        -HyperVHost $HyperVHost `
-        -ClusterStorage $ClusterStorage `
-        -SCVMMServer $SCVMMServer `
-        -VMMServerName $VMMServerName `
-        -SkipInstantRecoveryStart:$SkipInstantRecoveryStart `
-        -SkipInstantRecoveryFinalization:$SkipInstantRecoveryFinalization `
-        -WaitingTimeoutSeconds $WaitingTimeoutSeconds `
-        -WaitingPollIntervalSeconds $WaitingPollIntervalSeconds `
-        -LogFile $LogFile
-} catch {
-    Write-MigrationLog "[$VMName] Veeam recovery phase failed: $_" -Level ERROR -LogFile $LogFile
-    throw
-}
-
-# ── Network mapping & post-configuration ──────────────────────────────────────
-if ($ForceNetworkConfigOnly) {
-    Write-MigrationLog "[$VMName] ForceNetworkConfigOnly enabled: skipping Instant Recovery/finalization and replaying only network/OS/post-configuration actions." -Level WARNING -LogFile $LogFile
-=======
 # ── Helpers ────────────────────────────────────────────────────────────────
 function Should-RunPhase {
     param([string]$Name)
@@ -209,7 +163,6 @@ Invoke-Phase -Name 'IRStart' -DisplayName 'InstantRecoveryStart' -Action {
 # ── Phase 3 : Instant Recovery — Finalization (Commit) ─────────────────────
 Invoke-Phase -Name 'IRCommit' -DisplayName 'InstantRecoveryCommit' -Action {
     Complete-InstantRecovery -Context $context -Result $result
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 }
 
 # ── Phase 4 : Configuration réseau ─────────────────────────────────────────
@@ -225,26 +178,6 @@ Invoke-Phase -Name 'Network' -DisplayName 'NetworkConfiguration' -Action {
     Set-VmNetworkConfiguration -Context $context -Result $result
 }
 
-<<<<<<< HEAD
-Set-VmNetworkConfiguration `
-    -Name $VMName `
-    -ServerName $VMMServerName `
-    -Vlan $VlanId `
-    -AdapterVlanMappings $adapterVlanMappings `
-    -SourceRemark $Remark `
-    -Config $Config `
-    -LogFile $LogFile
-
-Set-SCVMMOperatingSystem -Name $VMName -ServerName $VMMServerName -SourceOperatingSystem $OperatingSystem -OperatingSystemMap $Config.SCVMM.OperatingSystemMap -LogFile $LogFile
-
-Register-VmHighAvailability -Name $VMName -ServerName $VMMServerName -ClusterName $HyperVCluster -LogFile $LogFile
-
-Move-VmToSecondHost -Name $VMName -ServerName $VMMServerName -DestinationHost $HyperVHost2 -LogFile $LogFile
-
-Set-VmBackupTag -Name $VMName -ServerName $VMMServerName -TagName $BackupTag -LogFile $LogFile
-
-Write-MigrationLog "[$VMName] Migration completed." -Level SUCCESS -LogFile $LogFile
-=======
 # ── Phases 5-9 : Post-configuration (non-bloquantes sauf Network) ─────────
 Invoke-Phase -Name 'IntegrationServices' -DisplayName 'IntegrationServices' -NonBlocking -Action {
     Set-VmIntegrationServices -Context $context -Result $result
@@ -267,4 +200,3 @@ Complete-Step3TaskResult -Result $result
 Write-Step3TaskResult -Result $result -Path "$LogFile.result.json"
 Write-MigrationLog "[$VMName] Migration terminée — Status: $($result.Status)" -Level SUCCESS -LogFile $LogFile
 $result
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
