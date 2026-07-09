@@ -73,6 +73,65 @@ Describe 'Test-IsZeroMacAddress' {
     }
 }
 
+Describe 'Convert-ToScvmmStaticMacAddress' {
+    BeforeAll {
+        $modulePath = [System.IO.Path]::GetFullPath((Join-Path $PWD.Path 'powershell-migration' 'step3' 'Step3.ScvmmSession.Functions.ps1'))
+        . $modulePath
+    }
+
+    It 'returns null for null input' {
+        Convert-ToScvmmStaticMacAddress -Value $null | Should -BeNullOrEmpty
+    }
+
+    It 'returns null for empty string' {
+        Convert-ToScvmmStaticMacAddress -Value '' | Should -BeNullOrEmpty
+    }
+
+    It 'returns null for whitespace' {
+        Convert-ToScvmmStaticMacAddress -Value '   ' | Should -BeNullOrEmpty
+    }
+
+    It 'returns null when input is too short (less than 12 hex chars)' {
+        Convert-ToScvmmStaticMacAddress -Value '00:50:56:AA:BB' | Should -BeNullOrEmpty
+    }
+
+    It 'returns null when input is too long (more than 12 hex chars)' {
+        Convert-ToScvmmStaticMacAddress -Value '00:50:56:AA:BB:CC:DD' | Should -BeNullOrEmpty
+    }
+
+    It 'returns null for non-hex input' {
+        Convert-ToScvmmStaticMacAddress -Value 'not-a-mac-address' | Should -BeNullOrEmpty
+    }
+
+    It 'formats colon-separated MAC with dashes' {
+        Convert-ToScvmmStaticMacAddress -Value '00:50:56:AA:BB:CC' | Should -Be '00-50-56-AA-BB-CC'
+    }
+
+    It 'formats dash-separated MAC (same output)' {
+        Convert-ToScvmmStaticMacAddress -Value '00-50-56-AA-BB-CC' | Should -Be '00-50-56-AA-BB-CC'
+    }
+
+    It 'formats dot-separated MAC' {
+        Convert-ToScvmmStaticMacAddress -Value '0050.56AA.BBCC' | Should -Be '00-50-56-AA-BB-CC'
+    }
+
+    It 'formats already-normalized 12-char hex to dashed' {
+        Convert-ToScvmmStaticMacAddress -Value '005056AABBCC' | Should -Be '00-50-56-AA-BB-CC'
+    }
+
+    It 'uppercases lowercase input' {
+        Convert-ToScvmmStaticMacAddress -Value '00:50:56:aa:bb:cc' | Should -Be '00-50-56-AA-BB-CC'
+    }
+
+    It 'handles mixed weird separators' {
+        Convert-ToScvmmStaticMacAddress -Value '0-0:5-0:5-6:A-A:B-B:C-C' | Should -Be '00-50-56-AA-BB-CC'
+    }
+
+    It 'handles all-zero MAC' {
+        Convert-ToScvmmStaticMacAddress -Value '00:00:00:00:00:00' | Should -Be '00-00-00-00-00-00'
+    }
+}
+
 Describe 'Get-AdapterMappingPlan' {
     BeforeAll {
         $modulePath = [System.IO.Path]::GetFullPath((Join-Path $PWD.Path 'powershell-migration' 'step3' 'Step3.NetworkMapping.ps1'))

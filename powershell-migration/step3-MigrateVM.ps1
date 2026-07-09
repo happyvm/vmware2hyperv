@@ -170,7 +170,7 @@ if (Should-RunPhase 'Network') {
     $adapterVlanMappings = @()
     if ($AdapterVlanMapJson) {
         try { $adapterVlanMappings = @(ConvertFrom-Json $AdapterVlanMapJson -ErrorAction Stop) }
-        catch { Write-MigrationLog "[$VMName] JSON VLAN invalide, fallback VLAN $VlanId: $_" -Level WARNING -LogFile $LogFile }
+        catch { Write-MigrationLog "[$VMName] JSON VLAN invalide, fallback VLAN ${VlanId}: $_" -Level WARNING -LogFile $LogFile }
     }
     $context.AdapterVlanMappings = $adapterVlanMappings
 }
