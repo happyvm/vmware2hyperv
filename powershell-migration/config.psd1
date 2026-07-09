@@ -188,6 +188,7 @@
     StartVm = @{
         IntegrationPollIntervalSeconds = 30
         IntegrationMaxIterations       = 0   # 0 = unlimited: loop until every VM is compliant (Ctrl+C to stop waiting)
+        InventoryBatchThreshold        = 25  # <= threshold: targeted VM lookups; > threshold: one full SCVMM inventory pass
     }
 
     Orchestrator = @{

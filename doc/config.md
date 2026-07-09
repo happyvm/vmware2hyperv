@@ -199,10 +199,11 @@ Chemins des ISO Integration Services par famille d'OS.
 StartVm = @{
     IntegrationPollIntervalSeconds = 30
     IntegrationMaxIterations       = 0   # 0 = illimité
+    InventoryBatchThreshold        = 25  # seuil auto pour l'inventaire SCVMM
 }
 ```
 
-Réglages pour `step4-StartVM.ps1`. `IntegrationMaxIterations = 0` fait boucler le script jusqu'à ce que toutes les VMs soient conformes (réseau, IP, Integration Services, HA, tag backup) — interrompre avec Ctrl+C pour arrêter d'attendre sans perdre les VMs déjà démarrées. Une valeur positive borne le nombre d'itérations.
+Réglages pour `step4-StartVM.ps1`. `IntegrationMaxIterations = 0` fait boucler le script jusqu'à ce que toutes les VMs soient conformes (réseau, IP, Integration Services, HA, tag backup) — interrompre avec Ctrl+C pour arrêter d'attendre sans perdre les VMs déjà démarrées. Une valeur positive borne le nombre d'itérations. `InventoryBatchThreshold` choisit automatiquement la stratégie d'inventaire SCVMM : lots jusqu'au seuil = recherches ciblées par nom (évite d'énumérer tout SCVMM), lots au-dessus du seuil = une passe complète indexée (évite trop d'appels par VM).
 
 ## Voir aussi
 
