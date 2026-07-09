@@ -269,8 +269,15 @@ function Wait-InstantRecoveryUserAction {
                     }
                     $sessionLog = $restoreSession.Logger.GetLog()
                     $logRecords = @()
-                    if ($sessionLog.UpdatedRecords) { $logRecords += $sessionLog.UpdatedRecords }
-                    if ($sessionLog.Records)        { $logRecords += $sessionLog.Records }
+                    # Property guard: on this Veeam module, GetLog() only exposes
+                    # 'UpdatedRecords' — 'Records' doesn't exist on the object, and
+                    # StrictMode throws PropertyNotFoundException on direct access.
+                    if ($sessionLog.PSObject.Properties['UpdatedRecords'] -and $sessionLog.UpdatedRecords) {
+                        $logRecords += $sessionLog.UpdatedRecords
+                    }
+                    if ($sessionLog.PSObject.Properties['Records'] -and $sessionLog.Records) {
+                        $logRecords += $sessionLog.Records
+                    }
 
                     $logText = ($logRecords | ForEach-Object {
                         @($_.Title, $_.Description, $_.Message, $_.Text)
