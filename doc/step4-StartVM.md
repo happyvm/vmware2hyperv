@@ -13,9 +13,9 @@ Démarre les VMs migrées et boucle jusqu'à ce qu'elles soient pleinement confo
 
 Exécuté automatiquement par [run-migration.ps1](run-migration.md) après la pause de validation manuelle qui suit step3 (peut aussi être relancé seul, ou via `run-migration.ps1 -StartFrom step4`).
 
-Ce script réunit en un seul passage sur l'inventaire SCVMM ce qui était auparavant réparti entre le démarrage des VMs et une étape de vérification post-migration séparée (`step5-PostMigrationChecks.ps1`, supprimé). Il :
+Ce script utilise automatiquement la stratégie d'inventaire SCVMM la moins coûteuse pour la taille du lot (recherches ciblées pour petits lots, inventaire complet indexé pour gros lots) et réunit en un seul passage ce qui était auparavant réparti entre le démarrage des VMs et une étape de vérification post-migration séparée (`step5-PostMigrationChecks.ps1`, supprimé). Il :
 
-- Démarre chaque VM listée dans le CSV batch (`Start-SCVirtualMachine`)
+- Démarre les VMs listées dans le CSV batch en une seule session SCVMM (`Start-SCVirtualMachine`), au lieu d'ouvrir une session par VM
 - Tente WinRM (HTTPS puis HTTP) sur Windows Server 2012+ pour uploader et exécuter un script de retrait VMware Tools ; pour les OS antérieurs (2003/2008) ou en cas d'échec WinRM, reporte une action manuelle
 - Boucle jusqu'à ce que chaque VM soit **conforme**, c'est-à-dire :
   - démarrée et sa carte réseau connectée
@@ -43,8 +43,8 @@ Ce script réunit en un seul passage sur l'inventaire SCVMM ce qui était aupara
 
 ```
 Pour chaque VM du CSV (filtrée par Tag) :
-├─ Récupère l'inventaire SCVMM (état, OS configuré, réseau, HA, tag, IP)
-├─ Démarre la VM (Start-SCVirtualMachine)
+├─ Récupère l'inventaire SCVMM en lot (état, OS configuré, réseau, HA, tag, IP)
+├─ Démarre les VMs non démarrées en lot (Start-SCVirtualMachine)
 ├─ Si OS ≥ 2012 :
 │  ├─ Tente WinRM HTTPS puis HTTP
 │  ├─ Upload + exécution script retrait VMware Tools
@@ -57,7 +57,7 @@ Pour chaque VM du CSV (filtrée par Tag) :
 
 ## Dashboard
 
-À chaque itération, la console affiche les VMs encore non conformes avec la liste des non-conformités (`NIC non connectée`, `IP inattendue`, `Integration Services non OK`, `HA non activée`, `tag backup absent`, `non démarrée`).
+À chaque itération, le script rafraîchit uniquement les VMs encore non conformes. Selon `StartVm.InventoryBatchThreshold`, il utilise soit des recherches ciblées par nom, soit un inventaire SCVMM complet indexé, puis la console affiche les VMs encore non conformes avec la liste des non-conformités (`NIC non connectée`, `IP inattendue`, `Integration Services non OK`, `HA non activée`, `tag backup absent`, `non démarrée`).
 
 ## Résumé de sortie
 

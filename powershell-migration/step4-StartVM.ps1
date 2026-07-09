@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Start Hyper-V VMs and validate post-migration compliance.
 
@@ -137,7 +137,11 @@ function Get-SCVMMVmInventory {
 
         [hashtable]$ExpectedIpMap = @{},
 
-        [string]$ExpectedBackupTag
+        [string]$ExpectedBackupTag,
+
+        [switch]$ForceRefresh,
+
+        [int]$BatchInventoryThreshold = 25
     )
 
     $names = @(
@@ -153,7 +157,7 @@ function Get-SCVMMVmInventory {
 
     return @(
         Invoke-SCVMMCommand -ScriptBlock {
-            param($VmmServerName, $Names, $IpMap, $BackupTag)
+            param($VmmServerName, $Names, $IpMap, $BackupTag, $ForceRefresh, $InventoryThreshold)
 
             function Get-IntegrationStatusSummary {
                 param($Vm)
@@ -195,9 +199,38 @@ function Get-SCVMMVmInventory {
             }
 
             $server = Get-SCVMMServer -ComputerName $VmmServerName
+            $nameLookup = @{}
+            foreach ($name in $Names) {
+                $nameLookup[$name.ToLowerInvariant()] = $name
+            }
+
+            # Performance: use the cheaper strategy for the lot size. For small lots,
+            # targeted lookups avoid enumerating every VM managed by SCVMM. For larger
+            # lots, one full inventory pass avoids hundreds of per-VM SCVMM calls.
+            $vmByName = @{}
+            if ($InventoryThreshold -gt 0 -and $Names.Count -le $InventoryThreshold) {
+                foreach ($name in $Names) {
+                    $candidateVm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
+                    if ($candidateVm) {
+                        $vmByName[$name.ToLowerInvariant()] = $candidateVm
+                    }
+                }
+            } else {
+                foreach ($candidateVm in @(Get-SCVirtualMachine -VMMServer $server)) {
+                    $candidateName = [string]$candidateVm.Name
+                    if ([string]::IsNullOrWhiteSpace($candidateName)) {
+                        continue
+                    }
+
+                    $candidateKey = $candidateName.ToLowerInvariant()
+                    if ($nameLookup.ContainsKey($candidateKey) -and -not $vmByName.ContainsKey($candidateKey)) {
+                        $vmByName[$candidateKey] = $candidateVm
+                    }
+                }
+            }
 
             foreach ($name in $Names) {
-                $vm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
+                $vm = $vmByName[$name.ToLowerInvariant()]
 
                 if (-not $vm) {
                     [pscustomobject]@{
@@ -220,15 +253,16 @@ function Get-SCVMMVmInventory {
                     continue
                 }
 
-                try {
-                    $refreshedVm = Read-SCVirtualMachine -VM $vm -Force -ErrorAction Stop
-                    if ($refreshedVm) {
-                        $vm = $refreshedVm
-                    } else {
-                        $vm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
+                if ($ForceRefresh) {
+                    try {
+                        $refreshedVm = Read-SCVirtualMachine -VM $vm -Force -ErrorAction Stop
+                        if ($refreshedVm) {
+                            $vm = $refreshedVm
+                        }
+                    } catch {
+                        # Keep the VM object from the batched inventory. Falling back to a
+                        # per-VM Get-SCVirtualMachine here would reintroduce the slow path.
                     }
-                } catch {
-                    $vm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
                 }
 
                 $statusRaw = @(
@@ -292,30 +326,90 @@ function Get-SCVMMVmInventory {
                     BackupTagPresent        = [bool]$backupTagPresent
                 }
             }
-        } -ArgumentList @($ServerName, $names, $ExpectedIpMap, $ExpectedBackupTag)
+        } -ArgumentList @($ServerName, $names, $ExpectedIpMap, $ExpectedBackupTag, [bool]$ForceRefresh, $BatchInventoryThreshold)
     )
 }
 
-function Start-SCVMMVm {
+function Start-SCVMMVms {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ServerName,
 
         [Parameter(Mandatory = $true)]
-        [string]$VMName
+        [string[]]$VMNames,
+
+        [int]$BatchInventoryThreshold = 25
     )
 
+    $names = @(
+        $VMNames |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { $_.Trim() } |
+            Select-Object -Unique
+    )
+
+    if (-not $names) {
+        return @()
+    }
+
     Invoke-SCVMMCommand -ScriptBlock {
-        param($VmmServerName, $Name)
+        param($VmmServerName, $Names, $InventoryThreshold)
 
         $server = Get-SCVMMServer -ComputerName $VmmServerName
-        $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server | Select-Object -First 1
-        if (-not $vm) {
-            throw "VM '$Name' introuvable dans SCVMM."
+        $nameLookup = @{}
+        foreach ($name in $Names) {
+            $nameLookup[$name.ToLowerInvariant()] = $name
         }
 
-        Start-SCVirtualMachine -VM $vm -ErrorAction Stop | Out-Null
-    } -ArgumentList @($ServerName, $VMName)
+        $vmByName = @{}
+        if ($InventoryThreshold -gt 0 -and $Names.Count -le $InventoryThreshold) {
+            foreach ($name in $Names) {
+                $candidateVm = Get-SCVirtualMachine -Name $name -VMMServer $server | Select-Object -First 1
+                if ($candidateVm) {
+                    $vmByName[$name.ToLowerInvariant()] = $candidateVm
+                }
+            }
+        } else {
+            foreach ($candidateVm in @(Get-SCVirtualMachine -VMMServer $server)) {
+                $candidateName = [string]$candidateVm.Name
+                if ([string]::IsNullOrWhiteSpace($candidateName)) {
+                    continue
+                }
+
+                $candidateKey = $candidateName.ToLowerInvariant()
+                if ($nameLookup.ContainsKey($candidateKey) -and -not $vmByName.ContainsKey($candidateKey)) {
+                    $vmByName[$candidateKey] = $candidateVm
+                }
+            }
+        }
+
+        foreach ($name in $Names) {
+            $vm = $vmByName[$name.ToLowerInvariant()]
+            if (-not $vm) {
+                [pscustomobject]@{
+                    VMName = $name
+                    Started = $false
+                    Error = "VM '$name' introuvable dans SCVMM."
+                }
+                continue
+            }
+
+            try {
+                Start-SCVirtualMachine -VM $vm -ErrorAction Stop | Out-Null
+                [pscustomobject]@{
+                    VMName = $name
+                    Started = $true
+                    Error = $null
+                }
+            } catch {
+                [pscustomobject]@{
+                    VMName = $name
+                    Started = $false
+                    Error = $_.Exception.Message
+                }
+            }
+        }
+    } -ArgumentList @($ServerName, $names, $BatchInventoryThreshold)
 }
 
 function Resolve-OsActionPlan {
@@ -776,6 +870,12 @@ if ($maxIterationsFromConfig -and [int]$maxIterationsFromConfig -gt 0) {
     $IntegrationMaxIterations = [int]$maxIterationsFromConfig
 }
 
+$inventoryBatchThreshold = 25
+$inventoryBatchThresholdFromConfig = $Config.StartVm.InventoryBatchThreshold
+if ($inventoryBatchThresholdFromConfig -and [int]$inventoryBatchThresholdFromConfig -gt 0) {
+    $inventoryBatchThreshold = [int]$inventoryBatchThresholdFromConfig
+}
+
 $winRmCredential = $null
 if ($Config.RemoteActions.WinRm.Credential) {
     $winRmCredential = $Config.RemoteActions.WinRm.Credential
@@ -785,7 +885,7 @@ $localWinRmScriptPath = [string]$Config.RemoteActions.WinRm.RemoveVmwareToolsScr
 $remoteWinRmScriptPath = [string]$Config.RemoteActions.WinRm.RemoveVmwareToolsScriptRemotePath
 $expectedBackupTag = [string]$Config.Tags.BackupTag
 
-$initialSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames ($targetRows.VMName) -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag
+$initialSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames ($targetRows.VMName) -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag -ForceRefresh -BatchInventoryThreshold $inventoryBatchThreshold
 $initialSnapshotByName = @{}
 foreach ($snapshot in $initialSnapshots) {
     $initialSnapshotByName[[string]$snapshot.VMName] = $snapshot
@@ -846,15 +946,24 @@ $vmInventory = foreach ($row in $targetRows) {
 
 Write-MigrationLog "Lotissement chargé: $($vmInventory.Count) VM(s)." -LogFile $LogFile
 
-foreach ($vmItem in @($vmInventory | Where-Object { $_.VmFound -and -not $_.Started })) {
-    try {
-        Start-SCVMMVm -ServerName $Config.SCVMM.Server -VMName $vmItem.VMName
-        $vmItem.Started = $true
-        Write-MigrationLog "[$($vmItem.VMName)] Démarrage demandé dans SCVMM." -Level SUCCESS -LogFile $LogFile
-    } catch {
-        $vmItem.StartError = $_.Exception.Message
-        $vmItem.Started = $false
-        Write-MigrationLog "[$($vmItem.VMName)] Échec au démarrage SCVMM: $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
+$vmsToStart = @($vmInventory | Where-Object { $_.VmFound -and -not $_.Started })
+if ($vmsToStart) {
+    $startResults = @(Start-SCVMMVms -ServerName $Config.SCVMM.Server -VMNames ($vmsToStart.VMName) -BatchInventoryThreshold $inventoryBatchThreshold)
+    $startResultByName = @{}
+    foreach ($startResult in $startResults) {
+        $startResultByName[[string]$startResult.VMName] = $startResult
+    }
+
+    foreach ($vmItem in $vmsToStart) {
+        $startResult = $startResultByName[$vmItem.VMName]
+        if ($startResult -and $startResult.Started) {
+            $vmItem.Started = $true
+            Write-MigrationLog "[$($vmItem.VMName)] Démarrage demandé dans SCVMM." -Level SUCCESS -LogFile $LogFile
+        } else {
+            $vmItem.StartError = if ($startResult) { [string]$startResult.Error } else { 'Résultat de démarrage SCVMM absent.' }
+            $vmItem.Started = $false
+            Write-MigrationLog "[$($vmItem.VMName)] Échec au démarrage SCVMM: $($vmItem.StartError)" -Level WARNING -LogFile $LogFile
+        }
     }
 }
 
@@ -912,7 +1021,7 @@ while ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $
     )
 
     if ($namesToRefresh) {
-        $refreshedSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames $namesToRefresh -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag
+        $refreshedSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames $namesToRefresh -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag -BatchInventoryThreshold $inventoryBatchThreshold
         $snapshotByName = @{}
         foreach ($snapshot in $refreshedSnapshots) {
             $snapshotByName[[string]$snapshot.VMName] = $snapshot
