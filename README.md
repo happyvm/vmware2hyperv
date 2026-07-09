@@ -9,15 +9,18 @@ All migration scripts are in the `powershell-migration/` folder, with the main e
 
 ## Project workflow
 
-The migration is split into 3 steps:
+The migration is split into 4 steps:
 
 1. **step1**: tag VMware resources and create the Veeam backup job.
 2. **step2**: stop source VMs, trigger backup, and send pre-migration email.
 3. **step3**: perform VM migration to Hyper-V in two phases:
    - **phase 1** — `step3-StartInstantRecovery.ps1` starts the Veeam Instant Recovery of **all** VMs in bulk (asynchronous `-RunAsync` starts when supported) and follows every mount session from a single console until each reaches `WaitingForUserAction`;
    - **phase 2** — persistent workers run the Instant Recovery commit and the SCVMM network/OS/post-configuration in parallel per VM.
+4. **step4**: start the migrated VMs and verify Integration Services (`step4-StartVM.ps1`).
 
-The orchestrator can start from any step (`step1`, `step2`, `step3`) to resume after interruption.
+step2 flows straight into step3 with no pause. A manual validation pause happens **between step3 and step4** instead — once the migration is done, the script waits for confirmation (time to check the migrated VMs in SCVMM/Hyper-V) before launching step4 itself. `-SkipManualValidation` (or `-NonInteractive`) skips the pause without skipping step4.
+
+The orchestrator can start from any step (`step1` through `step4`) to resume after interruption.
 If `step3` already restored the VM but failed during SCVMM network/OS/post-configuration, you can replay only that tail of `step3` with `-ForceNetworkConfigOnly`.
 
 Run `run-migration.ps1` with no arguments at all for an interactive walkthrough: it completes `config.local.psd1` if needed (see [Configuration](#configuration)) then prompts for `-Tag` and the other run options.
@@ -52,8 +55,13 @@ flowchart TD
         MIGRATE[step3-MigrateVM.ps1\nPer VM: commit, network, OS config]
     end
 
-    subgraph POST["Post-migration"]
+    PAUSE{{Manual validation pause\n-SkipManualValidation to bypass}}
+
+    subgraph STEP4["Step 4 — Start"]
         STARTVM[step4-StartVM.ps1\nStart VMs, Integration Services]
+    end
+
+    subgraph POST["Post-migration (manual, not orchestrated)"]
         CHECKS[step5-PostMigrationChecks.ps1\nSCVMM compliance loop]
         CLEANUP[step6-CleanupVmware.ps1\nDelete source VMs]
     end
@@ -69,7 +77,8 @@ flowchart TD
     BULKIR --> WAIT
     WAIT --> WORKER
     WORKER --> MIGRATE
-    MIGRATE --> STARTVM
+    MIGRATE --> PAUSE
+    PAUSE --> STARTVM
     STARTVM --> CHECKS
     CHECKS --> CLEANUP
 ```
@@ -253,7 +262,7 @@ The delay between two starts is tunable with `-StartDelaySeconds` (or `Orchestra
 
 ### Start migrated VMs + Integration Services / VMware Tools actions
 
-Use `step4-StartVM.ps1` to:
+`run-migration.ps1` runs this automatically as step4, right after the manual validation pause that follows step3. Run it standalone (or via `run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step4`) to replay just this step. `step4-StartVM.ps1` :
 
 - start each VM from `lotissement.csv` (optionally filtered by `-Tag`);
 - list VM state + SCVMM configured operating system;
