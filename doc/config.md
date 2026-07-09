@@ -103,9 +103,10 @@ Tags = @{
 
 ```powershell
 Smtp = @{
-    Server = "smtp.domain.local"
-    Port   = 25
-    From   = "migration@domain.local"
+    Server  = "smtp.domain.local"
+    Port    = 25
+    From    = "migration@domain.local"
+    Enabled = $true   # $false désactive l'envoi de tous les emails (pré-migration, uptime...)
 }
 ```
 
@@ -118,7 +119,7 @@ Recipients = @{
 }
 ```
 
-Groupes de destinataires pour les emails. Utilisé par `stepx-premigration_mail.ps1` et `-RecipientGroup`.
+Groupes de destinataires pour les emails. Utilisé par `step2-ShutdownVM_StartBackupVeeam.ps1` (email pré-migration) via `-RecipientGroup`.
 
 ### `Paths`
 

@@ -40,7 +40,7 @@ flowchart TD
     subgraph STEP2["Step 2 — Cutover"]
         SHUTDOWN[Shut down source VMs]
         BACKUP[Trigger Veeam backup]
-        MAIL[stepx-premigration_mail.ps1\nNotify recipients]
+        MAIL[Send pre-migration email\nNotify recipients]
     end
 
     subgraph STEP3["Step 3 — Migrate"]
@@ -239,12 +239,6 @@ Optional parameters:
 
 ```powershell
 pwsh ./powershell-migration/step0-uptime_extract.ps1 -Tag HypMig-lot-118 -OutputCsvPath D:\Scripts\uptime_vm.csv
-```
-
-### Send pre-migration email only
-
-```powershell
-pwsh ./powershell-migration/stepx-premigration_mail.ps1 -tagName HypMig-lot-118 -recipientGroup internal
 ```
 
 ### Bulk Instant Recovery start (step3 phase 1 only)

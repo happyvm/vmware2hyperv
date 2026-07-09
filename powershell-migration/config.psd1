@@ -147,9 +147,10 @@
     }
 
     Smtp = @{
-        Server = "smtpd.domain"
-        Port   = 25
-        From   = "migrationhyperv-noreply@domain.com"
+        Server  = "smtpd.domain"
+        Port    = 25
+        From    = "migrationhyperv-noreply@domain.com"
+        Enabled = $true   # Set to $false to disable outgoing email (e.g. pre-migration notifications)
     }
 
     # Edit email lists before use

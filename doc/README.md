@@ -27,8 +27,7 @@ Documentation détaillée de chaque script du toolkit de migration VMware vers H
 
 | Script | Rôle |
 |--------|------|
-| [step2-ShutdownVM_StartBackupVeeam.ps1](step2-ShutdownVM_StartBackupVeeam.md) | Arrêt VMs + backup Veeam + email |
-| [stepx-premigration_mail.ps1](stepx-premigration_mail.md) | Email de notification pré-migration |
+| [step2-ShutdownVM_StartBackupVeeam.ps1](step2-ShutdownVM_StartBackupVeeam.md) | Arrêt VMs + backup Veeam + email pré-migration |
 
 ## Étape 3 — Migration
 

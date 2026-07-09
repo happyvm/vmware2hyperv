@@ -92,5 +92,9 @@ foreach ($VM in $Results) {
 
 $HTMLTable += "</table></body></html>"
 
-Send-HtmlMail -From $MailFrom -To $MailTo -Subject $Subject -HtmlBody $HTMLTable -SmtpServer $SMTPServer -Port $Config.Smtp.Port -LogFile $LogFile
+if ($Config.Smtp.Enabled) {
+    Send-HtmlMail -From $MailFrom -To $MailTo -Subject $Subject -HtmlBody $HTMLTable -SmtpServer $SMTPServer -Port $Config.Smtp.Port -LogFile $LogFile
+} else {
+    Write-MigrationLog "Email sending disabled (Smtp.Enabled = `$false in config.psd1); skipping." -LogFile $LogFile
+}
 Disconnect-VCenter -LogFile $LogFile

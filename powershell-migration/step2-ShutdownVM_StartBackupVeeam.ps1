@@ -16,11 +16,9 @@
 .PARAMETER CsvFile
     Path to the batch CSV file. Defaults to Config.Paths.CsvFile.
 
-.PARAMETER PreMigrationMailScript
-    Path to the pre-migration email script. Defaults to stepx-premigration_mail.ps1.
-
 .PARAMETER RecipientGroup
-    Recipient group for the email notification. Default: infogerant.
+    Recipient group for the pre-migration email notification. Default: infogerant.
+    The email is skipped entirely when Config.Smtp.Enabled is $false.
 
 .PARAMETER LogFile
     Path to the log file. Auto-generated if not provided.
@@ -39,7 +37,6 @@ param (
 
     [string]$VCenterServer,
     [string]$CsvFile,
-    [string]$PreMigrationMailScript,
     [string]$RecipientGroup = "infogerant",
     [string]$LogFile
 )
@@ -47,12 +44,13 @@ param (
 . "$PSScriptRoot\lib.ps1"
 $Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
 
-if (-not $VCenterServer)          { $VCenterServer          = $Config.VCenter.Server }
-if (-not $CsvFile)                { $CsvFile                = $Config.Paths.CsvFile }
-if (-not $PreMigrationMailScript) { $PreMigrationMailScript = "$PSScriptRoot\stepx-premigration_mail.ps1" }
-if (-not $LogFile)                { $LogFile                = "$($Config.Paths.LogDir)\step2-shutdown-backup-$Tag-$(Get-Date -Format 'yyyyMMdd').log" }
+if (-not $VCenterServer) { $VCenterServer = $Config.VCenter.Server }
+if (-not $CsvFile)       { $CsvFile       = $Config.Paths.CsvFile }
+if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step2-shutdown-backup-$Tag-$(Get-Date -Format 'yyyyMMdd').log" }
 
 Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
+# Session scope: the User scope rewrote the PowerCLI user profile on every run.
+Set-PowerCLIConfiguration -Scope Session -ParticipateInCEIP $false -Confirm:$false | Out-Null
 if ($PSVersionTable.PSEdition -eq "Core") {
     Write-MigrationLog "PowerShell 7 detected: skipping direct import of Veeam.Backup.PowerShell to avoid VMware/Veeam VimService assembly conflicts." -Level WARNING -LogFile $LogFile
     Write-MigrationLog "Veeam commands will run in Windows PowerShell for this step." -Level WARNING -LogFile $LogFile
@@ -212,15 +210,56 @@ if ($vmStates.Count -gt 0) {
     } while (-not $allPoweredOff)
 }
 
-Write-MigrationLog "Sending pre-migration email" -LogFile $LogFile
-try {
-    # Reuse the vCenter session opened by this step (-SkipVCenterLogin) instead of
-    # letting the mail script disconnect/reconnect a second full PowerCLI session.
-    & $PreMigrationMailScript -tagName $Tag -recipientGroup $RecipientGroup -vCenterServer $VCenterServer -SkipVCenterLogin
-} catch {
-    # The notification email must not block the backup: VMs are already shut down at
-    # this point, aborting here would leave the batch neither backed up nor restarted.
-    Write-MigrationLog "Pre-migration email failed: $($_.Exception.Message). Continuing with the Veeam backup (notification is non-blocking)." -Level WARNING -LogFile $LogFile
+if (-not $Config.Smtp.Enabled) {
+    Write-MigrationLog "Pre-migration email disabled (Smtp.Enabled = `$false in config.psd1)." -LogFile $LogFile
+} else {
+    Write-MigrationLog "Sending pre-migration email" -LogFile $LogFile
+    try {
+        if (-not $Config.Recipients.ContainsKey($RecipientGroup)) {
+            throw "Invalid recipient group: '$RecipientGroup'. Values: $($Config.Recipients.Keys -join ', ')."
+        }
+
+        $mailTagObj = Get-Tag -Name $Tag -Category $Config.Tags.Category -ErrorAction Stop
+        if ($null -eq $mailTagObj) { throw "Tag '$Tag' does not exist." }
+
+        $mailTaggedVmIds = @(
+            Get-TagAssignment -Tag $mailTagObj -ErrorAction SilentlyContinue |
+                Where-Object { $_.Entity -and $_.Entity.GetType().Name -eq 'VirtualMachine' } |
+                ForEach-Object { $_.Entity.Id }
+        )
+        $mailTaggedVms = if ($mailTaggedVmIds) { @(VMware.VimAutomation.Core\Get-VM -Id $mailTaggedVmIds) } else { @() }
+
+        if ($mailTaggedVms.Count -eq 0) {
+            Write-MigrationLog "No VM with tag '$Tag'; skipping pre-migration email." -Level WARNING -LogFile $LogFile
+        } else {
+            $htmlBody = @"
+<html>
+<head>
+<style>
+    body { font-family: Arial, sans-serif; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid black; padding: 8px; text-align: left; }
+    th { background-color: #f2f2f2; }
+</style>
+</head>
+<body>
+<h3>Server list and status — tag '$Tag' (migration in progress)</h3>
+<table>
+    <tr><th>Name</th><th>State</th></tr>
+"@
+            foreach ($mailVm in $mailTaggedVms) {
+                $status = if ($mailVm.PowerState -eq "PoweredOn") { "Up&amp;Running" } else { "Shutdown" }
+                $htmlBody += "<tr><td>$(ConvertTo-HtmlEncoded $mailVm.Name)</td><td>$status</td></tr>"
+            }
+            $htmlBody += "</table></body></html>"
+
+            Send-HtmlMail -From $Config.Smtp.From -To $Config.Recipients[$RecipientGroup] -Subject "VM Migration of $Tag tag" -HtmlBody $htmlBody -SmtpServer $Config.Smtp.Server -Port $Config.Smtp.Port -LogFile $LogFile
+        }
+    } catch {
+        # The notification email must not block the backup: VMs are already shut down at
+        # this point, aborting here would leave the batch neither backed up nor restarted.
+        Write-MigrationLog "Pre-migration email failed: $($_.Exception.Message). Continuing with the Veeam backup (notification is non-blocking)." -Level WARNING -LogFile $LogFile
+    }
 }
 
 Disconnect-VCenter -LogFile $LogFile

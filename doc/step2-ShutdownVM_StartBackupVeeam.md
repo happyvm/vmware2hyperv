@@ -14,10 +14,12 @@ Step 2 de la pipeline de migration :
 
 1. **Arrêt des VMs** : shutdown graceful de toutes les VMs du lot
 2. **Déconnexion réseau** : déconnecte les NICs des VMs arrêtées
-3. **Email pré-migration** : notifie les destinataires configurés
+3. **Email pré-migration** : notifie les destinataires configurés (liste des VMs du tag et leur état)
 4. **Backup Veeam** : démarre le job de backup et attend sa complétion
 
 En PowerShell 7, le démarrage du job Veeam est délégué à `powershell.exe` (Windows PowerShell).
+
+L'envoi de l'email pré-migration est géré directement par ce script (plus de script externe séparé) et peut être désactivé globalement via `Config.Smtp.Enabled = $false`. Un échec de l'email (destinataire invalide, tag introuvable, SMTP indisponible...) est non bloquant : il est loggé en WARNING et le backup Veeam continue.
 
 ## Paramètres
 
@@ -26,8 +28,7 @@ En PowerShell 7, le démarrage du job Veeam est délégué à `powershell.exe` (
 | `-Tag` | string | Oui | — | Tag du lot |
 | `-VCenterServer` | string | Non | `Config.VCenter.Server` | Serveur vCenter |
 | `-CsvFile` | string | Non | `Config.Paths.CsvFile` | CSV batch |
-| `-PreMigrationMailScript` | string | Non | `stepx-premigration_mail.ps1` | Script email |
-| `-RecipientGroup` | string | Non | `infogerant` | Groupe destinataires |
+| `-RecipientGroup` | string | Non | `infogerant` | Groupe destinataires (clé dans `Config.Recipients`) |
 | `-LogFile` | string | Non | auto-généré | Fichier de log |
 
 ## Algorithme d'arrêt
@@ -51,14 +52,12 @@ En PowerShell 7, le démarrage du job Veeam est délégué à `powershell.exe` (
 
 ## Dépendances
 
-- `lib.ps1`
-- `config.psd1`
-- `stepx-premigration_mail.ps1`
+- `lib.ps1` — `Connect-VCenter`, `Send-HtmlMail`, `ConvertTo-HtmlEncoded`
+- `config.psd1` — sections `VCenter`, `Paths`, `Smtp`, `Recipients`, `Tags`
 - Module `VMware.PowerCLI`
 - Module `Veeam.Backup.PowerShell` (dans Windows PowerShell)
 
 ## Voir aussi
 
 - [step1-TagResources_CreateVeeamJob.ps1](step1-TagResources_CreateVeeamJob.md) — Étape précédente
-- [stepx-premigration_mail.ps1](stepx-premigration_mail.md) — Script email
 - [run-migration.ps1](run-migration.md) — Orchestrateur
