@@ -40,6 +40,7 @@ param(
 )
 
 . "$PSScriptRoot\lib.ps1"
+. "$PSScriptRoot\step3\Step3.TaskResult.ps1"
 
 if (-not $LogFile) {
     $LogFile = "$PSScriptRoot\$WorkerName.log"
@@ -78,9 +79,8 @@ function Get-NetworkConfigurationState {
 
     .DESCRIPTION
         First tries to read "{VmLogFile}.result.json" produced by the refactored
-        step3-MigrateVM.ps1 (Step3.TaskResult). If the file exists, extracts the
-        NetworkConfiguration phase status and maps it to the canonical states:
-        Configured / ConfiguredWithWarning / NotDetected.
+        step3-MigrateVM.ps1 (Step3.TaskResult). If the file exists, delegates the
+        phase-to-state mapping to Get-Step3NetworkConfigurationState.
 
         Falls back to the legacy log-grep approach when no result file exists,
         ensuring backward compatibility with the pre-refactoring step3-MigrateVM.ps1.
@@ -105,17 +105,7 @@ function Get-NetworkConfigurationState {
             $result = Get-Content -Path $resultFilePath -Raw -ErrorAction Stop |
                 ConvertFrom-Json -ErrorAction Stop
 
-            # Phases from JSON is a PSCustomObject; access NetworkConfiguration directly
-            $phase = $result.Phases.NetworkConfiguration
-            if ($phase) {
-                switch ($phase.Status) {
-                    'Success' { return 'Configured' }
-                    'Warning' { return 'ConfiguredWithWarning' }
-                    'Failed'  { return 'NotDetected' }
-                    'Skipped' { return 'NotDetected' }
-                }
-            }
-            return 'NotDetected'
+            return Get-Step3NetworkConfigurationState -Result $result
         } catch {
             Write-MigrationLog "[$WorkerName] Unable to read TaskResult file '$resultFilePath': $($_.Exception.Message). Falling back to log grep." -Level WARNING -LogFile $LogFile
         }

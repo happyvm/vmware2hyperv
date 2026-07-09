@@ -241,8 +241,14 @@ function Get-Step3NetworkConfigurationState {
         [PSCustomObject]$Result
     )
 
-    # $Result.Phases is an OrderedDictionary; access by key directly
-    $phase = $Result.Phases['NetworkConfiguration']
+    # $Result.Phases may be an OrderedDictionary (in-memory) or a PSCustomObject
+    # (deserialised JSON).  OrderedDictionary supports ['key'] but not .Property;
+    # PSCustomObject supports .Property but not ['key'].  Branch accordingly.
+    $phase = if ($Result.Phases -is [System.Collections.IDictionary]) {
+        $Result.Phases['NetworkConfiguration']
+    } else {
+        $Result.Phases.NetworkConfiguration
+    }
     if (-not $phase) {
         return 'NotDetected'
     }
