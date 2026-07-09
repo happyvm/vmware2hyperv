@@ -186,10 +186,10 @@ StartVm = @{
 }
 ```
 
-Réglages pour `step-XX-StartVM.ps1`.
+Réglages pour `step5-StartVM.ps1`.
 
 ## Voir aussi
 
 - [README.md](../README.md) — Documentation complète
-- [ADR-001](../docs/adr/001-architecture-decisions.md) — Décisions d'architecture
+- [ADR-001](adr/001-architecture-decisions.md) — Décisions d'architecture
 - [lib.ps1](lib.md) — Fonctions utilisant cette config

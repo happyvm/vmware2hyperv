@@ -100,4 +100,4 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 ## Voir aussi
 
 - [config.psd1](config.md) — Configuration centralisée
-- [ADR-001](../docs/adr/001-architecture-decisions.md) — Décision 3 : stratégie d'import
+- [ADR-001](adr/001-architecture-decisions.md) — Décision 3 : stratégie d'import

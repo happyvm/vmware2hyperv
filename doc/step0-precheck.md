@@ -1,16 +1,16 @@
-# step-precheck.ps1 — Pré-vérification vCenter
+# step0-precheck.ps1 — Pré-vérification vCenter
 
 Script de pré-vérification qui audite l'inventaire VMware avant migration.
 
 ## Synopsis
 
 ```powershell
-.\step-precheck.ps1 -VCenter vcenter.domain.local -InputCsv D:\Scripts\lot.csv
+.\step0-precheck.ps1 -VCenter vcenter.domain.local -InputCsv D:\Scripts\lot.csv
 ```
 
 ## Description
 
-`step-precheck.ps1` lit un CSV contenant `vmname;tag` et effectue les opérations suivantes :
+`step0-precheck.ps1` lit un CSV contenant `vmname;tag` et effectue les opérations suivantes :
 
 - Crée/applique un tag vSphere dans une catégorie Single-cardinality
 - Calcule par lot : nombre de VMs, vCPUs, RAM configurée, stockage datastore

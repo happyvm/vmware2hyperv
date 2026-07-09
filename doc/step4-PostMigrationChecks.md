@@ -1,13 +1,13 @@
-# step-XX-PostMigrationChecks.ps1 — Vérifications post-migration
+# step4-PostMigrationChecks.ps1 — Vérifications post-migration
 
 Boucle de validation post-migration qui vérifie la conformité des VMs dans SCVMM.
 
 ## Synopsis
 
 ```powershell
-.\step-XX-PostMigrationChecks.ps1 -Tag HypMig-lot-118
-.\step-XX-PostMigrationChecks.ps1 -Tag HypMig-lot-118 -PollIntervalSeconds 120 -MaxIterations 30
-.\step-XX-PostMigrationChecks.ps1 -CsvFile D:\Scripts\lotissement.csv
+.\step4-PostMigrationChecks.ps1 -Tag HypMig-lot-118
+.\step4-PostMigrationChecks.ps1 -Tag HypMig-lot-118 -PollIntervalSeconds 120 -MaxIterations 30
+.\step4-PostMigrationChecks.ps1 -CsvFile D:\Scripts\lotissement.csv
 ```
 
 ## Description
@@ -48,7 +48,7 @@ Exécute une boucle de vérifications SCVMM jusqu'à ce que toutes les VMs du CS
 ## Logs
 
 ```
-{LogDir}/step-XX-postcheck{-Tag}-{yyyyMMdd-HHmmss}.log
+{LogDir}/step4-postcheck{-Tag}-{yyyyMMdd-HHmmss}.log
 ```
 
 ## Dépendances
@@ -59,5 +59,5 @@ Exécute une boucle de vérifications SCVMM jusqu'à ce que toutes les VMs du CS
 
 ## Voir aussi
 
-- [step-XX-StartVM.ps1](step-XX-StartVM.md) — Démarrage des VMs
-- [step-XX-CleanupVmware.ps1](step-XX-CleanupVmware.md) — Nettoyage VMware
+- [step5-StartVM.ps1](step5-StartVM.md) — Démarrage des VMs
+- [step6-CleanupVmware.ps1](step6-CleanupVmware.md) — Nettoyage VMware

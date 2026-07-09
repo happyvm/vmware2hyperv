@@ -128,4 +128,4 @@ Pour chaque VM, l'orchestrateur :
 - [worker-step3.ps1](worker-step3.md) — Détail du worker
 - [step3-StartInstantRecovery.ps1](step3-StartInstantRecovery.md) — Bulk IR
 - [step3-MigrateVM.ps1](step3-MigrateVM.md) — Migration par VM
-- [ADR-001](../docs/adr/001-architecture-decisions.md) — Décisions d'architecture
+- [ADR-001](adr/001-architecture-decisions.md) — Décisions d'architecture

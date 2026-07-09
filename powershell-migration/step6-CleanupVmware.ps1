@@ -21,7 +21,7 @@
     Path to the log file. Auto-generated if not provided.
 
 .EXAMPLE
-    .\step-XX-CleanupVmware.ps1 -Tag HypMig-lot-118
+    .\step6-CleanupVmware.ps1 -Tag HypMig-lot-118
 
 .NOTES
     Part of the vmware2hyperv migration toolkit.
@@ -44,7 +44,7 @@ Assert-PathPresent -Path $ConfigFile -Label "Configuration file"
 $Config = Import-PowerShellDataFile $ConfigFile
 $VCenterServer = $Config.VCenter.Server
 
-if (-not $LogFile) { $LogFile = "$($Config.Paths.LogDir)\step-XX-cleanup-vmware-$Tag-$(Get-Date -Format 'yyyyMMdd').log" }
+if (-not $LogFile) { $LogFile = "$($Config.Paths.LogDir)\step6-cleanup-vmware-$Tag-$(Get-Date -Format 'yyyyMMdd').log" }
 
 Write-MigrationLog "Starting VMware cleanup step for tag '$Tag'." -LogFile $LogFile
 
@@ -95,4 +95,4 @@ finally {
     Disconnect-VCenter -LogFile $LogFile
 }
 
-Write-MigrationLog "step-XX cleanup completed." -Level SUCCESS -LogFile $LogFile
+Write-MigrationLog "step6 cleanup completed." -Level SUCCESS -LogFile $LogFile

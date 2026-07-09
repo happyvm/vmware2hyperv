@@ -4,7 +4,7 @@
     }
 
     # ============================================================
-    # Precheck configuration (step-precheck.ps1)
+    # Precheck configuration (step0-precheck.ps1)
     # ============================================================
     Precheck = @{
         # Path to the input CSV file (vmname;tag columns required)

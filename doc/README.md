@@ -13,7 +13,7 @@ Documentation détaillée de chaque script du toolkit de migration VMware vers H
 
 | Script | Rôle |
 |--------|------|
-| [step-precheck.ps1](step-precheck.md) | Pré-vérification vCenter : inventaire, uptime, ipconfig, tags |
+| [step0-precheck.ps1](step0-precheck.md) | Pré-vérification vCenter : inventaire, uptime, ipconfig, tags |
 
 ## Étape 1 — Préparation
 
@@ -38,9 +38,9 @@ Documentation détaillée de chaque script du toolkit de migration VMware vers H
 
 | Script | Rôle |
 |--------|------|
-| [step-XX-PostMigrationChecks.ps1](step-XX-PostMigrationChecks.md) | Vérifications SCVMM post-migration |
-| [step-XX-StartVM.ps1](step-XX-StartVM.md) | Démarrage VMs + Integration Services |
-| [step-XX-CleanupVmware.ps1](step-XX-CleanupVmware.md) | Suppression des VMs sources VMware |
+| [step4-PostMigrationChecks.ps1](step4-PostMigrationChecks.md) | Vérifications SCVMM post-migration |
+| [step5-StartVM.ps1](step5-StartVM.md) | Démarrage VMs + Integration Services |
+| [step6-CleanupVmware.ps1](step6-CleanupVmware.md) | Suppression des VMs sources VMware |
 
 ## Librairie partagée
 
@@ -63,5 +63,5 @@ Documentation détaillée de chaque script du toolkit de migration VMware vers H
 
 ## Architecture
 
-- [ADR-001 : Décisions d'architecture](../docs/adr/001-architecture-decisions.md)
+- [ADR-001 : Décisions d'architecture](adr/001-architecture-decisions.md)
 - [README principal](../README.md)
