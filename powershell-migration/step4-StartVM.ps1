@@ -260,6 +260,7 @@ function Get-SCVMMVmInventory {
                             $vm = $refreshedVm
                         }
                     } catch {
+                        Write-MigrationLog "Read-SCVirtualMachine -Force failed for VM, using cached object: $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
                         # Keep the VM object from the batched inventory. Falling back to a
                         # per-VM Get-SCVirtualMachine here would reintroduce the slow path.
                     }

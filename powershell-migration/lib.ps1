@@ -482,11 +482,13 @@ function ConvertTo-HtmlEncoded {
 }
 
 # ---------------------------------------------------------------------------
-# Send-HtmlMail : send an email in HTML format (TLS-enabled, with optional SMTP authentication)
+# Send-HtmlMail : send an email in HTML format
 #
-# SECURITY: TLS 1.2+ is enforced by default. Use -Credential for SMTP servers that
-# require authentication. The credential is only used for SMTP auth and is destroyed
-# after the send attempt (finally block).
+# SECURITY: Forces TLS 1.2+ on every call. The default port is now 587 (submission)
+#           instead of 25 (unencrypted SMTP relay) to enforce STARTTLS.
+#           SMTP authentication is supported via the optional -Credential parameter.
+#           The credential object is explicitly nulled in the finally block to limit
+#           its lifetime in memory.
 # ---------------------------------------------------------------------------
 function Send-HtmlMail {
     param(
@@ -507,15 +509,13 @@ function Send-HtmlMail {
 
         [int]$Port = 587,
 
-        # Optional SMTP authentication credential. When omitted the client attempts
-        # anonymous/unauthenticated delivery (suitable for internal relays on trusted
-        # networks where the SMTP server does not require auth).
-        [System.Management.Automation.PSCredential]
-        [System.Management.Automation.Credential()]
-        $Credential,
+        [System.Management.Automation.PSCredential]$Credential,
 
         [string]$LogFile
     )
+
+    # Force TLS 1.2+ for every SMTP call in this function
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 
     $mailMessage = $null
     $smtpClient = $null
@@ -533,8 +533,8 @@ function Send-HtmlMail {
         $smtpClient.EnableSsl = $true
 
         if ($Credential) {
-            $smtpClient.UseDefaultCredentials = $false
             $smtpClient.Credentials = $Credential.GetNetworkCredential()
+            Write-MigrationLog "SMTP authentication enabled for $From" -LogFile $LogFile
         }
 
         $smtpClient.Send($mailMessage)
@@ -545,11 +545,11 @@ function Send-HtmlMail {
     } finally {
         if ($mailMessage) { $mailMessage.Dispose() }
         if ($smtpClient) {
-            if ($smtpClient.Credentials) {
-                $smtpClient.Credentials = $null
-            }
+            if ($smtpClient.Credentials) { $smtpClient.Credentials = $null }
             $smtpClient.Dispose()
         }
+        # Clear the credential variable to limit its lifetime in memory
+        if ($Credential) { $Credential = $null }
     }
 }
 
@@ -558,11 +558,12 @@ function Send-HtmlMail {
 # ---------------------------------------------------------------------------
 # Invoke-SCVMMCommand : proxy for SCVMM cmdlets (routes through WinPS compat session if present)
 #
-# SECURITY: This function accepts an arbitrary [scriptblock] that is executed
-# in the caller's scope (or the WinPS compat session). Callers MUST NOT construct
-# the ScriptBlock from untrusted input — doing so would allow arbitrary code
-# execution. All current callers are internal to the vmware2hyperv toolkit and
-# pass only hard-coded ScriptBlocks.
+# SECURITY: Accepts a [scriptblock] parameter. This function is designed for
+#           internal callers only; all call sites pass hard-coded scriptblocks
+#           defined in migration scripts. Do NOT pass user-provided or external
+#           input as a ScriptBlock — this would open an arbitrary code injection
+#           vector. If dynamic invocation is needed in the future, use
+#           [ScriptBlock]::Create() with strict input validation.
 # ---------------------------------------------------------------------------
 function Invoke-SCVMMCommand {
     param(
@@ -585,9 +586,9 @@ function Invoke-SCVMMCommand {
 # ---------------------------------------------------------------------------
 # Invoke-VeeamCommand : proxy for Veeam cmdlets (routes through WinPS compat session if present)
 #
-# SECURITY: Same ScriptBlock injection risk as Invoke-SCVMMCommand — callers
-# MUST NOT construct the ScriptBlock from untrusted input. All current callers
-# are internal and pass only hard-coded ScriptBlocks.
+# SECURITY: Same ScriptBlock injection warning as Invoke-SCVMMCommand above.
+#           All call sites are internal and pass hard-coded scriptblocks.
+#           Do NOT pass user input as a ScriptBlock.
 # ---------------------------------------------------------------------------
 function Invoke-VeeamCommand {
     param(

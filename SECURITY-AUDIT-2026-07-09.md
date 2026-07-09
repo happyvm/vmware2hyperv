@@ -1,104 +1,141 @@
-# Rapport d'Audit de Sécurité — Scripts vmware2hyperv
+# Rapport d'audit de sécurité — vmware2hyperv
 
-**Date** : 2026-07-09
-**Auditeur** : Agent PowerShell Developer (c0eac538)
-**Issue** : BEA-317
-**Périmètre** : 33 scripts PowerShell (.ps1) dans le projet vmware2hyperv
-**Méthodologie** : PSScriptAnalyzer 1.25.0 + scan manuel de patterns (injection, secrets, élévation, secrets exposés)
-
----
-
-## Synthèse
-
-| Sévérité | Nombre | Corrigé |
-|----------|--------|---------|
-| Critique | 1      | ✅      |
-| Élevée   | 0      | -       |
-| Modérée  | 4      | 2/4     |
-| Mineure  | 6      | 0/6     |
-
-**Score global** : Le code est de bonne qualité. Aucune injection de commande, aucun secret en dur, aucune élévation non sécurisée. Les failles sont principalement des durcissements SMTP et des bonnes pratiques.
+**Date** : 2026-07-09  
+**Auditeur** : Agent PowerShell Developer (Paperclip, run 26347164)  
+**Périmètre** : 36 scripts PowerShell (.ps1) + 3 fichiers de config (.psd1)  
+**Méthodologie** : PSScriptAnalyzer 1.25.0 + scan manuel de patterns dangereux + revue de code ciblée
 
 ---
 
-## Vulnérabilités détaillées
+## Résumé
 
-### 🔴 CRIT-001 — SMTP sans chiffrement ni authentification
-
-**Fichier** : `powershell-migration/lib.ps1` lignes 487-531 (fonction `Send-HtmlMail`)
-**Description** : La fonction utilise `[System.Net.Mail.SmtpClient]` avec le port 25 par défaut, sans TLS/SSL ni authentification. Les notifications de migration (contenant potentiellement des noms de VM, adresses IP, chemins de stockage) transitent en clair.
-**Risque** : Interception des emails, usurpation d'expéditeur (le serveur SMTP sans auth accepte n'importe quel expéditeur).
-**Correction** : ✅ Ajout du support TLS (`$smtpClient.EnableSsl = $true`), port configurable, et paramètres optionnels d'authentification (`-Credential`).
-
----
-
-### 🟡 MOD-001 — Credential vCenter persisté en mémoire
-
-**Fichier** : `powershell-migration/lib.ps1` ligne 113
-**Description** : `$script:VCenterCredentialFallback` stocke le credential vCenter en mémoire dans le scope du script pendant toute la durée du processus. Tout autre script dot-sourçant lib.ps1 dans le même processus peut y accéder.
-**Risque** : En cas de brèche d'exécution de code dans le même processus PowerShell, le credential est accessible.
-**Recommandation** : Supprimer le credential après déconnexion (`Disconnect-VCenter`). Acceptable en l'état car les workers sont isolés dans des processus séparés.
-**Statut** : ⚠️ Accepté avec justification — workers isolés.
+| Sévérité | Trouvés | Corrigés | Acceptés |
+|----------|---------|----------|----------|
+| Critique | 1 | ✅ 1 | 0 |
+| Modérée  | 3 | ✅ 1 | 2 |
+| Mineure  | 12+ | ✅ 1 | 11+ (warnings PSSA non-security) |
 
 ---
 
-### 🟡 MOD-002 — Write-Host dans les scripts de production
+## Vulnérabilités corrigées
 
-**Fichiers** : `run-migration.ps1` (17 occurrences), `lib.ps1` (8 occurrences)
-**Description** : `Write-Host` est utilisé pour l'affichage interactif, mais dans un contexte de production/automatisation, ces écritures peuvent fuiter dans les logs et ne sont pas capturées par `Write-MigrationLog`.
-**Correction** : ✅ Analysé — tous les Write-Host restants (hors tests) sont dans des outils de diagnostic interactifs (`Test-HyperVNodeReadiness.ps1`, `Invoke-MigrationConfigWizard`) avec `SuppressMessageAttribute` justifié. Aucun Write-Host dans les scripts d'orchestration automatisés. Pas de correction nécessaire.
+### CRIT-001 — SMTP sans chiffrement ni authentification
 
----
+**Fichier** : `powershell-migration/lib.ps1` — fonction `Send-HtmlMail`
 
-### 🟡 MOD-003 — ScriptBlock non validé dans les proxies SCVMM/Veeam
+**Risque** : Envoi d'emails en clair sur le port 25 sans TLS. Les credentials,
+les corps de message et les destinataires transitent en texte clair sur le réseau.
 
-**Fichier** : `powershell-migration/lib.ps1` lignes 538-575
-**Description** : `Invoke-SCVMMCommand` et `Invoke-VeeamCommand` acceptent un `[scriptblock]` arbitraire qui est exécuté dans la session de compatibilité Windows PowerShell.
-**Risque** : Si un appelant passe un ScriptBlock construit à partir d'une entrée non fiable, c'est un vecteur d'injection.
-**Analyse** : Tous les appelants sont internes au projet. Aucun n'utilise d'entrée utilisateur pour construire le ScriptBlock.
-**Recommandation** : Ajouter un commentaire de sécurité documentant ce risque.
-**Correction** : ✅ Commentaire d'avertissement ajouté dans la documentation des fonctions.
+**Correction** :
+- Port par défaut changé de 25 → 587 (submission STARTTLS)
+- `$smtpClient.EnableSsl = $true` ajouté
+- `[System.Net.ServicePointManager]::SecurityProtocol` forcé à TLS 1.2+
+- Paramètre `-Credential` optionnel pour l'authentification SMTP
+- Nettoyage du credential dans le bloc `finally` (credentials nullés + Dispose)
+- Commentaire `SECURITY` documentant les choix
 
----
+### MOD-001 — ScriptBlock non validé (documentation)
 
-### 🟡 MOD-004 — Variables non déclarées dans ScriptBlock (step4-StartVM)
+**Fichier** : `powershell-migration/lib.ps1` — fonctions `Invoke-SCVMMCommand` et `Invoke-VeeamCommand`
 
-**Fichier** : `powershell-migration/step4-StartVM.ps1` (~lignes 333-349 selon PSScriptAnalyzer sur l'ancien step-XX-StartVM.ps1)
-**Description** : PSScriptAnalyzer signale des variables comme `$ComputerName`, `$JobLocalScriptPath`, `$JobCredential` etc. non déclarées dans un ScriptBlock sans `$using:`.
-**Analyse** : Le fichier a été renommé de `step-XX-StartVM.ps1` en `step4-StartVM.ps1`. Les warnings peuvent provenir de l'ancienne version.
-**Statut** : ⚠️ À vérifier — le fichier actuel utilise `-ArgumentList` pour passer les paramètres, ce qui est la bonne pratique. Les warnings PSScriptAnalyzer sont probablement obsolètes.
+**Risque** : Ces fonctions acceptent `[scriptblock]$ScriptBlock`. Si un appelant
+passe une entrée utilisateur non validée dans un ScriptBlock, cela constitue
+une injection de code arbitraire.
 
----
+**Correction** : Commentaires `SECURITY` ajoutés documentant :
+- Que la fonction est conçue pour des appelants internes uniquement
+- Que tous les call sites passent des scriptblocks codés en dur
+- L'interdiction de passer des entrées utilisateur comme ScriptBlock
+- La recommandation d'utiliser `[ScriptBlock]::Create()` avec validation stricte si une invocation dynamique devient nécessaire
 
-## Points forts du code
+### LOW-001 — Catch block vide sans logging
 
-- ✅ Aucun `Invoke-Expression` / `iex`
-- ✅ Aucun mot de passe ou token en dur
-- ✅ Aucune élévation non sécurisée (`Start-Process -Verb runAs`)
-- ✅ Pas de `Send-MailMessage` (cmdlet déprécié)
-- ✅ Utilisation de `ConvertTo-HtmlEncoded` pour l'encodage HTML
-- ✅ Validation des entrées via `ValidateSet`, `ValidateScript`
-- ✅ Gestion d'erreurs structurée (`try/catch` avec logging)
-- ✅ Suppression du Mark-of-the-Web dans `run-migration.ps1`
-- ✅ Séparation config.psd1 (versionné) / config.local.psd1 (gitignoré)
+**Fichier** : `powershell-migration/step4-StartVM.ps1` ligne 262
 
----
+**Risque** : Si `Read-SCVirtualMachine -Force` échoue, l'erreur était silencieusement
+avalée sans aucune trace, rendant le diagnostic impossible.
 
-## Warnings PSScriptAnalyzer (mineurs)
-
-| Règle | Fichiers | Détail |
-|-------|----------|--------|
-| PSUseBOMForUnicodeEncodedFile | 11 fichiers | BOM manquant |
-| PSUseDeclaredVarsMoreThanAssignments | 4 fichiers | Variables non utilisées (tests) |
-| PSAvoidUsingEmptyCatchBlock | 1 fichier | Catch vide dans un test |
-| PSUseApprovedVerbs | 1 fichier | Verbe non approuvé `Should-RunPhase` |
-| PSAvoidUsingConvertToSecureStringWithPlainText | 1 fichier | Plaintext dans test unitaire |
-| PSUsePSCredentialType | 1 fichier | Type credential manquant (test) |
+**Correction** : Ajout d'un `Write-MigrationLog` avec niveau WARNING dans le bloc catch.
 
 ---
 
-## Corrections appliquées
+## Risques acceptés (avec justification)
 
-1. ✅ **CRIT-001** : Ajout TLS + auth SMTP dans `Send-HtmlMail`
-2. ✅ **MOD-002** : Remplacement Write-Host → Write-MigrationLog/Write-Information hors mode interactif
-3. ✅ **MOD-003** : Commentaire de sécurité sur Invoke-SCVMMCommand/Invoke-VeeamCommand
+### ACCEPT-001 — Credential vCenter en `$script:` scope
+
+**Fichier** : `powershell-migration/lib.ps1` ligne 113 — `$script:VCenterCredentialFallback`
+
+**Risque** : Un credential est stocké dans la portée script.
+
+**Justification** : Les workers de migration sont isolés dans des processus
+PowerShell séparés. Le credential n'est jamais persisté sur disque et sa durée
+de vie est limitée à celle du processus worker. Le credential est acquis via
+`Get-Credential` (prompt interactif), jamais depuis un fichier.
+
+### ACCEPT-002 — SSL cert validation désactivée pour vCenter
+
+**Fichier** : `powershell-migration/step0-precheck.ps1` ligne 550-551
+
+**Risque** : `Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope Session`
+
+**Justification** : Pattern standard PowerCLI pour les environnements vCenter
+avec certificats auto-signés. La portée est limitée à la session (`-Scope Session`),
+pas globale. Dans un environnement de production avec certificats d'entreprise
+valides, cette ligne est sans effet.
+
+### ACCEPT-003 — Write-Host dans l'assistant de configuration
+
+**Fichier** : `powershell-migration/lib.ps1` — `Invoke-MigrationConfigWizard`
+
+**Justification** : Utilisé uniquement dans un outil interactif de diagnostic
+(configure-migration.ps1). Les messages sont destinés à l'opérateur humain
+dans la console, pas à du logging automatisé. Un `SuppressMessageAttribute`
+est justifié.
+
+---
+
+## Points forts confirmés
+
+| Contrôle | Résultat |
+|----------|----------|
+| `Invoke-Expression` / `iex` | ✅ Aucun |
+| Mots de passe hardcodés | ✅ Aucun |
+| Tokens / clés API en dur | ✅ Aucun |
+| `Send-MailMessage` (déprécié) | ✅ Aucun |
+| Élévation non sécurisée (`Start-Process -Verb runas`) | ✅ Aucune |
+| Validation des entrées (`ValidateSet`, `ValidateScript`) | ✅ Présente |
+| Gestion d'erreurs structurée avec logging | ✅ Présente |
+| Séparation config versionnée / locale | ✅ `config.psd1` (git) / `config.local.psd1` (gitignoré) |
+| Injection HTML (emails) | ✅ `ConvertTo-HtmlEncoded` via `[System.Net.WebUtility]::HtmlEncode()` |
+| Credentials en clair dans config.psd1 | ✅ Non — commentaire explicite "Passwords are never stored here" |
+
+---
+
+## Warnings PSScriptAnalyzer résiduels
+
+27 warnings initiaux → réduits par la correction du catch block vide.
+
+Warnings restants (non-security, préexistants) :
+
+| Règle | Fichiers | Impact sécurité |
+|-------|----------|-----------------|
+| `PSUseBOMForUnicodeEncodedFile` | 12 fichiers | Aucun (encodage) |
+| `PSUseApprovedVerbs` | Step3.PhaseRunner.ps1 | Aucun (convention) |
+| `PSUseUsingScopeModifierInNewRunspaces` | step4-StartVM.ps1 (11 occ.) | Aucun — variables de closure légitimes |
+| `PSUseDeclaredVarsMoreThanAssignments` | step5-ValidateMigration.ps1 | Aucun (qualité de code) |
+
+---
+
+## Livrables
+
+- Commit des corrections de sécurité sur `main`
+- Ce rapport : `SECURITY-AUDIT-2026-07-09.md`
+
+---
+
+## Conclusion
+
+Le codebase vmware2hyperv présente un **bon niveau de sécurité global**.
+Une seule vulnérabilité critique a été identifiée (SMTP sans TLS) et corrigée.
+Les risques modérés sont documentés et acceptés avec justification.
+Aucune backdoor, aucun secret exposé, aucune injection non maîtrisée.
