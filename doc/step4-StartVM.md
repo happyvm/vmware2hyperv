@@ -10,7 +10,7 @@ Démarre les VMs migrées et configure les Integration Services, avec retrait de
 
 ## Description
 
-Script post-migration qui :
+Exécuté automatiquement par [run-migration.ps1](run-migration.md) après la pause de validation manuelle qui suit step3 (peut aussi être relancé seul, ou via `run-migration.ps1 -StartFrom step4`). Le script :
 - Démarre chaque VM listée dans le CSV batch
 - Monte une ISO Integration Services pour Windows Server 2003/2008
 - Tente WinRM (HTTPS puis HTTP) sur Windows Server 2012+ pour uploader et exécuter un script de retrait VMware Tools
@@ -75,5 +75,6 @@ IntegrationServices = @{
 
 ## Voir aussi
 
+- [run-migration.ps1](run-migration.md) — Orchestrateur, exécute cette étape après step3
 - [step5-PostMigrationChecks.ps1](step5-PostMigrationChecks.md) — Vérifications post-migration
 - [step6-CleanupVmware.ps1](step6-CleanupVmware.md) — Nettoyage VMware

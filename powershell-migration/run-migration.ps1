@@ -3,10 +3,12 @@
     VMware to Hyper-V migration orchestrator.
 
 .DESCRIPTION
-    Orchestrates the full 3-step migration pipeline: (1) tag VMware VMs and create
-    Veeam backup jobs, (2) shut down VMs and trigger Veeam backups, (3) run Instant
-    Recovery and post-migration configuration. Supports resumption from any step,
-    single-VM incident recovery, and automation-friendly non-interactive mode.
+    Orchestrates the migration pipeline: (1) tag VMware VMs and create Veeam backup
+    jobs, (2) shut down VMs and trigger Veeam backups, (3) run Instant Recovery and
+    post-migration configuration, (4) start the migrated VMs and verify Integration
+    Services (a manual validation pause happens between step3 and step4). Supports
+    resumption from any step, single-VM incident recovery, and automation-friendly
+    non-interactive mode.
 
     Invoked with no arguments at all, it switches to an interactive mode: it first
     checks config.local.psd1 for missing values (running configure-migration.ps1's
@@ -19,7 +21,7 @@
     interactively when the script is run with no arguments.
 
 .PARAMETER StartFrom
-    Step to start from: step1, step2, or step3. Default: step1.
+    Step to start from: step1, step2, step3, or step4. Default: step1.
 
 .PARAMETER RecipientGroup
     Recipient group for the pre-migration email notification. Default: infogerant.
@@ -42,7 +44,7 @@
     Disable all interactive prompts for automation-friendly execution.
 
 .PARAMETER SkipManualValidation
-    Skip the manual validation pause between step2 and step3.
+    Skip the manual validation pause after step3 completes, before step4 (StartVM).
 
 .EXAMPLE
     .\run-migration.ps1
@@ -53,6 +55,10 @@
 
 .EXAMPLE
     .\run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step3 -NonInteractive
+
+.EXAMPLE
+    .\run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step4
+    # Replays only step4 (StartVM) — e.g. after a manual step3 recovery.
 
 .NOTES
     Part of the vmware2hyperv migration toolkit.
@@ -74,7 +80,7 @@ param (
     [string]$Tag,
 
     # Step to start from (useful when resuming)
-    [ValidateSet("step1", "step2", "step3")]
+    [ValidateSet("step1", "step2", "step3", "step4")]
     [string]$StartFrom = "step1",
 
     # Recipient group for the pre-migration email
@@ -98,7 +104,7 @@ param (
     # Disable all interactive prompts (automation-friendly mode)
     [switch]$NonInteractive,
 
-    # Skip the manual validation pause between step2 and step3
+    # Skip the manual validation pause after step3, before step4 (StartVM)
     [switch]$SkipManualValidation
 )
 
@@ -128,10 +134,10 @@ if ($PSBoundParameters.Count -eq 0 -and -not $NonInteractive) {
         $Tag = Read-Host "Tag du lot à migrer (ex: HypMig-lot-118)"
     }
 
-    $startFromAnswer = Read-Host "Étape de départ [step1/step2/step3] (Entrée = $StartFrom)"
+    $startFromAnswer = Read-Host "Étape de départ [step1/step2/step3/step4] (Entrée = $StartFrom)"
     if ($startFromAnswer) {
-        if ($startFromAnswer -notin @("step1", "step2", "step3")) {
-            throw "Étape de départ invalide : '$startFromAnswer'. Valeurs possibles : step1, step2, step3."
+        if ($startFromAnswer -notin @("step1", "step2", "step3", "step4")) {
+            throw "Étape de départ invalide : '$startFromAnswer'. Valeurs possibles : step1, step2, step3, step4."
         }
         $StartFrom = $startFromAnswer
     }
@@ -159,7 +165,7 @@ Write-MigrationLog "Step3 VM filter: $Step3VmName" -LogFile $LogFile
 Write-MigrationLog "Step3 recovery mode: $Step3RecoveryMode" -LogFile $LogFile
 Write-MigrationLog "======================================================" -LogFile $LogFile
 
-$steps = @("step1", "step2", "step3")
+$steps = @("step1", "step2", "step3", "step4")
 $startIndex = [array]::IndexOf($steps, $StartFrom)
 
 function Invoke-OrchestratorStep {
@@ -228,20 +234,9 @@ if ($startIndex -le 1) {
     Invoke-OrchestratorStep -Step "step2" -Action {
         & "$PSScriptRoot\step2-ShutdownVM_StartBackupVeeam.ps1" -Tag $Tag -RecipientGroup $RecipientGroup -LogFile $LogFile
     }
-
-    Write-Information "" -InformationAction Continue
-    if ($NonInteractive -or $SkipManualValidation) {
-        Write-Warning ">>> NON-INTERACTIVE MODE: Skipping manual validation before step3 (Instant Recovery)"
-        Write-Warning "    Check in the Veeam console that job 'Backup-$Tag' is completed."
-        Write-MigrationLog "NonInteractive/SkipManualValidation — skipping manual validation, launching step3." -LogFile $LogFile
-    }
-    else {
-        Write-Warning ">>> PAUSE before step3 (Instant Recovery)"
-        Write-Warning "    Check in the Veeam console that job 'Backup-$Tag' is completed."
-        Read-Host "    Press Enter to continue"
-        Write-MigrationLog "Manual validation confirmed — launching step3." -LogFile $LogFile
-    }
 }
+
+if ($startIndex -le 2) {
 
 # ── Retrieving VMware VLANs (single connection, before worker dispatch) ──
 
@@ -815,3 +810,26 @@ if ($finalFailedCount -gt 0) {
 Write-MigrationLog "======================================================" -LogFile $LogFile
 Write-MigrationLog "Migration of batch $Tag completed successfully." -Level SUCCESS -LogFile $LogFile
 Write-MigrationLog "======================================================" -LogFile $LogFile
+
+}
+
+if ($startIndex -le 3) {
+    Write-Information "" -InformationAction Continue
+    if ($NonInteractive -or $SkipManualValidation) {
+        Write-Warning ">>> NON-INTERACTIVE MODE: Skipping manual validation before step4 (StartVM / Integration Services)"
+        Write-MigrationLog "NonInteractive/SkipManualValidation — skipping manual validation after step3." -LogFile $LogFile
+    } else {
+        Write-Warning ">>> PAUSE before step4 (StartVM / Integration Services)"
+        Write-Warning "    Check the migrated VMs in SCVMM/Hyper-V before Integration Services are configured."
+        Read-Host "    Press Enter to continue"
+        Write-MigrationLog "Manual validation confirmed — launching step4." -LogFile $LogFile
+    }
+
+    Invoke-OrchestratorStep -Step "step4" -Action {
+        & "$PSScriptRoot\step4-StartVM.ps1" -Tag $Tag -LogFile $LogFile
+    }
+
+    Write-MigrationLog "======================================================" -LogFile $LogFile
+    Write-MigrationLog "Migration pipeline for batch $Tag finished (step4 complete)." -Level SUCCESS -LogFile $LogFile
+    Write-MigrationLog "======================================================" -LogFile $LogFile
+}
