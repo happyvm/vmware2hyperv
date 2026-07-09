@@ -504,8 +504,19 @@ Describe 'step3-MigrateVM.ps1 - phase Action wiring against step3/ function sign
         'NonBlocking'. Specify a parameter of type 'System.Boolean' and try again." This only
         surfaced once a task got far enough to reach the first NonBlocking phase (OS) — the
         earlier -Context/-Result bug had masked it until now.
+
+        BEA-283: Invoke-Phase is now defined in step3/Step3.PhaseRunner.ps1 (dot-sourced),
+        not inline in step3-MigrateVM.ps1. Parse the PhaseRunner file.
         #>
-        $invokePhaseFn = $ast.FindAll({
+
+        $phaseRunnerPath = Join-Path $PSScriptRoot '..' 'powershell-migration' 'step3' 'Step3.PhaseRunner.ps1'
+        if (-not (Test-Path $phaseRunnerPath)) {
+            $phaseRunnerPath = Join-Path $repoRoot 'powershell-migration' 'step3' 'Step3.PhaseRunner.ps1'
+        }
+        $phaseRunnerContent = Get-Content -Raw $phaseRunnerPath -ErrorAction Stop
+        $phaseRunnerAst = [System.Management.Automation.Language.Parser]::ParseInput($phaseRunnerContent, [ref]$null, [ref]$null)
+
+        $invokePhaseFn = $phaseRunnerAst.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -eq 'Invoke-Phase'

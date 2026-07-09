@@ -25,18 +25,18 @@ function Set-SCVMMOperatingSystem {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Name,
+        [hashtable]$Context,
 
-        [Parameter(Mandatory = $true)]
-        [string]$ServerName,
+        [Parameter(Mandatory = $false)]
+        [PSObject]$Result,
 
-        [AllowNull()]
-        [string]$SourceOperatingSystem,
-
-        $OperatingSystemMap,
-
-        [string]$LogFile
     )
+
+    $Name = $Context.VMName
+    $ServerName = $Context.VMMServerName
+    $SourceOperatingSystem = $Context.OperatingSystem
+    $OperatingSystemMap = $Context.Config.SCVMM.OperatingSystemMap
+    $LogFile = $Context.LogFile
 
     if ([string]::IsNullOrWhiteSpace($SourceOperatingSystem)) {
         Write-MigrationLog "[$Name] No source operating system provided; SCVMM OS update skipped." -Level WARNING -LogFile $LogFile
@@ -80,16 +80,16 @@ function Register-VmHighAvailability {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Name,
+        [hashtable]$Context,
 
-        [Parameter(Mandatory = $true)]
-        [string]$ServerName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ClusterName,
-
-        [string]$LogFile
+        [Parameter(Mandatory = $false)]
+        [PSObject]$Result
     )
+
+    $Name = $Context.VMName
+    $ServerName = $Context.VMMServerName
+    $ClusterName = $Context.HyperVCluster
+    $LogFile = $Context.LogFile
 
     $vmStateBeforeHa = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
     $vmHaState = [bool]$vmStateBeforeHa.IsHighlyAvailable
@@ -143,16 +143,16 @@ function Move-VmToSecondHost {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Name,
+        [hashtable]$Context,
 
-        [Parameter(Mandatory = $true)]
-        [string]$ServerName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$DestinationHost,
-
-        [string]$LogFile
+        [Parameter(Mandatory = $false)]
+        [PSObject]$Result
     )
+
+    $Name = $Context.VMName
+    $ServerName = $Context.VMMServerName
+    $DestinationHost = $Context.HyperVHost2
+    $LogFile = $Context.LogFile
 
     try {
         $vmStateBeforeMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName -Refresh
@@ -216,16 +216,16 @@ function Set-VmBackupTag {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Name,
+        [hashtable]$Context,
 
-        [Parameter(Mandatory = $true)]
-        [string]$ServerName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$TagName,
-
-        [string]$LogFile
+        [Parameter(Mandatory = $false)]
+        [PSObject]$Result
     )
+
+    $Name = $Context.VMName
+    $ServerName = $Context.VMMServerName
+    $TagName = $Context.BackupTag
+    $LogFile = $Context.LogFile
 
     Invoke-SCVMMCommand -ScriptBlock {
         param($VmName, $VmmServerName, $BackupTagName)
@@ -239,4 +239,71 @@ function Set-VmBackupTag {
     } -ArgumentList @($Name, $ServerName, $TagName)
 
     Write-MigrationLog "[$Name] Backup tag '$TagName' applied." -LogFile $LogFile
+}
+
+# ---------------------------------------------------------------------------
+# Set-VmIntegrationServices — configure Hyper-V Integration Services
+# ---------------------------------------------------------------------------
+function Set-VmIntegrationServices {
+    <#
+    .SYNOPSIS
+        Configure Hyper-V Integration Services for the restored VM.
+
+    .DESCRIPTION
+        Enables key Integration Services (OS shutdown, data exchange, heartbeat,
+        backup, guest services) and disables time synchronization (managed by
+        the guest). Extracted from Set-VmNetworkConfiguration (BEA-283).
+
+    .PARAMETER Context
+        Hashtable with keys: VMName, VMMServerName, LogFile.
+
+    .PARAMETER Result
+        Task result object (not modified by this function; phase tracking is
+        handled by the orchestrator via Invoke-Phase).
+
+    .EXAMPLE
+        Set-VmIntegrationServices -Context $context -Result $result
+    #>
+
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Context,
+
+        [Parameter(Mandatory = $false)]
+        [PSObject]$Result
+    )
+
+    $Name = $Context.VMName
+    $ServerName = $Context.VMMServerName
+    $LogFile = $Context.LogFile
+
+    Write-MigrationLog "[$Name] Configuring Integration Services..." -LogFile $LogFile
+
+    Invoke-SCVMMCommand -ScriptBlock {
+        param($VmName, $VmmServerName)
+
+        $server = Get-SCVMMServer -ComputerName $VmmServerName
+        $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server |
+            Where-Object { $_.VirtualizationPlatform -eq 'HyperV' } |
+            Select-Object -First 1
+        if (-not $vm) {
+            throw "VM '$VmName' not found in SCVMM while configuring Integration Services."
+        }
+
+        $setVmParameters = @{
+            VM                             = $vm
+            EnableOperatingSystemShutdown  = $true
+            EnableTimeSynchronization      = $false
+            EnableDataExchange             = $true
+            EnableHeartbeat                = $true
+            EnableBackup                   = $true
+            EnableGuestServicesInterface   = $true
+        }
+
+        Set-SCVirtualMachine @setVmParameters | Out-Null
+
+    } -ArgumentList @($Name, $ServerName)
+
+    Write-MigrationLog "[$Name] Integration Services configured." -LogFile $LogFile
 }

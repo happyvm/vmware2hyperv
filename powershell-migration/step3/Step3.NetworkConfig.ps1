@@ -82,20 +82,19 @@ function Set-VmNetworkConfiguration {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Name,
+        [hashtable]$Context,
 
-        [Parameter(Mandatory = $true)]
-        [string]$ServerName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Vlan,
-        $AdapterVlanMappings,
-
-        [string]$SourceRemark,
-        $Config,
-
-        [string]$LogFile
+        [Parameter(Mandatory = $false)]
+        [PSObject]$Result
     )
+
+    $Name = $Context.VMName
+    $ServerName = $Context.VMMServerName
+    $Vlan = $Context.VlanId
+    $AdapterVlanMappings = $Context.AdapterVlanMappings
+    $SourceRemark = $Context.Remark
+    $Config = $Context.Config
+    $LogFile = $Context.LogFile
 
     Write-MigrationLog "[$Name] Network configuration (default VLAN $Vlan)..." -LogFile $LogFile
 

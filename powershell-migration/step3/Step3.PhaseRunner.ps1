@@ -109,7 +109,7 @@ function Invoke-Phase {
         [Parameter(Mandatory = $true)]
         [scriptblock]$Action,
 
-        [bool]$NonBlocking = $false
+        [switch]$NonBlocking
     )
 
     if (-not (Should-RunPhase $Name)) {
