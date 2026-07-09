@@ -89,6 +89,13 @@ param (
     [switch]$SkipManualValidation
 )
 
+# Remove Mark-of-the-Web from every file in the toolkit (recursively, including step3\ modules
+# and config.psd1) before anything is dot-sourced or invoked. Must run first: files copied from a
+# zip download or a network share are flagged "downloaded from the internet" and, under a
+# RemoteSigned execution policy, fail to run until unblocked — including lib.ps1 itself.
+Get-ChildItem -Path $PSScriptRoot -File -Recurse -ErrorAction SilentlyContinue |
+    Unblock-File -ErrorAction SilentlyContinue
+
 . "$PSScriptRoot\lib.ps1"
 if (-not $ConfigFile) { $ConfigFile = "$PSScriptRoot\config.psd1" }
 Assert-PathPresent -Path $ConfigFile -Label "Configuration file"
@@ -568,10 +575,6 @@ $workerScriptPath = "$PSScriptRoot\worker-step3.ps1"
 Assert-PathPresent -Path $workerScriptPath -Label "step3 worker script" -LogFile $LogFile
 
 Write-MigrationLog "Step3 worker pool size: $step3WorkerCount persistent worker(s) (startup delay: ${step3WorkerStartupDelaySec}s)." -LogFile $LogFile
-
-# Remove Mark-of-the-Web once, before starting persistent workers.
-Get-ChildItem -Path $PSScriptRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
-    Unblock-File -ErrorAction SilentlyContinue
 
 $queueRoot = Join-Path $Config.Paths.LogDir ("step3-worker-queue-{0}-{1}" -f (Convert-ToSafeFileName -Value $Tag), (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $pendingDir = Join-Path $queueRoot "pending"
