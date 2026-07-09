@@ -62,7 +62,6 @@ param (
 )
 
 . "$PSScriptRoot\lib.ps1"
-. "$PSScriptRoot\Step3.VeeamRecovery.ps1"
 Get-ChildItem "$PSScriptRoot\step3\Step3.*.ps1" |
     Where-Object Name -ne 'Step3.ScvmmSession.Functions.ps1' |
     ForEach-Object { . $_.FullName }
