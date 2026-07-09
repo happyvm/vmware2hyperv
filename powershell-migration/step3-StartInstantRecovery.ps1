@@ -199,6 +199,9 @@ while ($true) {
         . $VeeamRecoveryPath
 
         $irSessions = @(Get-VBRInstantRecovery)
+        # Fetch once per poll and pass to Find-VmRestoreSession to avoid one
+        # Get-VBRRestoreSession round-trip per VM.
+        $restoreSessions = @(Get-VBRRestoreSession)
 
         foreach ($vmName in @($VmNames)) {
             $irSession = $irSessions | Where-Object { $_.VMName -eq $vmName } | Select-Object -First 1
