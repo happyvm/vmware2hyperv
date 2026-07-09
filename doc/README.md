@@ -14,8 +14,6 @@ Documentation détaillée de chaque script du toolkit de migration VMware vers H
 | Script | Rôle |
 |--------|------|
 | [step-precheck.ps1](step-precheck.md) | Pré-vérification vCenter : inventaire, uptime, ipconfig, tags |
-| [step0-uptime_extract.ps1](step0-uptime_extract.md) | Extraction uptime VMware → CSV |
-| [step0-uptime_extract_mail.ps1](step0-uptime_extract_mail.md) | Extraction uptime + envoi email HTML |
 
 ## Étape 1 — Préparation
 

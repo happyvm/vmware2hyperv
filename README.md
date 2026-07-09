@@ -29,7 +29,6 @@ flowchart TD
 
     subgraph STEP0["Step 0 — Pre-flight"]
         PRECHECK[step-precheck.ps1\nvCenter inventory, uptime, ipconfig]
-        UPTIME[step0-uptime_extract.ps1\nCSV export]
     end
 
     subgraph STEP1["Step 1 — Prepare"]
@@ -228,18 +227,6 @@ pwsh ./powershell-migration/run-migration.ps1 -Tag HypMig-lot-118 -ConfigFile ./
 ```
 
 ## Useful standalone commands
-
-### Export VMware uptime data to CSV
-
-```powershell
-pwsh ./powershell-migration/step0-uptime_extract.ps1
-```
-
-Optional parameters:
-
-```powershell
-pwsh ./powershell-migration/step0-uptime_extract.ps1 -Tag HypMig-lot-118 -OutputCsvPath D:\Scripts\uptime_vm.csv
-```
 
 ### Bulk Instant Recovery start (step3 phase 1 only)
 

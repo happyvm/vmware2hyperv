@@ -128,7 +128,6 @@ Paths = @{
     CsvFile        = "D:\Scripts\lotissement.csv"
     CmdbExtractCsv = "D:\Scripts\cmdb_extract.csv"  # Optionnel
     ExtractIpCsv   = "D:\Scripts\extract-ip.csv"
-    OutputCsv      = "D:\Scripts\uptime_vm.csv"
     LogDir         = "D:\Scripts\Logs"
 }
 ```

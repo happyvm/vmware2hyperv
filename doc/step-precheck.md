@@ -88,5 +88,4 @@ Le script détecte l'année Windows via :
 
 ## Voir aussi
 
-- [step0-uptime_extract.ps1](step0-uptime_extract.md) — Extraction uptime simple
 - [config.psd1](config.md) — Configuration

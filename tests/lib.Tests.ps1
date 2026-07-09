@@ -78,51 +78,6 @@ Describe 'Get-OsGeneration' {
     }
 }
 
-Describe 'Get-VMUptime' {
-    It 'returns one entry per mocked VM with correct uptime format' {
-        $fakeBootTime = (Get-Date).AddDays(-3).AddHours(-2).AddMinutes(-15)
-
-        $fakeGuest = [PSCustomObject]@{
-            ToolsStatus  = 'toolsOk'
-            BootTime     = $fakeBootTime
-            GuestFullName = 'Windows Server 2019'
-        }
-
-        # Shape of a Get-View VirtualMachine result (Guest/Runtime at the root).
-        $fakeVm = [PSCustomObject]@{
-            Name    = 'TESTVM01'
-            Guest   = $fakeGuest
-            Runtime = [PSCustomObject]@{ BootTime = $fakeBootTime }
-        }
-
-        Mock -CommandName 'Invoke-VMwareGetPoweredOnVMView' -MockWith { @($fakeVm) }
-
-        $result = Get-VMUptime
-        $result | Should -HaveCount 1
-        $result[0].VMName  | Should -Be 'TESTVM01'
-        $result[0].Uptime  | Should -Match '^\d+ days, \d+ hours, \d+ minutes$'
-    }
-
-    It 'reports Unavailable when boot time cannot be determined' {
-        $fakeGuest = [PSCustomObject]@{
-            ToolsStatus   = 'toolsNotInstalled'
-            BootTime      = $null
-            GuestFullName = 'Linux'
-        }
-
-        $fakeVm = [PSCustomObject]@{
-            Name    = 'LINUXVM01'
-            Guest   = $fakeGuest
-            Runtime = [PSCustomObject]@{ BootTime = $null }
-        }
-
-        Mock -CommandName 'Invoke-VMwareGetPoweredOnVMView' -MockWith { @($fakeVm) }
-
-        $result = Get-VMUptime
-        $result[0].Uptime | Should -Be 'Unavailable'
-    }
-}
-
 Describe 'Resolve-MigrationTarget' {
     BeforeAll {
         $testConfig = @{
