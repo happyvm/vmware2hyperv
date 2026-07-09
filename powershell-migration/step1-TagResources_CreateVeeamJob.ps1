@@ -47,7 +47,7 @@ param (
 )
 
 . "$PSScriptRoot\lib.ps1"
-$Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
+$Config = Import-MigrationConfig -ConfigFile "$PSScriptRoot\config.psd1"
 
 if (-not $VCenterServer) { $VCenterServer = $Config.VCenter.Server }
 if (-not $CsvFile)       { $CsvFile       = $Config.Paths.CsvFile }

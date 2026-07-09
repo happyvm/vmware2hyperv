@@ -5,8 +5,23 @@ Fichier de configuration PowerShell Data File (`.psd1`) contenant tous les param
 ## Synopsis
 
 ```powershell
+# Chargement direct (valeurs du template uniquement) :
 $Config = Import-PowerShellDataFile ".\config.psd1"
+
+# Chargement avec les overrides locaux (utilisé par tous les scripts de la pipeline) :
+. .\lib.ps1
+$Config = Import-MigrationConfig -ConfigFile ".\config.psd1"
 ```
+
+## config.psd1 vs config.local.psd1
+
+`config.psd1` est le **template versionné** : il contient toutes les clés connues avec des valeurs d'exemple (`vcenter.domain.local`, `D:\Scripts\...`). Il est mis à jour par les développeurs quand un script a besoin d'une nouvelle valeur de configuration.
+
+`config.local.psd1` (à côté de `config.psd1`, absent par défaut, jamais versionné — voir `.gitignore`) contient les **valeurs réelles de l'environnement**. `Import-MigrationConfig` (`lib.ps1`) charge `config.psd1` puis fusionne `config.local.psd1` par-dessus (clé par clé, récursivement) s'il existe.
+
+Cette séparation évite qu'un `git pull` n'écrase les valeurs personnalisées, et permet de détecter automatiquement quand un script mis à jour introduit une nouvelle clé attendue : elle apparaît dans `config.psd1` (template) mais reste absente de `config.local.psd1` tant qu'elle n'a pas été renseignée.
+
+Pour générer/compléter `config.local.psd1` de façon interactive plutôt qu'à la main, voir [configure-migration.ps1](configure-migration.md) — déclenché aussi automatiquement par `run-migration.ps1` sans argument.
 
 ## Sections
 

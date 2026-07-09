@@ -20,6 +20,8 @@ The migration is split into 3 steps:
 The orchestrator can start from any step (`step1`, `step2`, `step3`) to resume after interruption.
 If `step3` already restored the VM but failed during SCVMM network/OS/post-configuration, you can replay only that tail of `step3` with `-ForceNetworkConfigOnly`.
 
+Run `run-migration.ps1` with no arguments at all for an interactive walkthrough: it completes `config.local.psd1` if needed (see [Configuration](#configuration)) then prompts for `-Tag` and the other run options.
+
 ### Workflow diagram
 
 ```mermaid
@@ -119,11 +121,19 @@ The script is idempotent: if PowerShell is already installed, it exits without c
 
 ## Configuration
 
-Default configuration is stored in:
+Default configuration is stored in the versioned template:
 
 - `powershell-migration/config.psd1`
 
-Update at least:
+Environment-specific values (vCenter/SCVMM servers, SMTP, paths, recipients...) belong in `powershell-migration/config.local.psd1` instead — a gitignored file merged on top of `config.psd1` at runtime by every script (`Import-MigrationConfig` in `lib.ps1`). The easiest way to fill it in is the interactive wizard:
+
+```powershell
+pwsh ./powershell-migration/configure-migration.ps1
+```
+
+It only asks about values still missing from `config.local.psd1`, so re-running it after a `git pull` that introduced new config keys only prompts for what's new. Use `-Full` to revisit every answer. `run-migration.ps1` launched with no arguments runs this same check automatically before asking for `-Tag`.
+
+At minimum you'll be asked for:
 
 - Infrastructure endpoints (`VCenter`, `SCVMM`, `HyperV`, `Veeam`)
   - In `Veeam`, `BackupProxy` is optional and lets you force the proxy used when creating backup jobs in step1
@@ -133,6 +143,8 @@ Update at least:
   - `CsvFile`: input CSV with `VMName` and `Tag` columns, plus optional `OperatingSystem`
   - `CmdbExtractCsv`: optional CMDB extract CSV path used to enrich VMs with `OperatingSystem` values by matching `VMName`/`Name`
   - `LogDir`: logs output directory
+
+More complex structures (`SCVMM.OperatingSystemMap`, `Precheck.WindowsCredentials`, `MigrationMappings.ClusterMappings`...) aren't covered by the wizard and stay hand-edited in `config.psd1`.
 
 
 ### Configure multi-cluster target mapping

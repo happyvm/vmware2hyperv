@@ -8,8 +8,15 @@
     Recovery and post-migration configuration. Supports resumption from any step,
     single-VM incident recovery, and automation-friendly non-interactive mode.
 
+    Invoked with no arguments at all, it switches to an interactive mode: it first
+    checks config.local.psd1 for missing values (running configure-migration.ps1's
+    wizard if needed), then prompts for -Tag, -StartFrom, and -RecipientGroup
+    before starting. Pass any parameter explicitly (or -NonInteractive) to skip
+    straight to automation-friendly behavior.
+
 .PARAMETER Tag
-    Batch tag to migrate (e.g. HypMig-lot-118). Mandatory.
+    Batch tag to migrate (e.g. HypMig-lot-118). Mandatory, but can be supplied
+    interactively when the script is run with no arguments.
 
 .PARAMETER StartFrom
     Step to start from: step1, step2, or step3. Default: step1.
@@ -38,6 +45,10 @@
     Skip the manual validation pause between step2 and step3.
 
 .EXAMPLE
+    .\run-migration.ps1
+    # Interactive mode: completes config.local.psd1 if needed, then prompts for -Tag etc.
+
+.EXAMPLE
     .\run-migration.ps1 -Tag HypMig-lot-118
 
 .EXAMPLE
@@ -51,13 +62,15 @@
 # run-migration.ps1 — VMware → Hyper-V migration orchestrator
 #
 # Usage:
+#   .\run-migration.ps1                      # interactive: config wizard + prompts
 #   .\run-migration.ps1 -Tag HypMig-lot-118
 #   .\run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step3
 #   .\run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step2 -RecipientGroup internal
 
 param (
-    # Name of the batch to migrate (e.g. HypMig-lot-118) — required
-    [Parameter(Mandatory = $true)]
+    # Name of the batch to migrate (e.g. HypMig-lot-118). Not [Parameter(Mandatory)]
+    # so that invoking the script with zero arguments falls through to interactive
+    # mode below instead of PowerShell's raw "Supply values for..." prompt.
     [string]$Tag,
 
     # Step to start from (useful when resuming)
@@ -100,7 +113,42 @@ Get-ChildItem -Path $PSScriptRoot -File -Recurse -ErrorAction SilentlyContinue |
 if (-not $ConfigFile) { $ConfigFile = "$PSScriptRoot\config.psd1" }
 Assert-PathPresent -Path $ConfigFile -Label "Configuration file"
 
-$Config  = Import-PowerShellDataFile $ConfigFile
+if ($PSBoundParameters.Count -eq 0 -and -not $NonInteractive) {
+    Write-Host ""
+    Write-Host "=== VMware -> Hyper-V migration — mode interactif ===" -ForegroundColor Cyan
+
+    $missingKeys = Get-MigrationConfigMissingKeys -ConfigFile $ConfigFile
+    if ($missingKeys.Count -gt 0) {
+        Write-Host "Configuration locale incomplète : $($missingKeys.Count) valeur(s) à renseigner dans config.local.psd1." -ForegroundColor Yellow
+        Invoke-MigrationConfigWizard -ConfigFile $ConfigFile
+    }
+
+    Write-Host ""
+    while ([string]::IsNullOrWhiteSpace($Tag)) {
+        $Tag = Read-Host "Tag du lot à migrer (ex: HypMig-lot-118)"
+    }
+
+    $startFromAnswer = Read-Host "Étape de départ [step1/step2/step3] (Entrée = $StartFrom)"
+    if ($startFromAnswer) {
+        if ($startFromAnswer -notin @("step1", "step2", "step3")) {
+            throw "Étape de départ invalide : '$startFromAnswer'. Valeurs possibles : step1, step2, step3."
+        }
+        $StartFrom = $startFromAnswer
+    }
+
+    $recipientGroupAnswer = Read-Host "Groupe destinataires pour l'email pré-migration (Entrée = $RecipientGroup)"
+    if ($recipientGroupAnswer) { $RecipientGroup = $recipientGroupAnswer }
+    Write-Host ""
+} elseif ([string]::IsNullOrWhiteSpace($Tag)) {
+    if ($NonInteractive) {
+        throw "-Tag is mandatory (pass it explicitly when -NonInteractive is set)."
+    }
+    while ([string]::IsNullOrWhiteSpace($Tag)) {
+        $Tag = Read-Host "Tag du lot à migrer (ex: HypMig-lot-118)"
+    }
+}
+
+$Config  = Import-MigrationConfig -ConfigFile $ConfigFile
 $LogFile = "$($Config.Paths.LogDir)\run-migration-$Tag-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 
 Write-MigrationLog "======================================================" -LogFile $LogFile

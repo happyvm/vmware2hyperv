@@ -8,6 +8,7 @@ Documentation détaillée de chaque script du toolkit de migration VMware vers H
 |--------|------|-------|
 | [run-migration.ps1](run-migration.md) | Orchestrateur principal | Toutes |
 | [worker-step3.ps1](worker-step3.md) | Worker file-system queue | Step 3 |
+| [configure-migration.ps1](configure-migration.md) | Assistant interactif : complète config.local.psd1 | Hors pipeline |
 
 ## Étape 0 — Pré-flight
 
@@ -46,7 +47,7 @@ Documentation détaillée de chaque script du toolkit de migration VMware vers H
 
 | Script | Rôle |
 |--------|------|
-| [lib.ps1](lib.md) | 22 fonctions partagées (logging, connexions, VLAN, OS, mail) |
+| [lib.ps1](lib.md) | Fonctions partagées (logging, connexions, VLAN, OS, mail, config) |
 
 ## Outils de diagnostic
 
@@ -59,7 +60,8 @@ Documentation détaillée de chaque script du toolkit de migration VMware vers H
 
 | Fichier | Rôle |
 |---------|------|
-| [config.psd1](config.md) | Configuration centralisée (endpoints, tags, SMTP, mappings) |
+| [config.psd1](config.md) | Template versionné : endpoints, tags, SMTP, mappings |
+| `config.local.psd1` | Overrides spécifiques à l'environnement, non versionné — voir [config.psd1](config.md#configpsd1-vs-configlocalpsd1) et [configure-migration.ps1](configure-migration.md) |
 
 ## Architecture
 

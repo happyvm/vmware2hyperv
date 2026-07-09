@@ -31,6 +31,11 @@
         #   - Cross-function parameter forwarding (RecipientGroup)
         #   - Export-Csv parameter usage via string interpolation
         # Verified 2026-07-09: 0 truly unused parameters remain.
-        'PSReviewUnusedParameter'
+        'PSReviewUnusedParameter',
+
+        # Invoke-MigrationConfigWizard (lib.ps1) and run-migration.ps1's interactive
+        # mode use Write-Host deliberately for colored, non-pipeline console prompts
+        # in a human-driven CLI wizard — there's no output to capture or redirect.
+        'PSAvoidUsingWriteHost'
     )
 }

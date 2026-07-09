@@ -54,7 +54,7 @@ param (
 if (-not $ConfigFile) { $ConfigFile = "$PSScriptRoot\config.psd1" }
 Assert-PathPresent -Path $ConfigFile -Label "Configuration file"
 
-$Config = Import-PowerShellDataFile $ConfigFile
+$Config = Import-MigrationConfig -ConfigFile $ConfigFile
 if (-not $CsvFile) { $CsvFile = $Config.Paths.CsvFile }
 Assert-PathPresent -Path $CsvFile -Label "Batch CSV"
 

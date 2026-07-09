@@ -65,7 +65,7 @@ param (
 Get-ChildItem "$PSScriptRoot\step3\Step3.*.ps1" |
     Where-Object Name -ne 'Step3.ScvmmSession.Functions.ps1' |
     ForEach-Object { . $_.FullName }
-$Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
+$Config = Import-MigrationConfig -ConfigFile "$PSScriptRoot\config.psd1"
 
 if (-not $LogFile) { $LogFile = "$($Config.Paths.LogDir)\step3-ir-start-$(Get-Date -Format 'yyyyMMdd-HHmmss').log" }
 
