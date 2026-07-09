@@ -128,6 +128,19 @@ function Set-VmNetworkConfiguration {
         throw $message
     }
 
+    # Guard: AllowedVmNetworkNames/AllowedVmSubnetNames/InventoryCacheTtlMinutes are optional
+    # keys (unlike PortClassificationName/LogicalSwitchName above). A config.psd1 deployed
+    # before these keys existed won't have them, and under StrictMode a direct
+    # $Config.SCVMM.Network.X access throws PropertyNotFoundException instead of $null.
+    $networkConfig = $Config.SCVMM.Network
+    $allowedVmNetworkNames = if ($networkConfig.ContainsKey('AllowedVmNetworkNames')) { $networkConfig.AllowedVmNetworkNames } else { @() }
+    $allowedVmSubnetNames = if ($networkConfig.ContainsKey('AllowedVmSubnetNames')) { $networkConfig.AllowedVmSubnetNames } else { @() }
+    $inventoryCacheTtlMinutes = if ($networkConfig.ContainsKey('InventoryCacheTtlMinutes') -and $networkConfig.InventoryCacheTtlMinutes -is [int]) {
+        $networkConfig.InventoryCacheTtlMinutes
+    } else {
+        10
+    }
+
     $networkConfigRetryDelaySeconds = 30
     $networkConfigRetryCount = 2
 
@@ -489,9 +502,9 @@ function Set-VmNetworkConfiguration {
         $Config.SCVMM.Network.PortClassificationName,
         $SourceRemark,
         $AdapterVlanMappings,
-        @($Config.SCVMM.Network.AllowedVmNetworkNames),
-        @($Config.SCVMM.Network.AllowedVmSubnetNames),
-        $(if ($Config.SCVMM.Network.InventoryCacheTtlMinutes -is [int]) { $Config.SCVMM.Network.InventoryCacheTtlMinutes } else { 10 }),
+        @($allowedVmNetworkNames),
+        @($allowedVmSubnetNames),
+        $inventoryCacheTtlMinutes,
         ($networkConfigAttempt -gt 1)
             )
             break
