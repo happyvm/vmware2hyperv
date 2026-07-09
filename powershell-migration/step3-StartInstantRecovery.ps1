@@ -235,6 +235,7 @@ while ($true) {
                 $progress = [string]$restoreSession.Progress
             }
 
+            $logReadError = $null
             if (-not $waitingDetected -and $restoreSession) {
                 try {
                     $sessionLog = $restoreSession.Logger.GetLog()
@@ -251,7 +252,13 @@ while ($true) {
                         $detectionSource = 'restore-session-log'
                     }
                 } catch {
-                    Write-Verbose "Unable to read restore session log for '$vmName': $($_.Exception.Message)"
+                    # This is the only remaining detection path when the IR session exposes
+                    # no usable 'State' (common on this Veeam module — see guard above), so a
+                    # silently swallowed failure here means the VM sits in "Mounting" until
+                    # the timeout even though Veeam already reached WaitingForUserAction.
+                    # Surface it instead of Write-Verbose (invisible by default, and easy to
+                    # lose across the Invoke-VeeamCommand remoting boundary).
+                    $logReadError = $_.Exception.Message
                 }
             }
 
@@ -263,6 +270,7 @@ while ($true) {
                 Progress        = $progress
                 WaitingDetected = $waitingDetected
                 DetectionSource = $detectionSource
+                LogReadError    = $logReadError
             }
         }
     } -ArgumentList @([string[]]$pendingNames, $step3VeeamRecoveryPath))
@@ -287,6 +295,8 @@ while ($true) {
         } elseif ([string]$snapshot.SessionResult -eq 'Failed') {
             $tracked.Status = 'Failed'
             Write-MigrationLog "[$($snapshot.VMName)] Restore session ended with result 'Failed' during Instant Recovery mount." -Level ERROR -LogFile $LogFile
+        } elseif ($snapshot.PSObject.Properties['LogReadError'] -and $snapshot.LogReadError) {
+            Write-MigrationLog "[$($snapshot.VMName)] Unable to read restore session log while checking for 'Waiting for user action': $($snapshot.LogReadError) (elapsed: ${elapsed}s)." -Level WARNING -LogFile $LogFile
         }
     }
 
