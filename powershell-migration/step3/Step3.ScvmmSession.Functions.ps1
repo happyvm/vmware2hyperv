@@ -1,122 +1,5 @@
 <#
 .SYNOPSIS
-<<<<<<< HEAD
-    SCVMM session functions — pushed into the WinPS compat session by Initialize-ScvmmSessionFunction.
-
-.DESCRIPTION
-    Function-only file (no inline execution). Loaded once into the WinPS compat session
-    at worker startup; functions persist for the worker lifetime, avoiding re-parse on
-    every Invoke-SCVMMCommand call.
-
-    Functions defined here run inside the WinPS compat session where SCVMM cmdlets
-    are available. They return simple data (strings, hashtables, arrays) — never live
-    SCVMM objects — because results cross the session boundary as deserialized copies.
-
-    Functions:
-    - Get-CachedScvmmServer          Cached SCVMM server connection (new)
-    - Get-ScvmmInventoryCache        VM network inventory cache (extracted from original scriptblock)
-    - Resolve-ScvmmVlanMapping       VLAN → VMNetwork/VMSubnet resolution
-    - Get-ScvmmNetworkAdapters       Adapter enumeration with retry
-    - ConvertTo-NormalizedMacAddress MAC format normalization
-    - Test-IsZeroMacAddress          Zero MAC detection
-    - Convert-ToScvmmStaticMacAddress Static MAC address conversion
-
-.NOTES
-    Part of the vmware2hyperv migration toolkit — step3 refactoring §3.
-    Design constraint: all function outputs MUST be simple data types.
-    Live SCVMM objects cannot cross the WinPS compat session boundary.
-#>
-
-Set-StrictMode -Version Latest
-
-# ---------------------------------------------------------------------------
-# Get-CachedScvmmServer — cached SCVMM server connection (lives in $script: scope)
-# ---------------------------------------------------------------------------
-<#
-.SYNOPSIS
-    Returns a cached SCVMM server connection, creating one if necessary.
-
-.DESCRIPTION
-    Maintains a connection cache in $script:CachedVmmServer keyed by server name.
-    On first call, connects to the SCVMM server via Get-SCVMMServer. Subsequent
-    calls reuse the cached connection. The cache lives in the WinPS compat session
-    $script: scope, so it persists across Invoke-SCVMMCommand calls within the
-    same worker lifetime.
-
-.PARAMETER ComputerName
-    SCVMM server name. Mandatory.
-
-.EXAMPLE
-    $server = Get-CachedScvmmServer -ComputerName "scvmm01.contoso.com"
-#>
-function Get-CachedScvmmServer {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$ComputerName
-    )
-
-    if (-not $script:CachedVmmServer) {
-        $script:CachedVmmServer = @{}
-    }
-
-    if (-not $script:CachedVmmServer.ContainsKey($ComputerName)) {
-        Write-Verbose "Get-CachedScvmmServer: connecting to '$ComputerName'"
-        $server = Get-SCVMMServer -ComputerName $ComputerName
-        if (-not $server) {
-            throw "Unable to connect to SCVMM server '$ComputerName'."
-        }
-        $script:CachedVmmServer[$ComputerName] = $server
-    } else {
-        Write-Verbose "Get-CachedScvmmServer: using cached connection to '$ComputerName'"
-    }
-
-    return $script:CachedVmmServer[$ComputerName]
-}
-
-# ---------------------------------------------------------------------------
-# Get-ScvmmInventoryCache — VM network inventory cache with logical switch filtering
-# ---------------------------------------------------------------------------
-<#
-.SYNOPSIS
-    Builds or returns a cached inventory of SCVMM VM networks, subnets, and port
-    classifications, optionally filtered by logical switch and allow-lists.
-
-.DESCRIPTION
-    On first call (or when cache TTL expires), fetches all VMNetworks, VMSubnets,
-    and port classifications from the SCVMM server. Builds multiple lookup indices
-    (by VLAN, by name, by real VLAN ID from SubnetVLans). Optionally filters to
-    only networks/subnets belonging to a specific logical switch's logical networks.
-
-    The cache is stored in $script:ScvmmInventoryCacheByServer keyed by server name.
-
-.PARAMETER Server
-    SCVMM server object. Mandatory.
-
-.PARAMETER CacheTtlMinutes
-    Cache validity duration in minutes. Default: 10.
-
-.PARAMETER ForceRefresh
-    Bypass the cache and force a fresh inventory fetch.
-
-.PARAMETER WarningSink
-    A List[string] to collect non-fatal warnings during inventory discovery.
-
-.PARAMETER AllowedVmNetworkNames
-    Optional allow-list of VMNetwork names to include.
-
-.PARAMETER AllowedVmSubnetNames
-    Optional allow-list of VMSubnet names to include.
-
-.PARAMETER LogicalSwitch
-    Optional logical switch name; when provided, only VMNetworks and VMSubnets
-    belonging to this switch's logical networks are included.
-
-.EXAMPLE
-    $cache = Get-ScvmmInventoryCache -Server $vmmServer -LogicalSwitch "MyLogicalSwitch"
-#>
-function Get-ScvmmInventoryCache {
-=======
     SCVMM session-side functions — pushed into the WinPS compatibility session.
 
 .DESCRIPTION
@@ -373,79 +256,11 @@ function Get-ScvmmInventoryCache {
     .EXAMPLE
         $cache = Get-ScvmmInventoryCache -Server $server -CacheTtlMinutes 10
     #>
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
     param(
         [Parameter(Mandatory = $true)]
         $Server,
 
         [int]$CacheTtlMinutes = 10,
-<<<<<<< HEAD
-        [switch]$ForceRefresh,
-        $WarningSink,
-        [object[]]$AllowedVmNetworkNames,
-        [object[]]$AllowedVmSubnetNames,
-        [string]$LogicalSwitch
-    )
-
-    # SCVMM VMNetwork objects do not reference logical switches directly: a VMNetwork
-    # belongs to a LogicalNetwork, and the logical switch exposes its logical networks
-    # through the uplink port profiles attached to it. Resolve that chain instead of
-    # guessing from object properties.
-    function Get-ScvmmLogicalSwitchLogicalNetworkIds {
-        param(
-            [Parameter(Mandatory = $true)]
-            $Server,
-
-            [Parameter(Mandatory = $true)]
-            [string]$LogicalSwitchName,
-
-            $WarningSink
-        )
-
-        $logicalNetworkIds = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-
-        $scLogicalSwitch = $null
-        try {
-            $scLogicalSwitch = Get-SCLogicalSwitch -Name $LogicalSwitchName -VMMServer $Server -ErrorAction Stop | Select-Object -First 1
-        } catch {
-            if ($WarningSink) { [void]$WarningSink.Add("Logical switch lookup failed for '$LogicalSwitchName': $($_.Exception.Message)") }
-        }
-
-        if (-not $scLogicalSwitch) {
-            if ($WarningSink) { [void]$WarningSink.Add("Logical switch '$LogicalSwitchName' not found in SCVMM; VM network discovery will use the unfiltered inventory.") }
-            return $logicalNetworkIds
-        }
-
-        try {
-            foreach ($uplinkSet in @(Get-SCUplinkPortProfileSet -LogicalSwitch $scLogicalSwitch -VMMServer $Server -ErrorAction Stop)) {
-                $uplinkProfiles = @()
-                foreach ($profilePropertyName in @('NativeUplinkPortProfile', 'UplinkPortProfile')) {
-                    if ($uplinkSet.PSObject.Properties[$profilePropertyName] -and $uplinkSet.$profilePropertyName) {
-                        $uplinkProfiles += $uplinkSet.$profilePropertyName
-                    }
-                }
-
-                foreach ($uplinkProfile in $uplinkProfiles) {
-                    if (-not $uplinkProfile.PSObject.Properties['LogicalNetworkDefinitions']) { continue }
-                    foreach ($logicalNetworkDefinition in @($uplinkProfile.LogicalNetworkDefinitions)) {
-                        if ($logicalNetworkDefinition.LogicalNetwork -and $logicalNetworkDefinition.LogicalNetwork.ID) {
-                            [void]$logicalNetworkIds.Add([string]$logicalNetworkDefinition.LogicalNetwork.ID)
-                        }
-                    }
-                }
-            }
-        } catch {
-            if ($WarningSink) { [void]$WarningSink.Add("Unable to enumerate uplink port profiles of logical switch '$LogicalSwitchName': $($_.Exception.Message)") }
-        }
-
-        if ($logicalNetworkIds.Count -eq 0 -and $WarningSink) {
-            [void]$WarningSink.Add("No logical network resolved behind logical switch '$LogicalSwitchName'; VM network discovery will use the unfiltered inventory.")
-        }
-
-        return $logicalNetworkIds
-    }
-
-=======
 
         [switch]$ForceRefresh,
 
@@ -458,7 +273,6 @@ function Get-ScvmmInventoryCache {
         [string]$LogicalSwitch
     )
 
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
     if (-not $script:ScvmmInventoryCacheByServer) {
         $script:ScvmmInventoryCacheByServer = @{}
     }
@@ -684,31 +498,6 @@ function Get-ScvmmInventoryCache {
     return $existingCache
 }
 
-<<<<<<< HEAD
-# ---------------------------------------------------------------------------
-# Resolve-ScvmmVlanMapping — resolve a VLAN key to a VMNetwork/VMSubnet pair
-# ---------------------------------------------------------------------------
-<#
-.SYNOPSIS
-    Resolves a VLAN identifier to the corresponding SCVMM VMNetwork and VMSubnet.
-
-.DESCRIPTION
-    Two-phase resolution: first checks real SCVMM VLAN IDs (SubnetVLans), then
-    falls back to parsing VLAN digits from network/subnet names and descriptions.
-    Returns an object with VMNetwork, VMSubnet, Vlan, Ambiguous flag, and
-    ResolutionMode metadata.
-
-.PARAMETER InventoryCache
-    An inventory cache object produced by Get-ScvmmInventoryCache. Mandatory.
-
-.PARAMETER VlanKey
-    VLAN identifier string to resolve. Mandatory.
-
-.EXAMPLE
-    $mapping = Resolve-ScvmmVlanMapping -InventoryCache $cache -VlanKey "100"
-#>
-function Resolve-ScvmmVlanMapping {
-=======
 # ══════════════════════════════════════════════════════════════════════════════
 # Resolve-ScvmmVlanMapping
 # ══════════════════════════════════════════════════════════════════════════════
@@ -734,7 +523,6 @@ function Resolve-ScvmmVlanMapping {
     .EXAMPLE
         $mapping = Resolve-ScvmmVlanMapping -InventoryCache $cache -VlanKey '42'
     #>
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
     param(
         [Parameter(Mandatory = $true)]
         $InventoryCache,
@@ -797,25 +585,6 @@ function Resolve-ScvmmVlanMapping {
     }
 }
 
-<<<<<<< HEAD
-# ---------------------------------------------------------------------------
-# ConvertTo-NormalizedMacAddress — strip delimiters, uppercase, 12-char hex string
-# ---------------------------------------------------------------------------
-<#
-.SYNOPSIS
-    Normalizes a MAC address string by removing all non-hex characters and
-    converting to uppercase.
-
-.PARAMETER Value
-    Raw MAC address string. Null/whitespace returns $null.
-
-.EXAMPLE
-    ConvertTo-NormalizedMacAddress -Value "00:11:22:aa:bb:cc"
-    # Returns "001122AABBCC"
-#>
-function ConvertTo-NormalizedMacAddress {
-    param([AllowNull()][string]$Value)
-=======
 # ══════════════════════════════════════════════════════════════════════════════
 # MAC address helpers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -830,7 +599,6 @@ function ConvertTo-NormalizedMacAddress {
         [AllowNull()]
         [string]$Value
     )
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 
     if ([string]::IsNullOrWhiteSpace($Value)) {
         return $null
@@ -839,24 +607,6 @@ function ConvertTo-NormalizedMacAddress {
     return ($Value -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
 }
 
-<<<<<<< HEAD
-# ---------------------------------------------------------------------------
-# Test-IsZeroMacAddress — detect 00:00:00:00:00:00
-# ---------------------------------------------------------------------------
-<#
-.SYNOPSIS
-    Returns $true if the MAC address is all zeros.
-
-.PARAMETER Value
-    MAC address string. Null/whitespace returns $false.
-
-.EXAMPLE
-    Test-IsZeroMacAddress -Value "00:00:00:00:00:00"
-    # Returns $true
-#>
-function Test-IsZeroMacAddress {
-    param([AllowNull()][string]$Value)
-=======
 function Test-IsZeroMacAddress {
     <#
     .SYNOPSIS
@@ -866,30 +616,11 @@ function Test-IsZeroMacAddress {
         [AllowNull()]
         [string]$Value
     )
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 
     $normalized = ConvertTo-NormalizedMacAddress -Value $Value
     return ($normalized -and $normalized -eq '000000000000')
 }
 
-<<<<<<< HEAD
-# ---------------------------------------------------------------------------
-# Convert-ToScvmmStaticMacAddress — format as XX-XX-XX-XX-XX-XX
-# ---------------------------------------------------------------------------
-<#
-.SYNOPSIS
-    Converts a MAC address to SCVMM static MAC format (dash-separated pairs).
-
-.PARAMETER Value
-    Raw MAC address string. Must be 12 hex chars after normalization.
-
-.EXAMPLE
-    Convert-ToScvmmStaticMacAddress -Value "00:11:22:aa:bb:cc"
-    # Returns "00-11-22-AA-BB-CC"
-#>
-function Convert-ToScvmmStaticMacAddress {
-    param([AllowNull()][string]$Value)
-=======
 function Convert-ToScvmmStaticMacAddress {
     <#
     .SYNOPSIS
@@ -900,7 +631,6 @@ function Convert-ToScvmmStaticMacAddress {
         [AllowNull()]
         [string]$Value
     )
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 
     $normalized = ConvertTo-NormalizedMacAddress -Value $Value
     if (-not $normalized -or $normalized.Length -ne 12) {
@@ -910,38 +640,6 @@ function Convert-ToScvmmStaticMacAddress {
     return (($normalized -split '(.{2})' | Where-Object { $_ }) -join '-')
 }
 
-<<<<<<< HEAD
-# ---------------------------------------------------------------------------
-# Get-ScvmmNetworkAdapters — enumerate virtual network adapters with fallback
-# ---------------------------------------------------------------------------
-<#
-.SYNOPSIS
-    Retrieves SCVMM virtual network adapters for a VM, with an optional global
-    fallback when direct enumeration returns nothing.
-
-.DESCRIPTION
-    First attempts Get-SCVirtualNetworkAdapter -VM (requires a live, non-deserialized
-    VM object). If that returns nothing and AllowGlobalFallback is set, enumerates
-    all adapters on the server and filters by VM ID/Name.
-
-.PARAMETER CurrentVm
-    The SCVMM virtual machine object.
-
-.PARAMETER CurrentServer
-    The SCVMM server object.
-
-.PARAMETER CurrentVmName
-    The VM name for fallback matching.
-
-.PARAMETER AllowGlobalFallback
-    When set, falls back to enumerating all adapters on the server and filtering
-    by VM identity.
-
-.EXAMPLE
-    $adapters = Get-ScvmmNetworkAdapters -CurrentVm $vm -CurrentServer $server -CurrentVmName "SRV-WEB01"
-#>
-function Get-ScvmmNetworkAdapters {
-=======
 # ══════════════════════════════════════════════════════════════════════════════
 # Get-ScvmmNetworkAdapters
 # ══════════════════════════════════════════════════════════════════════════════
@@ -955,7 +653,6 @@ function Get-ScvmmNetworkAdapters {
         Debug fallback (AllowGlobalFallback): enumerates ALL adapters on the server and
         filters by VM ID/name — useful when the VM object is deserialized or incomplete.
     #>
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
     param(
         $CurrentVm,
         $CurrentServer,
@@ -991,8 +688,6 @@ function Get-ScvmmNetworkAdapters {
 
     return $matchingAdapters
 }
-<<<<<<< HEAD
-=======
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Cache scope documentation
@@ -1007,4 +702,3 @@ function Get-ScvmmNetworkAdapters {
     the inventory cache is reused across VM migration tasks until the TTL expires
     or ForceRefresh is requested.
 #>
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba

@@ -1,25 +1,3 @@
-<<<<<<< HEAD
-<#
-.SYNOPSIS
-    Veeam Recovery helper functions for step3 migration.
-
-.DESCRIPTION
-    Contains all Veeam-related functions for the Instant Recovery phase:
-    - Find-VmRestoreSession (string-injected into WinPS compat session)
-    - New-VeeamScriptBlock (string-based composition)
-    - Start-VeeamInstantRecovery (start IR mount)
-    - Wait-VeeamInstantRecoveryMount (poll until WaitingForUserAction)
-    - Complete-VeeamInstantRecovery (commit/finalize IR session)
-    - Wait-VeeamRestoreSession (poll restore session to terminal state)
-    - Invoke-VeeamRecoveryPhase (full orchestration lifecycle)
-
-.NOTES
-    Part of the vmware2hyperv migration toolkit — step3 refactoring.
-    Requires lib.ps1 to be dot-sourced first (for Invoke-VeeamCommand,
-    Write-MigrationLog, Invoke-SCVMMCommand).
-#>
-
-=======
 # Step3.VeeamRecovery.ps1
 # Veeam recovery helper functions for step 3 migration.
 # Dot-source this file inside an Invoke-VeeamCommand scriptblock or before
@@ -31,79 +9,16 @@
 #   Wait-InstantRecoveryUserAction Poll until mount reaches WaitingForUserAction (Context-based)
 #   Complete-InstantRecovery      Commit IR session + wait for restore completion (Context-based)
 
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 Set-StrictMode -Version Latest
 
-# ---------------------------------------------------------------------------
-# Find-VmRestoreSession function definition (string — injected into scriptblocks)
-# ---------------------------------------------------------------------------
-# This function MUST run inside the WinPS compat session (via Invoke-VeeamCommand)
-# because it returns live Veeam objects whose .Logger property would break if
-# deserialized across session boundaries.
-$script:FindVmRestoreSessionFuncDef = @'
+# ============================================================================
+# Find-VmRestoreSession
+# Bounded-name restore session lookup to avoid prefix collisions
+# (e.g. WEB1 matching WEB10's session).
+# ============================================================================
 function Find-VmRestoreSession {
     <#
     .SYNOPSIS
-<<<<<<< HEAD
-        Finds the most recent Veeam restore session for a given VM.
-    .DESCRIPTION
-        Uses exact name match, a migration-hyp suffix variant, and a bounded
-        regex pattern to avoid false matches with VMs sharing a prefix
-        (e.g. WEB1 vs WEB10). Must run inside the WinPS compat session.
-    .PARAMETER Vm
-        Name of the VM whose restore session should be located.
-    .OUTPUTS
-        The live Veeam restore session object, or $null if none found.
-    #>
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Vm
-    )
-
-    # Exact names plus a bounded pattern ("VM (Instant Recovery)"…): a plain
-    # "$Vm*" wildcard would also match another batch VM whose name shares the
-    # prefix (e.g. WEB1 vs WEB10) and follow the wrong session.
-    $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($Vm)
-    Get-VBRRestoreSession |
-        Where-Object { $_.Name -eq $Vm -or $_.Name -eq "$Vm-migrationhyp" -or $_.Name -match $vmSessionPattern } |
-        Sort-Object -Property CreationTime -Descending |
-        Select-Object -First 1
-}
-'@
-
-# ---------------------------------------------------------------------------
-# New-VeeamScriptBlock — compose a scriptblock that includes Find-VmRestoreSession
-# ---------------------------------------------------------------------------
-<#
-.SYNOPSIS
-    Creates a scriptblock with Find-VmRestoreSession pre-loaded for use with Invoke-VeeamCommand.
-
-.DESCRIPTION
-    Takes raw script text and composes it with the Find-VmRestoreSession function
-    definition so the function is available inside the WinPS compat session.
-    Eliminates inline duplication of the restore session query across call sites.
-
-.PARAMETER ScriptText
-    Raw PowerShell script text (without Find-VmRestoreSession definition).
-    Can use Find-VmRestoreSession -Vm <name> directly.
-
-.EXAMPLE
-    $sb = New-VeeamScriptBlock @'
-    param($Vm)
-    $session = Find-VmRestoreSession -Vm $Vm
-    # ... use $session ...
-'@
-    Invoke-VeeamCommand -ScriptBlock $sb -ArgumentList @($VMName)
-#>
-function New-VeeamScriptBlock {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$ScriptText
-    )
-
-    return [scriptblock]::Create("$FindVmRestoreSessionFuncDef`n$ScriptText")
-=======
     Finds the most recent Veeam restore session for a given VM using bounded name matching.
 
     .DESCRIPTION
@@ -153,7 +68,6 @@ function New-VeeamScriptBlock {
         Select-Object -First 1
 
     return $restoreSession
->>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 }
 
 # ============================================================================
@@ -315,7 +229,7 @@ function Wait-InstantRecoveryUserAction {
 
     $elapsed = 0
     do {
-        $waitCheck = Invoke-VeeamCommand -ScriptBlock (New-VeeamScriptBlock @'
+        $waitCheck = Invoke-VeeamCommand -ScriptBlock {
             param($Vm)
 
             $instantRecoverySession = Get-VBRInstantRecovery |
@@ -333,7 +247,17 @@ function Wait-InstantRecoveryUserAction {
             }
 
             if (-not $waitingDetected) {
-                $restoreSession = Find-VmRestoreSession -Vm $Vm
+                # Same bounded matching used by Find-VmRestoreSession: never follow a
+                # session belonging to another VM whose name shares this VM's prefix.
+                $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($Vm)
+                $restoreSession = Get-VBRRestoreSession |
+                    Where-Object {
+                        $_.Name -eq $Vm -or
+                        $_.Name -eq "$Vm-migrationhyp" -or
+                        $_.Name -match $vmSessionPattern
+                    } |
+                    Sort-Object -Property CreationTime -Descending |
+                    Select-Object -First 1
 
                 if ($restoreSession) {
                     $restoreSessionState = [string]$restoreSession.State
@@ -359,7 +283,7 @@ function Wait-InstantRecoveryUserAction {
                 RestoreSessionState = $restoreSessionState
                 DetectionSource     = $detectionSource
             }
-'@) -ArgumentList @($VMName)
+        } -ArgumentList @($VMName)
 
         Write-MigrationLog "[$VMName] Current states: InstantRecovery='$($waitCheck.CurrentState)', RestoreSession='$($waitCheck.RestoreSessionState)' (elapsed: ${elapsed}s)." -LogFile $LogFile
 
@@ -474,10 +398,18 @@ function Complete-InstantRecovery {
 
     $elapsed = 0
     do {
-        $check = Invoke-VeeamCommand -ScriptBlock (New-VeeamScriptBlock @'
+        $check = Invoke-VeeamCommand -ScriptBlock {
             param($Vm)
 
-            $restoreSession = Find-VmRestoreSession -Vm $Vm
+            $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($Vm)
+            $restoreSession = Get-VBRRestoreSession |
+                Where-Object {
+                    $_.Name -eq $Vm -or
+                    $_.Name -eq "$Vm-migrationhyp" -or
+                    $_.Name -match $vmSessionPattern
+                } |
+                Sort-Object -Property CreationTime -Descending |
+                Select-Object -First 1
 
             if (-not $restoreSession) {
                 return [PSCustomObject]@{
@@ -494,7 +426,7 @@ function Complete-InstantRecovery {
                 State  = [string]$restoreSession.State
                 Result = [string]$restoreSession.Result
             }
-'@) -ArgumentList @($VMName)
+        } -ArgumentList @($VMName)
 
         if (-not $check.Found) {
             Write-MigrationLog "[$VMName] Restore session not yet visible (elapsed: ${elapsed}s)." -Level WARNING -LogFile $LogFile
