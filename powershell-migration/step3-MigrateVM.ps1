@@ -1,94 +1,46 @@
 ﻿<#
 .SYNOPSIS
-    Execute Instant Recovery, network configuration, and post-migration setup for a single VM.
-
+    Orchestrateur de phases step 3 — Instant Recovery, réseau, post-migration par VM.
 .DESCRIPTION
-    The core step3 migration script invoked per-VM (directly or via worker-step3.ps1).
-    Starts the Veeam Instant Recovery mount, finalizes it (commit), configures the
-    Hyper-V VM networking (VLAN, IP), applies OS-level post-migration changes, and
-    cleans up the Veeam mount session.
-
+    Refactoré de 1625 lignes monolithiques en orchestrateur ~150 lignes (BEA-276).
+    Chaque phase est déléguée à un module step3/ spécialisé.
+    Résultat structuré par phase → JSON lu par worker-step3.ps1.
+    Modes de rejeu : -ForceNetworkConfigOnly (Network-only), -SkipInstantRecoveryStart (Incident recovery),
+    -SkipNetworkAndPostConfig (IR-only), -Phases IRCommit,Network,HA (futur).
 .PARAMETER BackupJobName
-    Name of the Veeam backup job. Mandatory.
-
+    Nom du job Veeam. Obligatoire.
 .PARAMETER VMName
-    Target VM name. Mandatory.
-
+    Nom de la VM cible. Obligatoire.
 .PARAMETER VlanId
-    VLAN ID for the restored VM. Mandatory.
-
-.PARAMETER AdapterVlanMapJson
-    JSON object mapping adapter names to VLAN IDs for multi-NIC VMs.
-
-.PARAMETER OperatingSystem
-    Guest OS identifier (e.g. Windows, Linux) for OS-specific configuration.
-
-.PARAMETER Remark
-    Additional notes from the CSV for operational context.
-
-.PARAMETER SCVMMServer
-    SCVMM server name. Defaults to Config.SCVMM.Server.
-
-.PARAMETER HyperVHost
-    Primary Hyper-V host. Auto-resolved from migration target if not provided.
-
-.PARAMETER HyperVHost2
-    Secondary Hyper-V host for host affinity configuration.
-
-.PARAMETER HyperVCluster
-    Hyper-V cluster name. Auto-resolved from migration target if not provided.
-
-.PARAMETER ClusterStorage
-    Cluster shared volume path. Auto-resolved from migration target if not provided.
-
-.PARAMETER VmwareCluster
-    Source VMware cluster name for migration target resolution.
-
-.PARAMETER BackupTag
-    Veeam backup tag for restore point selection. Defaults to Config.Tags.BackupTag.
-
-.PARAMETER WaitingTimeoutSeconds
-    Maximum wait time for mount operations. Default: 1800.
-
-.PARAMETER WaitingPollIntervalSeconds
-    Poll interval for mount operations. Default: 15.
-
-.PARAMETER ForceNetworkConfigOnly
-    Skip Instant Recovery and run only network/OS post-configuration.
-
-.PARAMETER SkipInstantRecoveryStart
-    Skip starting the Instant Recovery mount.
-
-.PARAMETER SkipInstantRecoveryFinalization
-    Skip finalizing (committing) the Instant Recovery mount.
-
-.PARAMETER SkipNetworkAndPostConfig
-    Skip network configuration and OS post-migration steps.
-
-.PARAMETER LogFile
-    Path to the log file. Auto-generated if not provided.
-
+    VLAN ID pour la VM restaurée. Obligatoire.
+.PARAMETER Phases
+    (Futur) Liste explicite des phases. Prioritaire sur les switches Skip*.
+    Valeurs : IRStart, IRCommit, Network, IntegrationServices, OS, HA, LiveMigration, BackupTag.
 .EXAMPLE
-    .\step3-MigrateVM.ps1 -BackupJobName Backup-HypMig-lot-118 -VMName SRV-WEB01 -VlanId 100 -HyperVHost hv01 -ClusterStorage C:\ClusterStorage\Volume1
-
+    .\step3-MigrateVM.ps1 -BackupJobName Backup-HypMig-lot-118 -VMName SRV-WEB01 -VlanId 100 -HyperVHost hv01
+.EXAMPLE
+    # Rejeu Network-only
+    .\step3-MigrateVM.ps1 -BackupJobName ... -VMName SRV-WEB01 -VlanId 100 -ForceNetworkConfigOnly
+.EXAMPLE
+    # Rejeu Incident recovery (commit sur mount existant)
+    .\step3-MigrateVM.ps1 -BackupJobName ... -VMName SRV-WEB01 -VlanId 100 -SkipInstantRecoveryStart
 .NOTES
+<<<<<<< HEAD
     Part of the vmware2hyperv migration toolkit.
     Requires PowerShell 7+ with Veeam.Backup.PowerShell and VirtualMachineManager modules.
     Refactored in BEA-261/268: internal functions moved to step3/ modules;
     this script is now a pure orchestrator (~150 lines).
+=======
+    Part of vmware2hyperv — BEA-276 / BEA-261.7. PowerShell 7+.
+>>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 #>
 
 param (
-    [Parameter(Mandatory = $true)]
-    [string]$BackupJobName,
+    [Parameter(Mandatory = $true)] [string]$BackupJobName,
+    [Parameter(Mandatory = $true)] [string]$VMName,
+    [Parameter(Mandatory = $true)] [string]$VlanId,
 
-    [Parameter(Mandatory = $true)]
-    [string]$VMName,
-
-    [Parameter(Mandatory = $true)]
-    [string]$VlanId,
     [string]$AdapterVlanMapJson,
-
     [string]$OperatingSystem,
     [string]$Remark,
     [string]$SCVMMServer,
@@ -100,13 +52,25 @@ param (
     [string]$BackupTag,
     [int]$WaitingTimeoutSeconds = 1800,
     [int]$WaitingPollIntervalSeconds = 15,
+
+    # ── Modes de rejeu lisibles ──────────────────────────────────────────
+    # Standard                    : migration complète
+    # -ForceNetworkConfigOnly     : Network-only (skip IR, réseau/OS/post-config)
+    # -SkipInstantRecoveryStart   : Incident recovery (commit + réseau sur mount existant)
+    # -SkipNetworkAndPostConfig   : IR-only (pas de réseau/post-config)
     [switch]$ForceNetworkConfigOnly,
     [switch]$SkipInstantRecoveryStart,
     [switch]$SkipInstantRecoveryFinalization,
     [switch]$SkipNetworkAndPostConfig,
+
+    # ── Futur : sélection explicite de phases ────────────────────────────
+    [ValidateSet('IRStart', 'IRCommit', 'Network', 'IntegrationServices', 'OS', 'HA', 'LiveMigration', 'BackupTag')]
+    [string[]]$Phases,
+
     [string]$LogFile
 )
 
+<<<<<<< HEAD
 # ── Bootstrap ────────────────────────────────────────────────────────────────
 . "$PSScriptRoot\lib.ps1"
 Get-ChildItem "$PSScriptRoot\step3\Step3.*.ps1" |
@@ -117,16 +81,20 @@ Initialize-ScvmmSessionFunction -FunctionFiles @(
     "$PSScriptRoot\step3\Step3.ScvmmSession.Functions.ps1"
 )
 
+=======
+# ── Initialisation ─────────────────────────────────────────────────────────
+. "$PSScriptRoot\lib.ps1"
+>>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 $Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
 
 if (-not $SCVMMServer)   { $SCVMMServer   = $Config.SCVMM.Server }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step3-migrate-$VMName-$(Get-Date -Format 'yyyyMMdd').log" }
 
-$resolvedMigrationTarget = Resolve-MigrationTarget -Config $Config -VmwareClusterName $VmwareCluster -LogFile $LogFile
-if (-not $HyperVHost)    { $HyperVHost    = $resolvedMigrationTarget.HyperVHost }
-if (-not $HyperVHost2)   { $HyperVHost2   = $resolvedMigrationTarget.HyperVHost2 }
-if (-not $HyperVCluster) { $HyperVCluster = $resolvedMigrationTarget.HyperVCluster }
-if (-not $ClusterStorage){ $ClusterStorage = $resolvedMigrationTarget.ClusterStorage }
+$target = Resolve-MigrationTarget -Config $Config -VmwareClusterName $VmwareCluster -LogFile $LogFile
+if (-not $HyperVHost)    { $HyperVHost    = $target.HyperVHost }
+if (-not $HyperVHost2)   { $HyperVHost2   = $target.HyperVHost2 }
+if (-not $HyperVCluster) { $HyperVCluster = $target.HyperVCluster }
+if (-not $ClusterStorage){ $ClusterStorage = $target.ClusterStorage }
 if (-not $BackupTag)     { $BackupTag     = $Config.Tags.BackupTag }
 
 if ($ForceNetworkConfigOnly) {
@@ -134,13 +102,26 @@ if ($ForceNetworkConfigOnly) {
     $SkipInstantRecoveryFinalization = $true
 }
 
+# ── Chargement des modules step3/ ──────────────────────────────────────────
+$step3Dir = "$PSScriptRoot\step3"
+foreach ($mod in @('Step3.TaskResult','Step3.VeeamRecovery','Step3.NetworkMapping',
+                   'Step3.NetworkConfig','Step3.PostConfig','Step3.ScvmmConnection',
+                   'Step3.ScvmmSession.Functions')) {
+    $path = Join-Path $step3Dir "$mod.ps1"
+    if (Test-Path $path) { . $path }
+    else { Write-MigrationLog "[$VMName] Module $mod.ps1 absent — sera nécessaire." -Level WARNING -LogFile $LogFile }
+}
+if (Test-Path "$step3Dir\Step3.ScvmmSession.Functions.ps1") {
+    Initialize-ScvmmSessionFunction -FunctionFiles @("$step3Dir\Step3.ScvmmSession.Functions.ps1")
+}
+
+# ── Modules requis ─────────────────────────────────────────────────────────
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
 if (-not $SkipInstantRecoveryStart -or -not $SkipInstantRecoveryFinalization) {
     Import-RequiredModule -Name "Veeam.Backup.PowerShell" -LogFile $LogFile -UseWindowsPowerShellFallback
-} else {
-    Write-MigrationLog "[$VMName] Instant Recovery start/finalization disabled: skipping Veeam module import." -LogFile $LogFile
 }
 
+<<<<<<< HEAD
 # ── SCVMM connection ──────────────────────────────────────────────────────────
 $VMMServerName = Connect-Step3Scvmm -SCVMMServer $SCVMMServer -VMName $VMName -LogFile $LogFile
 
@@ -165,26 +146,86 @@ try {
 # ── Network mapping & post-configuration ──────────────────────────────────────
 if ($ForceNetworkConfigOnly) {
     Write-MigrationLog "[$VMName] ForceNetworkConfigOnly enabled: skipping Instant Recovery/finalization and replaying only network/OS/post-configuration actions." -Level WARNING -LogFile $LogFile
-}
-
-if ($SkipNetworkAndPostConfig) {
-    Write-MigrationLog "[$VMName] SkipNetworkAndPostConfig enabled: Instant Recovery phase completed; network/post-configuration skipped." -Level WARNING -LogFile $LogFile
-    Write-MigrationLog "[$VMName] Migration completed (Instant Recovery only mode)." -Level SUCCESS -LogFile $LogFile
-    return
-}
-
-$adapterVlanMappings = @()
-if (-not [string]::IsNullOrWhiteSpace($AdapterVlanMapJson)) {
-    try {
-        $parsedMappings = ConvertFrom-Json -InputObject $AdapterVlanMapJson -ErrorAction Stop
-        if ($parsedMappings) {
-            $adapterVlanMappings = @($parsedMappings)
-        }
-    } catch {
-        Write-MigrationLog "[$VMName] Unable to parse adapter VLAN mapping payload. Falling back to default VLAN '$VlanId'. Details: $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
+=======
+# ── Helpers ────────────────────────────────────────────────────────────────
+function Should-RunPhase {
+    param([string]$Name)
+    if ($Phases) { return $Name -in $Phases }
+    switch ($Name) {
+        'IRStart'              { return -not $SkipInstantRecoveryStart }
+        'IRCommit'             { return -not $SkipInstantRecoveryFinalization }
+        { $_ -in @('Network','IntegrationServices','OS','HA','LiveMigration','BackupTag') } { return -not $SkipNetworkAndPostConfig }
+        default                { return $true }
     }
 }
 
+function Invoke-Phase {
+    param(
+        [string]$Name,
+        [string]$DisplayName,
+        [scriptblock]$Action,
+        [bool]$NonBlocking = $false
+    )
+    if (-not (Should-RunPhase $Name)) {
+        Add-Step3PhaseResult -Result $result -Phase $DisplayName -Status 'Skipped' -Message "Désactivée"
+        return
+    }
+    try {
+        & $Action
+        Add-Step3PhaseResult -Result $result -Phase $DisplayName -Status 'Success' -Message 'OK'
+    } catch {
+        $status = if ($NonBlocking) { 'Warning' } else { 'Failed' }
+        Add-Step3PhaseResult -Result $result -Phase $DisplayName -Status $status -Message $_.Exception.Message
+        if (-not $NonBlocking) { throw }
+    }
+}
+
+# ── Contexte et TaskResult ─────────────────────────────────────────────────
+$context = @{
+    VMName = $VMName; VlanId = $VlanId; BackupJobName = $BackupJobName
+    SCVMMServer = $SCVMMServer; HyperVHost = $HyperVHost; HyperVHost2 = $HyperVHost2
+    HyperVCluster = $HyperVCluster; ClusterStorage = $ClusterStorage; BackupTag = $BackupTag
+    OperatingSystem = $OperatingSystem; Remark = $Remark
+    AdapterVlanMapJson = $AdapterVlanMapJson
+    WaitingTimeoutSeconds = $WaitingTimeoutSeconds
+    WaitingPollIntervalSeconds = $WaitingPollIntervalSeconds
+    Config = $Config; LogFile = $LogFile
+}
+$result = New-Step3TaskResult -Context $context
+
+# ── Phase 1 : Connexion SCVMM ──────────────────────────────────────────────
+$VMMServerName = Invoke-SCVMMCommand -ScriptBlock {
+    param($s) $srv = Get-SCVMMServer -ComputerName $s; if (-not $srv) { throw "SCVMM $s introuvable" }; $srv.Name
+} -ArgumentList @($SCVMMServer)
+$context.VMMServerName = $VMMServerName
+Add-Step3PhaseResult -Result $result -Phase 'ScvmmConnection' -Status 'Success' -Message $VMMServerName
+
+# ── Phase 2 : Instant Recovery — Start + Wait ──────────────────────────────
+Invoke-Phase -Name 'IRStart' -DisplayName 'InstantRecoveryStart' -Action {
+    Start-VmInstantRecovery -Context $context -Result $result
+    Wait-InstantRecoveryUserAction -Context $context -Result $result
+}
+
+# ── Phase 3 : Instant Recovery — Finalization (Commit) ─────────────────────
+Invoke-Phase -Name 'IRCommit' -DisplayName 'InstantRecoveryCommit' -Action {
+    Complete-InstantRecovery -Context $context -Result $result
+>>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
+}
+
+# ── Phase 4 : Configuration réseau ─────────────────────────────────────────
+if (Should-RunPhase 'Network') {
+    $adapterVlanMappings = @()
+    if ($AdapterVlanMapJson) {
+        try { $adapterVlanMappings = @(ConvertFrom-Json $AdapterVlanMapJson -ErrorAction Stop) }
+        catch { Write-MigrationLog "[$VMName] JSON VLAN invalide, fallback VLAN ${VlanId}: $_" -Level WARNING -LogFile $LogFile }
+    }
+    $context.AdapterVlanMappings = $adapterVlanMappings
+}
+Invoke-Phase -Name 'Network' -DisplayName 'NetworkConfiguration' -Action {
+    Set-VmNetworkConfiguration -Context $context -Result $result
+}
+
+<<<<<<< HEAD
 Set-VmNetworkConfiguration `
     -Name $VMName `
     -ServerName $VMMServerName `
@@ -203,3 +244,27 @@ Move-VmToSecondHost -Name $VMName -ServerName $VMMServerName -DestinationHost $H
 Set-VmBackupTag -Name $VMName -ServerName $VMMServerName -TagName $BackupTag -LogFile $LogFile
 
 Write-MigrationLog "[$VMName] Migration completed." -Level SUCCESS -LogFile $LogFile
+=======
+# ── Phases 5-9 : Post-configuration (non-bloquantes sauf Network) ─────────
+Invoke-Phase -Name 'IntegrationServices' -DisplayName 'IntegrationServices' -NonBlocking -Action {
+    Set-VmIntegrationServices -Context $context -Result $result
+}
+Invoke-Phase -Name 'OS' -DisplayName 'OperatingSystem' -NonBlocking -Action {
+    Set-SCVMMOperatingSystem -Context $context -Result $result
+}
+Invoke-Phase -Name 'HA' -DisplayName 'HighAvailability' -NonBlocking -Action {
+    Register-VmHighAvailability -Context $context -Result $result
+}
+Invoke-Phase -Name 'LiveMigration' -DisplayName 'LiveMigration' -NonBlocking -Action {
+    Move-VmToSecondHost -Context $context -Result $result
+}
+Invoke-Phase -Name 'BackupTag' -DisplayName 'BackupTag' -NonBlocking -Action {
+    Set-VmBackupTag -Context $context -Result $result
+}
+
+# ── Finalisation ───────────────────────────────────────────────────────────
+Complete-Step3TaskResult -Result $result
+Write-Step3TaskResult -Result $result -Path "$LogFile.result.json"
+Write-MigrationLog "[$VMName] Migration terminée — Status: $($result.Status)" -Level SUCCESS -LogFile $LogFile
+$result
+>>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba

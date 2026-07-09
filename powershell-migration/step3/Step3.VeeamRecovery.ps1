@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <#
 .SYNOPSIS
     Veeam Recovery helper functions for step3 migration.
@@ -18,6 +19,19 @@
     Write-MigrationLog, Invoke-SCVMMCommand).
 #>
 
+=======
+# Step3.VeeamRecovery.ps1
+# Veeam recovery helper functions for step 3 migration.
+# Dot-source this file inside an Invoke-VeeamCommand scriptblock or before
+# using the functions locally on a Veeam server.
+#
+# Functions:
+#   Find-VmRestoreSession         Bounded-name restore session lookup
+#   Start-VmInstantRecovery       Start VBR Instant Recovery mount (Context-based)
+#   Wait-InstantRecoveryUserAction Poll until mount reaches WaitingForUserAction (Context-based)
+#   Complete-InstantRecovery      Commit IR session + wait for restore completion (Context-based)
+
+>>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 Set-StrictMode -Version Latest
 
 # ---------------------------------------------------------------------------
@@ -30,6 +44,7 @@ $script:FindVmRestoreSessionFuncDef = @'
 function Find-VmRestoreSession {
     <#
     .SYNOPSIS
+<<<<<<< HEAD
         Finds the most recent Veeam restore session for a given VM.
     .DESCRIPTION
         Uses exact name match, a migration-hyp suffix variant, and a bounded
@@ -88,13 +103,65 @@ function New-VeeamScriptBlock {
     )
 
     return [scriptblock]::Create("$FindVmRestoreSessionFuncDef`n$ScriptText")
+=======
+    Finds the most recent Veeam restore session for a given VM using bounded name matching.
+
+    .DESCRIPTION
+    Uses a bounded regex pattern to avoid false positives when VM names share prefixes
+    (e.g., WEB1 vs WEB10). Matches exact VM name, VMName-migrationhyp suffix, or the
+    bounded pattern `^{VMName}($|[^\w-])`.
+    Returns the most recently created restore session, or $null if none found.
+
+    .PARAMETER VmName
+    The VM name to search for.
+
+    .PARAMETER RestoreSessions
+    Optional pre-fetched array of VBRRestoreSession objects. When omitted the function
+    calls Get-VBRRestoreSession internally. Pass a pre-fetched array to avoid duplicate
+    Veeam cmdlet calls in batch loops.
+
+    .OUTPUTS
+    VBRRestoreSession or $null
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+
+        [Parameter(Mandatory = $false)]
+        [object[]]$RestoreSessions
+    )
+
+    # Bounded pattern: ^{name}($|[^\w-])
+    # Prevents WEB1 from matching WEB10, while still allowing WEB1-migrationhyp.
+    $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($VmName)
+
+    if ($PSBoundParameters.ContainsKey('RestoreSessions')) {
+        $sessions = $RestoreSessions
+    }
+    else {
+        $sessions = @(Get-VBRRestoreSession)
+    }
+
+    $restoreSession = $sessions |
+        Where-Object {
+            $_.Name -eq $VmName -or
+            $_.Name -eq "$VmName-migrationhyp" -or
+            $_.Name -match $vmSessionPattern
+        } |
+        Sort-Object -Property CreationTime -Descending |
+        Select-Object -First 1
+
+    return $restoreSession
+>>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 }
 
 # ============================================================================
-# Start-VeeamInstantRecovery
-# Validate Veeam prerequisites and start the Instant Recovery mount.
+# Start-VmInstantRecovery
+# Start the Veeam Instant Recovery mount for a single VM.
+# Context-based wrapper around the Veeam IR start logic.
 # ============================================================================
-function Start-VeeamInstantRecovery {
+function Start-VmInstantRecovery {
     <#
     .SYNOPSIS
         Start the Veeam Instant Recovery mount for a single VM.
@@ -102,52 +169,35 @@ function Start-VeeamInstantRecovery {
     .DESCRIPTION
         Validates that SCVMM is registered in Veeam and the backup job exists,
         then calls Start-VBRHvInstantRecovery. Does NOT wait for the mount to
-        become ready — call Wait-VeeamInstantRecoveryMount afterwards.
+        become ready — call Wait-InstantRecoveryUserAction afterwards.
 
-    .PARAMETER BackupJobName
-        Name of the Veeam backup job. Mandatory.
+    .PARAMETER Context
+        Hashtable with keys: VMName, BackupJobName, HyperVHost, ClusterStorage,
+        SCVMMServer, LogFile.
 
-    .PARAMETER VMName
-        Target VM name. Mandatory.
-
-    .PARAMETER HyperVHost
-        Destination Hyper-V host. Mandatory.
-
-    .PARAMETER ClusterStorage
-        Cluster shared volume path (e.g. C:\ClusterStorage\Volume1). Mandatory.
-
-    .PARAMETER SCVMMServer
-        SCVMM server name for Veeam validation. Mandatory.
-
-    .PARAMETER LogFile
-        Path to the log file.
+    .PARAMETER Result
+        Task result object (not modified by this function; phase tracking is
+        handled by the orchestrator via Invoke-Phase).
 
     .EXAMPLE
-        Start-VeeamInstantRecovery -BackupJobName "Backup-HypMig-lot-118" `
-            -VMName "SRV-WEB01" -HyperVHost "hv01" `
-            -ClusterStorage "C:\ClusterStorage\Volume1" `
-            -SCVMMServer "scvmm01" -LogFile $LogFile
+        Start-VmInstantRecovery -Context $context -Result $result
     #>
 
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$BackupJobName,
+        [hashtable]$Context,
 
         [Parameter(Mandatory = $true)]
-        [string]$VMName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$HyperVHost,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ClusterStorage,
-
-        [Parameter(Mandatory = $true)]
-        [string]$SCVMMServer,
-
-        [string]$LogFile
+        [PSCustomObject]$Result
     )
+
+    $VMName          = $Context.VMName
+    $BackupJobName   = $Context.BackupJobName
+    $HyperVHost      = $Context.HyperVHost
+    $ClusterStorage  = $Context.ClusterStorage
+    $SCVMMServer     = $Context.SCVMMServer
+    $LogFile         = $Context.LogFile
 
     if (-not $PSCmdlet.ShouldProcess($VMName, "Start Veeam Instant Recovery")) {
         return
@@ -221,10 +271,11 @@ function Start-VeeamInstantRecovery {
 }
 
 # ============================================================================
-# Wait-VeeamInstantRecoveryMount
+# Wait-InstantRecoveryUserAction
 # Poll until the Instant Recovery mount reaches WaitingForUserAction.
+# Context-based wrapper around the Veeam IR polling logic.
 # ============================================================================
-function Wait-VeeamInstantRecoveryMount {
+function Wait-InstantRecoveryUserAction {
     <#
     .SYNOPSIS
         Wait for the Instant Recovery mount to reach the WaitingForUserAction state.
@@ -234,33 +285,31 @@ function Wait-VeeamInstantRecoveryMount {
         mount is ready. Detects WaitingForUserAction either through the IR state
         or through the restore session log text.
 
-    .PARAMETER VMName
-        Target VM name. Mandatory.
+    .PARAMETER Context
+        Hashtable with keys: VMName, WaitingTimeoutSeconds (default 1800),
+        WaitingPollIntervalSeconds (default 15), LogFile.
 
-    .PARAMETER WaitingTimeoutSeconds
-        Maximum wait time in seconds. Default: 1800.
-
-    .PARAMETER WaitingPollIntervalSeconds
-        Poll interval in seconds. Default: 15.
-
-    .PARAMETER LogFile
-        Path to the log file.
+    .PARAMETER Result
+        Task result object (not modified by this function; phase tracking is
+        handled by the orchestrator via Invoke-Phase).
 
     .EXAMPLE
-        Wait-VeeamInstantRecoveryMount -VMName "SRV-WEB01" -LogFile $LogFile
+        Wait-InstantRecoveryUserAction -Context $context -Result $result
     #>
 
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$VMName,
+        [hashtable]$Context,
 
-        [int]$WaitingTimeoutSeconds = 1800,
-
-        [int]$WaitingPollIntervalSeconds = 15,
-
-        [string]$LogFile
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$Result
     )
+
+    $VMName                     = $Context.VMName
+    $WaitingTimeoutSeconds      = if ($Context.ContainsKey('WaitingTimeoutSeconds'))      { $Context.WaitingTimeoutSeconds      } else { 1800 }
+    $WaitingPollIntervalSeconds = if ($Context.ContainsKey('WaitingPollIntervalSeconds')) { $Context.WaitingPollIntervalSeconds } else { 15 }
+    $LogFile                    = $Context.LogFile
 
     Write-MigrationLog "[$VMName] Waiting for Instant Recovery mount..." -LogFile $LogFile
 
@@ -327,47 +376,51 @@ function Wait-VeeamInstantRecoveryMount {
 }
 
 # ============================================================================
-# Complete-VeeamInstantRecovery
-# Commit/finalize the Instant Recovery session.
+# Complete-InstantRecovery
+# Commit (finalize) the Instant Recovery session and wait for restore completion.
+# Context-based wrapper combining Complete-VeeamInstantRecovery + Wait-VeeamRestoreSession.
 # ============================================================================
-function Complete-VeeamInstantRecovery {
+function Complete-InstantRecovery {
     <#
     .SYNOPSIS
-        Finalize (commit) the Veeam Instant Recovery session.
+        Finalize the Veeam Instant Recovery session and wait for the restore to complete.
 
     .DESCRIPTION
-        Verifies the IR session and SCVMM VM exist, then calls
-        Start-VBRHvInstantRecoveryMigration to commit. Does NOT wait for the
-        restore session to complete — call Wait-VeeamRestoreSession afterwards.
+        Verifies the IR session and SCVMM VM exist, calls Start-VBRHvInstantRecoveryMigration
+        to commit, then polls the restore session until it reaches Success, Warning, or Failed.
 
-    .PARAMETER VMName
-        Target VM name. Mandatory.
+    .PARAMETER Context
+        Hashtable with keys: VMName, VMMServerName, WaitingTimeoutSeconds (default 1800),
+        WaitingPollIntervalSeconds (default 15), LogFile.
 
-    .PARAMETER VMMServerName
-        SCVMM server name for VM validation. Mandatory.
-
-    .PARAMETER LogFile
-        Path to the log file.
+    .PARAMETER Result
+        Task result object (not modified by this function; phase tracking is
+        handled by the orchestrator via Invoke-Phase).
 
     .EXAMPLE
-        Complete-VeeamInstantRecovery -VMName "SRV-WEB01" `
-            -VMMServerName "scvmm01" -LogFile $LogFile
+        Complete-InstantRecovery -Context $context -Result $result
     #>
 
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$VMName,
+        [hashtable]$Context,
 
         [Parameter(Mandatory = $true)]
-        [string]$VMMServerName,
-
-        [string]$LogFile
+        [PSCustomObject]$Result
     )
+
+    $VMName                     = $Context.VMName
+    $VMMServerName              = $Context.VMMServerName
+    $WaitingTimeoutSeconds      = if ($Context.ContainsKey('WaitingTimeoutSeconds'))      { $Context.WaitingTimeoutSeconds      } else { 1800 }
+    $WaitingPollIntervalSeconds = if ($Context.ContainsKey('WaitingPollIntervalSeconds')) { $Context.WaitingPollIntervalSeconds } else { 15 }
+    $LogFile                    = $Context.LogFile
 
     if (-not $PSCmdlet.ShouldProcess($VMName, "Finalize Veeam Instant Recovery")) {
         return
     }
+
+    # ── Step 1: Validate IR session ────────────────────────────────────────
 
     $IRSession = Invoke-VeeamCommand -ScriptBlock {
         param($Vm)
@@ -381,6 +434,8 @@ function Complete-VeeamInstantRecovery {
         throw $msg
     }
 
+    # ── Step 2: Validate VM in SCVMM ───────────────────────────────────────
+
     $vmInScvmm = Invoke-SCVMMCommand -ScriptBlock {
         param($Name, $ServerName)
         $server = Get-SCVMMServer -ComputerName $ServerName
@@ -392,6 +447,8 @@ function Complete-VeeamInstantRecovery {
         Write-MigrationLog $msg -Level ERROR -LogFile $LogFile
         throw $msg
     }
+
+    # ── Step 3: Commit the IR session ──────────────────────────────────────
 
     Write-MigrationLog "[$VMName] Finalizing Instant Recovery..." -LogFile $LogFile
 
@@ -410,52 +467,8 @@ function Complete-VeeamInstantRecovery {
         Write-MigrationLog "[$VMName] Finalization error: $_" -Level ERROR -LogFile $LogFile
         throw
     }
-}
 
-# ============================================================================
-# Wait-VeeamRestoreSession
-# Poll the restore session until Success, Warning, or Failed.
-# ============================================================================
-function Wait-VeeamRestoreSession {
-    <#
-    .SYNOPSIS
-        Wait for the Veeam restore session to reach a terminal state.
-
-    .DESCRIPTION
-        Polls Get-VBRRestoreSession using bounded-name matching until the session
-        reaches Success, Warning, or Failed. Returns the final session state.
-
-    .PARAMETER VMName
-        Target VM name. Mandatory.
-
-    .PARAMETER WaitingTimeoutSeconds
-        Maximum wait time in seconds. Default: 1800.
-
-    .PARAMETER WaitingPollIntervalSeconds
-        Poll interval in seconds. Default: 15.
-
-    .PARAMETER LogFile
-        Path to the log file.
-
-    .OUTPUTS
-        [PSCustomObject] with Found, Name, State, Result properties.
-
-    .EXAMPLE
-        $result = Wait-VeeamRestoreSession -VMName "SRV-WEB01" -LogFile $LogFile
-        if ($result.Result -eq "Success") { Write-Host "Done" }
-    #>
-
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$VMName,
-
-        [int]$WaitingTimeoutSeconds = 1800,
-
-        [int]$WaitingPollIntervalSeconds = 15,
-
-        [string]$LogFile
-    )
+    # ── Step 4: Wait for restore session to reach terminal state ───────────
 
     Write-MigrationLog "[$VMName] Waiting for restore session to complete..." -LogFile $LogFile
 
@@ -508,134 +521,4 @@ function Wait-VeeamRestoreSession {
     } while ($elapsed -lt $WaitingTimeoutSeconds)
 
     throw "Timeout of $WaitingTimeoutSeconds seconds reached while waiting for restore session completion."
-}
-
-# ============================================================================
-# Invoke-VeeamRecoveryPhase
-# Orchestrator: runs the full Veeam IR start → wait → finalize → wait cycle.
-# ============================================================================
-function Invoke-VeeamRecoveryPhase {
-    <#
-    .SYNOPSIS
-        Run the complete Veeam Instant Recovery lifecycle for a single VM.
-
-    .DESCRIPTION
-        Orchestrates the full Veeam recovery flow: start IR mount, wait for
-        WaitingForUserAction, finalize (commit), and wait for restore session
-        completion. Respects skip flags for partial reruns.
-
-    .PARAMETER BackupJobName
-        Name of the Veeam backup job. Mandatory.
-
-    .PARAMETER VMName
-        Target VM name. Mandatory.
-
-    .PARAMETER HyperVHost
-        Primary Hyper-V host. Mandatory.
-
-    .PARAMETER ClusterStorage
-        Cluster shared volume path. Mandatory.
-
-    .PARAMETER SCVMMServer
-        SCVMM server name. Mandatory.
-
-    .PARAMETER VMMServerName
-        SCVMM server name as returned after connection (for finalization validation).
-
-    .PARAMETER SkipInstantRecoveryStart
-        Skip starting the Instant Recovery mount (assumes already mounted).
-
-    .PARAMETER SkipInstantRecoveryFinalization
-        Skip finalizing (committing) the IR session.
-
-    .PARAMETER WaitingTimeoutSeconds
-        Maximum wait time per phase. Default: 1800.
-
-    .PARAMETER WaitingPollIntervalSeconds
-        Poll interval per phase. Default: 15.
-
-    .PARAMETER LogFile
-        Path to the log file.
-
-    .EXAMPLE
-        Invoke-VeeamRecoveryPhase -BackupJobName "Backup-HypMig-lot-118" `
-            -VMName "SRV-WEB01" -HyperVHost "hv01" `
-            -ClusterStorage "C:\ClusterStorage\Volume1" `
-            -SCVMMServer "scvmm01" -VMMServerName "scvmm01" `
-            -LogFile $LogFile
-    #>
-
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$BackupJobName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$VMName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$HyperVHost,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ClusterStorage,
-
-        [Parameter(Mandatory = $true)]
-        [string]$SCVMMServer,
-
-        [Parameter(Mandatory = $true)]
-        [string]$VMMServerName,
-
-        [switch]$SkipInstantRecoveryStart,
-
-        [switch]$SkipInstantRecoveryFinalization,
-
-        [int]$WaitingTimeoutSeconds = 1800,
-
-        [int]$WaitingPollIntervalSeconds = 15,
-
-        [string]$LogFile
-    )
-
-    # ── Phase 1: Start ──
-
-    if (-not $SkipInstantRecoveryStart) {
-        try {
-            Start-VeeamInstantRecovery -BackupJobName $BackupJobName `
-                -VMName $VMName `
-                -HyperVHost $HyperVHost `
-                -ClusterStorage $ClusterStorage `
-                -SCVMMServer $SCVMMServer `
-                -LogFile $LogFile
-
-            Wait-VeeamInstantRecoveryMount -VMName $VMName `
-                -WaitingTimeoutSeconds $WaitingTimeoutSeconds `
-                -WaitingPollIntervalSeconds $WaitingPollIntervalSeconds `
-                -LogFile $LogFile
-        } catch {
-            Write-MigrationLog "[$VMName] Instant Recovery start/wait error: $_" -Level ERROR -LogFile $LogFile
-            throw
-        }
-    } else {
-        Write-MigrationLog "[$VMName] SkipInstantRecoveryStart enabled: skipping Instant Recovery start/wait phase." -Level WARNING -LogFile $LogFile
-    }
-
-    # ── Phase 2: Finalization ──
-
-    if (-not $SkipInstantRecoveryFinalization) {
-        try {
-            Complete-VeeamInstantRecovery -VMName $VMName `
-                -VMMServerName $VMMServerName `
-                -LogFile $LogFile
-
-            Wait-VeeamRestoreSession -VMName $VMName `
-                -WaitingTimeoutSeconds $WaitingTimeoutSeconds `
-                -WaitingPollIntervalSeconds $WaitingPollIntervalSeconds `
-                -LogFile $LogFile
-        } catch {
-            Write-MigrationLog "[$VMName] Instant Recovery finalization error: $_" -Level ERROR -LogFile $LogFile
-            throw
-        }
-    } else {
-        Write-MigrationLog "[$VMName] SkipInstantRecoveryFinalization enabled: skipping Instant Recovery commit/finalization phase." -Level WARNING -LogFile $LogFile
-    }
 }

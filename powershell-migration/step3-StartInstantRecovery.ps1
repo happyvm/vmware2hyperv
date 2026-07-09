@@ -191,14 +191,29 @@ while ($true) {
         break
     }
 
+<<<<<<< HEAD
     $snapshots = @(Invoke-VeeamCommand -ScriptBlock (New-VeeamScriptBlock {
         param($VmNames)
+=======
+    $step3VeeamRecoveryPath = "$PSScriptRoot\step3\Step3.VeeamRecovery.ps1"
+
+    $snapshots = @(Invoke-VeeamCommand -ScriptBlock {
+        param($VmNames, $VeeamRecoveryPath)
+
+        . $VeeamRecoveryPath
+>>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 
         $irSessions = @(Get-VBRInstantRecovery)
 
         foreach ($vmName in @($VmNames)) {
             $irSession = $irSessions | Where-Object { $_.VMName -eq $vmName } | Select-Object -First 1
+<<<<<<< HEAD
             $restoreSession = Find-VmRestoreSession -VMName $vmName
+=======
+            # Use the shared bounded-name helper to avoid matching another VM whose
+            # name shares a prefix (WEB1 vs WEB10).
+            $restoreSession = Find-VmRestoreSession -VmName $vmName -RestoreSessions $restoreSessions
+>>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 
             $waitingDetected = $false
             $detectionSource = $null
@@ -244,7 +259,11 @@ while ($true) {
                 DetectionSource = $detectionSource
             }
         }
+<<<<<<< HEAD
     }) -ArgumentList @(, [string[]]$pendingNames))
+=======
+    } -ArgumentList @(, [string[]]$pendingNames, $step3VeeamRecoveryPath))
+>>>>>>> 85c6c4b45aca08b82d1ed0ef7c219683bdad1aba
 
     foreach ($snapshot in $snapshots) {
         $tracked = $vmStatuses[[string]$snapshot.VMName]
