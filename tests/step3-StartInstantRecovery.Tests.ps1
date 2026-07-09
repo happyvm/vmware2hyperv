@@ -98,6 +98,54 @@ Describe 'step3-StartInstantRecovery.ps1 - Veeam scriptblock self-containment' {
         $unresolved | Should -BeNullOrEmpty
     }
 
+    It 'Monitoring poll yields one snapshot per VM, with string VMName (argument binding)' {
+        # Regression: -ArgumentList @(, [string[]]$pendingNames, $path) double-wrapped the
+        # name array, so the scriptblock iterated ONCE with the whole array as $vmName:
+        # no Veeam match ('<none>' everywhere), and the caller dropped the snapshot because
+        # its key was the space-joined names. Progress stayed at 0/N with no error shown.
+        $monitoringCommand = $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Invoke-VeeamCommand' -and
+            $node.Extent.Text -match 'Find-VmRestoreSession'
+        }, $true) | Select-Object -First 1
+        $monitoringCommand | Should -Not -BeNullOrEmpty
+
+        $sbAst = $monitoringCommand.CommandElements | Where-Object {
+            $_ -is [System.Management.Automation.Language.ScriptBlockExpressionAst]
+        } | Select-Object -First 1
+        $argListIndex = 0..($monitoringCommand.CommandElements.Count - 1) | Where-Object {
+            $el = $monitoringCommand.CommandElements[$_]
+            $el -is [System.Management.Automation.Language.CommandParameterAst] -and
+            $el.ParameterName -eq 'ArgumentList'
+        } | Select-Object -First 1
+        $argListAst = $monitoringCommand.CommandElements[$argListIndex + 1]
+
+        # Rebuild the caller's context, then evaluate the file's own ArgumentList expression
+        # and invoke the file's own scriptblock exactly like Invoke-VeeamCommand does locally.
+        $pendingNames = @('WEB1', 'WEB2')
+        $step3VeeamRecoveryPath = "$PSScriptRoot/../powershell-migration/step3/Step3.VeeamRecovery.ps1"
+        $argumentList = Invoke-Expression $argListAst.Extent.Text
+
+        function global:Get-VBRInstantRecovery {
+            [pscustomobject]@{ VMName = 'WEB1'; State = 'WaitingForUserAction' }
+        }
+        function global:Get-VBRRestoreSession {
+            [pscustomobject]@{ Name = 'WEB2'; CreationTime = Get-Date; State = 'Working'; Result = 'None' }
+        }
+        try {
+            $snapshots = @(& $sbAst.ScriptBlock.GetScriptBlock() @argumentList)
+        } finally {
+            Remove-Item function:global:Get-VBRInstantRecovery, function:global:Get-VBRRestoreSession
+        }
+
+        @($snapshots).Count | Should -Be 2
+        foreach ($snapshot in $snapshots) { $snapshot.VMName | Should -BeOfType [string] }
+        ($snapshots | ForEach-Object VMName) | Should -Be @('WEB1', 'WEB2')
+        ($snapshots | Where-Object VMName -eq 'WEB1').WaitingDetected | Should -BeTrue
+        ($snapshots | Where-Object VMName -eq 'WEB2').SessionState | Should -Be 'Working'
+    }
+
     It 'Monitoring scriptblock fetches restore sessions before calling Find-VmRestoreSession' {
         $monitoring = $script:veeamScriptBlocks | Where-Object {
             $_.Extent.Text -match 'Find-VmRestoreSession'
