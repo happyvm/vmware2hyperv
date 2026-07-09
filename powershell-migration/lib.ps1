@@ -482,7 +482,11 @@ function ConvertTo-HtmlEncoded {
 }
 
 # ---------------------------------------------------------------------------
-# Send-HtmlMail : send an email in HTML format
+# Send-HtmlMail : send an email in HTML format (TLS-enabled, with optional SMTP authentication)
+#
+# SECURITY: TLS 1.2+ is enforced by default. Use -Credential for SMTP servers that
+# require authentication. The credential is only used for SMTP auth and is destroyed
+# after the send attempt (finally block).
 # ---------------------------------------------------------------------------
 function Send-HtmlMail {
     param(
@@ -501,7 +505,14 @@ function Send-HtmlMail {
         [Parameter(Mandatory = $true)]
         [string]$SmtpServer,
 
-        [int]$Port = 25,
+        [int]$Port = 587,
+
+        # Optional SMTP authentication credential. When omitted the client attempts
+        # anonymous/unauthenticated delivery (suitable for internal relays on trusted
+        # networks where the SMTP server does not require auth).
+        [System.Management.Automation.PSCredential]
+        [System.Management.Automation.Credential()]
+        $Credential,
 
         [string]$LogFile
     )
@@ -519,6 +530,13 @@ function Send-HtmlMail {
         $mailMessage.IsBodyHtml = $true
 
         $smtpClient = [System.Net.Mail.SmtpClient]::new($SmtpServer, $Port)
+        $smtpClient.EnableSsl = $true
+
+        if ($Credential) {
+            $smtpClient.UseDefaultCredentials = $false
+            $smtpClient.Credentials = $Credential.GetNetworkCredential()
+        }
+
         $smtpClient.Send($mailMessage)
 
         Write-MigrationLog "Email sent to: $($To -join ', ')" -Level SUCCESS -LogFile $LogFile
@@ -526,7 +544,12 @@ function Send-HtmlMail {
         Write-MigrationLog "Failed to send email : $_" -Level ERROR -LogFile $LogFile
     } finally {
         if ($mailMessage) { $mailMessage.Dispose() }
-        if ($smtpClient) { $smtpClient.Dispose() }
+        if ($smtpClient) {
+            if ($smtpClient.Credentials) {
+                $smtpClient.Credentials = $null
+            }
+            $smtpClient.Dispose()
+        }
     }
 }
 
@@ -534,6 +557,12 @@ function Send-HtmlMail {
 
 # ---------------------------------------------------------------------------
 # Invoke-SCVMMCommand : proxy for SCVMM cmdlets (routes through WinPS compat session if present)
+#
+# SECURITY: This function accepts an arbitrary [scriptblock] that is executed
+# in the caller's scope (or the WinPS compat session). Callers MUST NOT construct
+# the ScriptBlock from untrusted input — doing so would allow arbitrary code
+# execution. All current callers are internal to the vmware2hyperv toolkit and
+# pass only hard-coded ScriptBlocks.
 # ---------------------------------------------------------------------------
 function Invoke-SCVMMCommand {
     param(
@@ -555,6 +584,10 @@ function Invoke-SCVMMCommand {
 
 # ---------------------------------------------------------------------------
 # Invoke-VeeamCommand : proxy for Veeam cmdlets (routes through WinPS compat session if present)
+#
+# SECURITY: Same ScriptBlock injection risk as Invoke-SCVMMCommand — callers
+# MUST NOT construct the ScriptBlock from untrusted input. All current callers
+# are internal and pass only hard-coded ScriptBlocks.
 # ---------------------------------------------------------------------------
 function Invoke-VeeamCommand {
     param(
