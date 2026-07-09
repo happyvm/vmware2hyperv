@@ -106,6 +106,10 @@ param (
 )
 
 . "$PSScriptRoot\lib.ps1"
+. "$PSScriptRoot\Step3.VeeamRecovery.ps1"
+Get-ChildItem "$PSScriptRoot\step3\Step3.*.ps1" |
+    Where-Object Name -ne 'Step3.ScvmmSession.Functions.ps1' |
+    ForEach-Object { . $_.FullName }
 
 $Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
 
@@ -1332,257 +1336,23 @@ try {
     }
 }
 
-# ── Instant Recovery: start ─────────────────────────────────────────────
-
-if (-not $SkipInstantRecoveryStart -or -not $SkipInstantRecoveryFinalization) {
-
-if (-not $SkipInstantRecoveryStart) {
-
-Write-MigrationLog "[$VMName] Checking SCVMM in Veeam..." -LogFile $LogFile
-$VBRSCVMM = Invoke-VeeamCommand -ScriptBlock {
-    param($ScvmmServerName)
-    Get-VBRServer | Where-Object { $_.Name -eq $ScvmmServerName -and $_.Type -eq "Scvmm" } |
-        Select-Object -First 1 -Property Name, Type
-} -ArgumentList @($SCVMMServer)
-
-if (!$VBRSCVMM) {
-    $msg = "[$VMName] SCVMM $SCVMMServer is not registered in Veeam."
-    Write-MigrationLog $msg -Level ERROR -LogFile $LogFile
-    throw $msg
-}
-
-$Backup = Invoke-VeeamCommand -ScriptBlock {
-    param($JobName)
-    Get-VBRBackup | Where-Object { $_.Name -eq $JobName } |
-        Select-Object -First 1 -Property Name, Id
-} -ArgumentList @($BackupJobName)
-
-if (!$Backup) {
-    $msg = "[$VMName] Backup job '$BackupJobName' not found in Veeam."
-    Write-MigrationLog $msg -Level ERROR -LogFile $LogFile
-    throw $msg
-}
+# ── Veeam Instant Recovery ─────────────────────────────────────────────────
 
 try {
-    Invoke-VeeamCommand -ScriptBlock {
-        param(
-            [string]$JobName,
-            [string]$Vm,
-            [string]$DestinationHost,
-            [string]$DestinationPath
-        )
-
-        $backup = Get-VBRBackup | Where-Object { $_.Name -eq $JobName } | Select-Object -First 1
-        if (-not $backup) {
-            throw "Backup job '$JobName' not found in Veeam."
-        }
-
-        $restorePoint = Get-VBRRestorePoint -Backup $backup |
-            Where-Object { $_.Name -eq $Vm } |
-            Sort-Object -Property CreationTime -Descending |
-            Select-Object -First 1
-
-        if (-not $restorePoint) {
-            throw "No restore point found for VM '$Vm' in job '$JobName'."
-        }
-
-        Start-VBRHvInstantRecovery -RestorePoint $restorePoint -Server $DestinationHost -Path $DestinationPath -PowerUp $false -NICsEnabled $true -PreserveMACs $true -PreserveVmID $true | Out-Null
-        return $true
-    } -ArgumentList @($BackupJobName, $VMName, $HyperVHost, "$ClusterStorage\$VMName")
+    Invoke-VeeamRecoveryPhase -BackupJobName $BackupJobName `
+        -VMName $VMName `
+        -HyperVHost $HyperVHost `
+        -ClusterStorage $ClusterStorage `
+        -SCVMMServer $SCVMMServer `
+        -VMMServerName $VMMServerName `
+        -SkipInstantRecoveryStart:$SkipInstantRecoveryStart `
+        -SkipInstantRecoveryFinalization:$SkipInstantRecoveryFinalization `
+        -WaitingTimeoutSeconds $WaitingTimeoutSeconds `
+        -WaitingPollIntervalSeconds $WaitingPollIntervalSeconds `
+        -LogFile $LogFile
 } catch {
-    Write-MigrationLog "[$VMName] Instant Recovery preparation failed: $_" -Level ERROR -LogFile $LogFile
+    Write-MigrationLog "[$VMName] Veeam recovery phase failed: $_" -Level ERROR -LogFile $LogFile
     throw
-}
-
-Write-MigrationLog "[$VMName] Starting Instant Recovery..." -LogFile $LogFile
-try {
-    Write-MigrationLog "[$VMName] Instant Recovery started." -Level SUCCESS -LogFile $LogFile
-
-    $elapsed = 0
-    do {
-        $waitCheck = Invoke-VeeamCommand -ScriptBlock {
-            param($Vm)
-
-            $instantRecoverySession = Get-VBRInstantRecovery |
-                Where-Object { $_.VMName -eq $Vm } |
-                Select-Object -First 1
-
-            $currentState = if ($instantRecoverySession) { [string]$instantRecoverySession.State } else { "<none>" }
-            $restoreSessionState = "<none>"
-            $waitingDetected = $false
-            $detectionSource = $null
-
-            if ($instantRecoverySession -and $instantRecoverySession.State -eq "WaitingForUserAction") {
-                $waitingDetected = $true
-                $detectionSource = "instant-recovery-state"
-            }
-
-            if (-not $waitingDetected) {
-                # Exact names plus a bounded pattern ("VM (Instant Recovery)"…): a plain
-                # "$Vm*" wildcard would also match another batch VM whose name shares the
-                # prefix (e.g. WEB1 vs WEB10) and follow the wrong session.
-                $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($Vm)
-                $restoreSession = Get-VBRRestoreSession |
-                    Where-Object { $_.Name -eq $Vm -or $_.Name -eq "$Vm-migrationhyp" -or $_.Name -match $vmSessionPattern } |
-                    Sort-Object -Property CreationTime -Descending |
-                    Select-Object -First 1
-
-                if ($restoreSession) {
-                    $restoreSessionState = [string]$restoreSession.State
-                    $sessionLog = $restoreSession.Logger.GetLog()
-                    $logRecords = @()
-                    if ($sessionLog.UpdatedRecords) { $logRecords += $sessionLog.UpdatedRecords }
-                    if ($sessionLog.Records)        { $logRecords += $sessionLog.Records }
-
-                    $logText = ($logRecords | ForEach-Object {
-                        @($_.Title, $_.Description, $_.Message, $_.Text)
-                    } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join "`n"
-
-                    if ($logText -match "Waiting for user action") {
-                        $waitingDetected = $true
-                        $detectionSource = "restore-session-log"
-                    }
-                }
-            }
-
-            [PSCustomObject]@{
-                WaitingDetected     = $waitingDetected
-                CurrentState        = $currentState
-                RestoreSessionState = $restoreSessionState
-                DetectionSource     = $detectionSource
-            }
-        } -ArgumentList @($VMName)
-
-        Write-MigrationLog "[$VMName] Current states: InstantRecovery='$($waitCheck.CurrentState)', RestoreSession='$($waitCheck.RestoreSessionState)' (elapsed: ${elapsed}s)." -LogFile $LogFile
-
-        if ($waitCheck.WaitingDetected) {
-            Write-MigrationLog "[$VMName] Instant Recovery in waiting mode (source=$($waitCheck.DetectionSource))." -Level SUCCESS -LogFile $LogFile
-            break
-        }
-
-
-        Start-Sleep -Seconds $WaitingPollIntervalSeconds
-        $elapsed += $WaitingPollIntervalSeconds
-    } while ($elapsed -lt $WaitingTimeoutSeconds)
-
-    if ($elapsed -ge $WaitingTimeoutSeconds) {
-        throw "Timeout of $WaitingTimeoutSeconds seconds reached while waiting for WaitingForUserAction."
-    }
-} catch {
-    Write-MigrationLog "[$VMName] Instant Recovery error: $_" -Level ERROR -LogFile $LogFile
-    throw
-}
-} else {
-    Write-MigrationLog "[$VMName] SkipInstantRecoveryStart enabled: skipping Instant Recovery start/wait phase." -Level WARNING -LogFile $LogFile
-}
-
-# ── Instant Recovery: finalization ─────────────────────────────────────────
-
-if (-not $SkipInstantRecoveryFinalization) {
-
-$IRSession = Invoke-VeeamCommand -ScriptBlock {
-    param($Vm)
-    Get-VBRInstantRecovery | Where-Object { $_.VMName -eq $Vm } |
-        Select-Object -First 1 -Property VMName, State
-} -ArgumentList @($VMName)
-
-if (!$IRSession) {
-    $msg = "[$VMName] No active Instant Recovery session."
-    Write-MigrationLog $msg -Level ERROR -LogFile $LogFile
-    throw $msg
-}
-
-$vmInScvmm = Invoke-SCVMMCommand -ScriptBlock {
-    param($Name, $ServerName)
-    $server = Get-SCVMMServer -ComputerName $ServerName
-    Get-SCVirtualMachine -Name $Name -VMMServer $server
-} -ArgumentList @($VMName, $VMMServerName)
-if (!$vmInScvmm) {
-    $msg = "[$VMName] VM missing from SCVMM, finalization impossible."
-    Write-MigrationLog $msg -Level ERROR -LogFile $LogFile
-    throw $msg
-}
-
-Write-MigrationLog "[$VMName] Finalizing Instant Recovery..." -LogFile $LogFile
-try {
-    Invoke-VeeamCommand -ScriptBlock {
-        param($Vm)
-        $irSession = Get-VBRInstantRecovery | Where-Object { $_.VMName -eq $Vm } | Select-Object -First 1
-        if (-not $irSession) {
-            throw "No active Instant Recovery session for VM '$Vm'."
-        }
-        Start-VBRHvInstantRecoveryMigration -InstantRecovery $irSession | Out-Null
-    } -ArgumentList @($VMName)
-
-    Write-MigrationLog "[$VMName] Finalization completed." -Level SUCCESS -LogFile $LogFile
-
-    $finalizationElapsed = 0
-    do {
-        $finalizationCheck = Invoke-VeeamCommand -ScriptBlock {
-            param($Vm)
-
-            # Same bounded matching as the wait phase: never follow a session belonging
-            # to another VM whose name shares this VM's prefix (WEB1 vs WEB10).
-            $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($Vm)
-            $restoreSession = Get-VBRRestoreSession |
-                Where-Object { $_.Name -eq $Vm -or $_.Name -eq "$Vm-migrationhyp" -or $_.Name -match $vmSessionPattern } |
-                Sort-Object -Property CreationTime -Descending |
-                Select-Object -First 1
-
-            if (-not $restoreSession) {
-                return [PSCustomObject]@{
-                    Found  = $false
-                    Name   = $null
-                    State  = $null
-                    Result = $null
-                }
-            }
-
-            [PSCustomObject]@{
-                Found  = $true
-                Name   = [string]$restoreSession.Name
-                State  = [string]$restoreSession.State
-                Result = [string]$restoreSession.Result
-            }
-        } -ArgumentList @($VMName)
-
-        if (-not $finalizationCheck.Found) {
-            Write-MigrationLog "[$VMName] Restore session not yet visible after finalization start (elapsed: ${finalizationElapsed}s)." -Level WARNING -LogFile $LogFile
-        } else {
-            Write-MigrationLog "[$VMName] Restore session '$($finalizationCheck.Name)' status: State='$($finalizationCheck.State)', Result='$($finalizationCheck.Result)' (elapsed: ${finalizationElapsed}s)." -LogFile $LogFile
-
-            if ($finalizationCheck.Result -eq "Success") {
-                Write-MigrationLog "[$VMName] VM restored permanently; network reconfiguration can start." -Level SUCCESS -LogFile $LogFile
-                break
-            }
-
-            if ($finalizationCheck.Result -eq "Warning") {
-                Write-MigrationLog "[$VMName] Restore session '$($finalizationCheck.Name)' ended with result 'Warning'. Continuing with SCVMM network/post-configuration and keeping execution non-blocking." -Level WARNING -LogFile $LogFile
-                break
-            }
-
-            if ($finalizationCheck.Result -eq "Failed") {
-                throw "Restore session '$($finalizationCheck.Name)' ended with result '$($finalizationCheck.Result)'."
-            }
-        }
-
-        Start-Sleep -Seconds $WaitingPollIntervalSeconds
-        $finalizationElapsed += $WaitingPollIntervalSeconds
-    } while ($finalizationElapsed -lt $WaitingTimeoutSeconds)
-
-    if ($finalizationElapsed -ge $WaitingTimeoutSeconds) {
-        throw "Timeout of $WaitingTimeoutSeconds seconds reached while waiting for restore session success before network reconfiguration."
-    }
-} catch {
-    Write-MigrationLog "[$VMName] Finalization error: $_" -Level ERROR -LogFile $LogFile
-    throw
-}
-} else {
-    Write-MigrationLog "[$VMName] SkipInstantRecoveryFinalization enabled: skipping Instant Recovery commit/finalization phase." -Level WARNING -LogFile $LogFile
-}
-} else {
-    Write-MigrationLog "[$VMName] SkipInstantRecoveryStart enabled: skipping Instant Recovery start/wait phase." -Level WARNING -LogFile $LogFile
-    Write-MigrationLog "[$VMName] SkipInstantRecoveryFinalization enabled: skipping Instant Recovery commit/finalization phase." -Level WARNING -LogFile $LogFile
 }
 
 # ── Network mapping ────────────────────────────────────────────────────────────
