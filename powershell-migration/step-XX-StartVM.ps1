@@ -1,4 +1,45 @@
-﻿param (
+﻿<#
+.SYNOPSIS
+    Start Hyper-V VMs and verify integration services after migration.
+
+.DESCRIPTION
+    Starts the migrated VMs on Hyper-V hosts, monitors integration services (heartbeat,
+    time sync, data exchange, backup, guest services) through SCVMM, and performs
+    WinRM connectivity checks to confirm the VM is operational post-migration.
+
+.PARAMETER ConfigFile
+    Optional path to the configuration file. Defaults to config.psd1.
+
+.PARAMETER CsvFile
+    Path to the batch CSV file. Defaults to Config.Paths.CsvFile.
+
+.PARAMETER Tag
+    Optional batch tag to filter VMs from the CSV.
+
+.PARAMETER LogFile
+    Path to the log file. Auto-generated if not provided.
+
+.PARAMETER IntegrationPollIntervalSeconds
+    Interval between integration services status polls. Default: 30.
+
+.PARAMETER IntegrationMaxIterations
+    Maximum iterations for integration services polling. Default: 10.
+
+.PARAMETER WinRmRetryDelaySeconds
+    Delay between WinRM retries in seconds. Default: 15.
+
+.PARAMETER WinRmMaxAttempts
+    Maximum WinRM connection attempts. Default: 20.
+
+.EXAMPLE
+    .\step-XX-StartVM.ps1 -Tag HypMig-lot-118
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+ with VirtualMachineManager module.
+#>
+
+param (
     [string]$ConfigFile,
     [string]$CsvFile,
     [string]$Tag,

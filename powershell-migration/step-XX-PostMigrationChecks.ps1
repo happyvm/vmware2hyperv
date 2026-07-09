@@ -1,4 +1,42 @@
-﻿param (
+﻿<#
+.SYNOPSIS
+    Run post-migration validation checks on migrated VMs.
+
+.DESCRIPTION
+    Validates that migrated VMs are reachable, have the expected IP addresses, and
+    their services are operational. Compares VM inventory from SCVMM against the
+    batch CSV and the extracted IP file from step0.
+
+.PARAMETER ConfigFile
+    Optional path to the configuration file. Defaults to config.psd1.
+
+.PARAMETER CsvFile
+    Path to the batch CSV file. Defaults to Config.Paths.CsvFile.
+
+.PARAMETER ExtractIpCsvFile
+    Path to the extracted IP CSV from step0. Defaults to Config.Paths.ExtractIpCsv.
+
+.PARAMETER Tag
+    Optional batch tag to filter VMs from the CSV.
+
+.PARAMETER PollIntervalSeconds
+    Interval between check iterations in seconds. Default: 60.
+
+.PARAMETER MaxIterations
+    Maximum check iterations (0 = unlimited). Default: 0.
+
+.PARAMETER LogFile
+    Path to the log file. Auto-generated if not provided.
+
+.EXAMPLE
+    .\step-XX-PostMigrationChecks.ps1 -Tag HypMig-lot-118
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+ with VirtualMachineManager module.
+#>
+
+param (
     [string]$ConfigFile,
     [string]$CsvFile,
     [string]$ExtractIpCsvFile,

@@ -1,4 +1,54 @@
-﻿# run-migration.ps1 — VMware → Hyper-V migration orchestrator
+﻿<#
+.SYNOPSIS
+    VMware to Hyper-V migration orchestrator.
+
+.DESCRIPTION
+    Orchestrates the full 3-step migration pipeline: (1) tag VMware VMs and create
+    Veeam backup jobs, (2) shut down VMs and trigger Veeam backups, (3) run Instant
+    Recovery and post-migration configuration. Supports resumption from any step,
+    single-VM incident recovery, and automation-friendly non-interactive mode.
+
+.PARAMETER Tag
+    Batch tag to migrate (e.g. HypMig-lot-118). Mandatory.
+
+.PARAMETER StartFrom
+    Step to start from: step1, step2, or step3. Default: step1.
+
+.PARAMETER RecipientGroup
+    Recipient group for the pre-migration email notification. Default: infogerant.
+
+.PARAMETER ConfigFile
+    Optional path to a PSD1 configuration file override.
+
+.PARAMETER ForceNetworkConfigOnly
+    Re-run only the network/OS/post-configuration part of step3.
+
+.PARAMETER Step3VmName
+    Restrict step3 execution to a single VM (incident recovery mode).
+
+.PARAMETER Step3RecoveryMode
+    Incident recovery mode: Standard, FullStep3 (re-run complete step3), or
+    CommitAndNetwork (re-run instant recovery commit + network/post-config).
+    Default: Standard.
+
+.PARAMETER NonInteractive
+    Disable all interactive prompts for automation-friendly execution.
+
+.PARAMETER SkipManualValidation
+    Skip the manual validation pause between step2 and step3.
+
+.EXAMPLE
+    .\run-migration.ps1 -Tag HypMig-lot-118
+
+.EXAMPLE
+    .\run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step3 -NonInteractive
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+ with VMware.PowerCLI and Veeam.Backup.PowerShell modules.
+#>
+
+# run-migration.ps1 — VMware → Hyper-V migration orchestrator
 #
 # Usage:
 #   .\run-migration.ps1 -Tag HypMig-lot-118

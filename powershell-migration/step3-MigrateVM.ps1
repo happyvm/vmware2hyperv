@@ -1,4 +1,82 @@
-﻿param (
+﻿<#
+.SYNOPSIS
+    Execute Instant Recovery, network configuration, and post-migration setup for a single VM.
+
+.DESCRIPTION
+    The core step3 migration script invoked per-VM (directly or via worker-step3.ps1).
+    Starts the Veeam Instant Recovery mount, finalizes it (commit), configures the
+    Hyper-V VM networking (VLAN, IP), applies OS-level post-migration changes, and
+    cleans up the Veeam mount session.
+
+.PARAMETER BackupJobName
+    Name of the Veeam backup job. Mandatory.
+
+.PARAMETER VMName
+    Target VM name. Mandatory.
+
+.PARAMETER VlanId
+    VLAN ID for the restored VM. Mandatory.
+
+.PARAMETER AdapterVlanMapJson
+    JSON object mapping adapter names to VLAN IDs for multi-NIC VMs.
+
+.PARAMETER OperatingSystem
+    Guest OS identifier (e.g. Windows, Linux) for OS-specific configuration.
+
+.PARAMETER Remark
+    Additional notes from the CSV for operational context.
+
+.PARAMETER SCVMMServer
+    SCVMM server name. Defaults to Config.SCVMM.Server.
+
+.PARAMETER HyperVHost
+    Primary Hyper-V host. Auto-resolved from migration target if not provided.
+
+.PARAMETER HyperVHost2
+    Secondary Hyper-V host for host affinity configuration.
+
+.PARAMETER HyperVCluster
+    Hyper-V cluster name. Auto-resolved from migration target if not provided.
+
+.PARAMETER ClusterStorage
+    Cluster shared volume path. Auto-resolved from migration target if not provided.
+
+.PARAMETER VmwareCluster
+    Source VMware cluster name for migration target resolution.
+
+.PARAMETER BackupTag
+    Veeam backup tag for restore point selection. Defaults to Config.Tags.BackupTag.
+
+.PARAMETER WaitingTimeoutSeconds
+    Maximum wait time for mount operations. Default: 1800.
+
+.PARAMETER WaitingPollIntervalSeconds
+    Poll interval for mount operations. Default: 15.
+
+.PARAMETER ForceNetworkConfigOnly
+    Skip Instant Recovery and run only network/OS post-configuration.
+
+.PARAMETER SkipInstantRecoveryStart
+    Skip starting the Instant Recovery mount.
+
+.PARAMETER SkipInstantRecoveryFinalization
+    Skip finalizing (committing) the Instant Recovery mount.
+
+.PARAMETER SkipNetworkAndPostConfig
+    Skip network configuration and OS post-migration steps.
+
+.PARAMETER LogFile
+    Path to the log file. Auto-generated if not provided.
+
+.EXAMPLE
+    .\step3-MigrateVM.ps1 -BackupJobName Backup-HypMig-lot-118 -VMName SRV-WEB01 -VlanId 100 -HyperVHost hv01 -ClusterStorage C:\ClusterStorage\Volume1
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+ with Veeam.Backup.PowerShell and VirtualMachineManager modules.
+#>
+
+param (
     [Parameter(Mandatory = $true)]
     [string]$BackupJobName,
 

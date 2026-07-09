@@ -1,5 +1,39 @@
-﻿param (
-    # Name of the batch/tag to migrate (e.g. HypMig-lot-118) — required
+﻿<#
+.SYNOPSIS
+    Shut down VMware VMs and trigger Veeam backups for a migration batch.
+
+.DESCRIPTION
+    Gracefully shuts down (or powers off) every VM listed in the batch CSV for the
+    given tag, sends a pre-migration email notification, then starts the corresponding
+    Veeam backup job and waits for it to complete before proceeding to step3.
+
+.PARAMETER Tag
+    Batch tag to migrate (e.g. HypMig-lot-118). Mandatory.
+
+.PARAMETER VCenterServer
+    vCenter server name or IP. Defaults to Config.VCenter.Server.
+
+.PARAMETER CsvFile
+    Path to the batch CSV file. Defaults to Config.Paths.CsvFile.
+
+.PARAMETER PreMigrationMailScript
+    Path to the pre-migration email script. Defaults to stepx-premigration_mail.ps1.
+
+.PARAMETER RecipientGroup
+    Recipient group for the email notification. Default: infogerant.
+
+.PARAMETER LogFile
+    Path to the log file. Auto-generated if not provided.
+
+.EXAMPLE
+    .\step2-ShutdownVM_StartBackupVeeam.ps1 -Tag HypMig-lot-118
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+ with VMware.PowerCLI and Veeam.Backup.PowerShell modules.
+#>
+
+param (
     [Parameter(Mandatory = $true)]
     [string]$Tag,
 

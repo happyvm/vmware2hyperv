@@ -1,4 +1,40 @@
-﻿# step3-StartInstantRecovery.ps1 — Bulk Veeam Instant Recovery start with unified progress monitoring
+﻿<#
+.SYNOPSIS
+    Bulk Veeam Instant Recovery start with unified progress monitoring.
+
+.DESCRIPTION
+    Starts the Instant Recovery of every VM listed in the tasks file. Launches mounts
+    asynchronously when the Veeam module supports -RunAsync, or synchronously otherwise.
+    Follows every mount session from a single console until each reaches the
+    'WaitingForUserAction' state expected by the step3 workers.
+
+.PARAMETER BackupJobName
+    Name of the Veeam backup job. Mandatory.
+
+.PARAMETER TasksFile
+    Path to the JSON tasks file containing VM entries. Mandatory.
+
+.PARAMETER StartDelaySeconds
+    Pause between two Start-VBRHvInstantRecovery calls to smooth Veeam load. Default: 2.
+
+.PARAMETER WaitingTimeoutSeconds
+    Maximum time to wait for mounts to reach WaitingForUserAction state. Default: 1800.
+
+.PARAMETER WaitingPollIntervalSeconds
+    Interval between mount state polls. Default: 15.
+
+.PARAMETER LogFile
+    Path to the log file. Auto-generated if not provided.
+
+.EXAMPLE
+    .\step3-StartInstantRecovery.ps1 -BackupJobName Backup-HypMig-lot-118 -TasksFile D:\Scripts\Logs\ir-tasks.json
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+ with Veeam.Backup.PowerShell module.
+#>
+
+# step3-StartInstantRecovery.ps1 — Bulk Veeam Instant Recovery start with unified progress monitoring
 #
 # Starts the Instant Recovery of every VM listed in the tasks file (asynchronously when the
 # Veeam module supports -RunAsync, otherwise one synchronous start after another), then follows

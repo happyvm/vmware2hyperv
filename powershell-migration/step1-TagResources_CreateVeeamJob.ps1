@@ -1,3 +1,41 @@
+<#
+.SYNOPSIS
+    Tag VMware resources and create Veeam backup jobs for a migration batch.
+
+.DESCRIPTION
+    Reads the batch CSV, applies VMware tags to the listed VMs under a configurable
+    tag category, and creates or updates the corresponding Veeam backup job(s) for
+    the batch. Handles tag cleanup of previous assignments before applying the new set.
+
+.PARAMETER VCenterServer
+    vCenter server name or IP. Defaults to Config.VCenter.Server.
+
+.PARAMETER CsvFile
+    Path to the batch CSV file. Defaults to Config.Paths.CsvFile.
+
+.PARAMETER TagCategory
+    VMware tag category name. Defaults to Config.Tags.Category.
+
+.PARAMETER BackupRepoName
+    Veeam backup repository name. Defaults to Config.Veeam.BackupRepo.
+
+.PARAMETER BackupProxyName
+    Veeam backup proxy name. Defaults to Config.Veeam.BackupProxy.
+
+.PARAMETER Tag
+    Optional batch tag for log file naming context.
+
+.PARAMETER LogFile
+    Path to the log file. Auto-generated if not provided.
+
+.EXAMPLE
+    .\step1-TagResources_CreateVeeamJob.ps1 -Tag HypMig-lot-118
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+ with VMware.PowerCLI and Veeam.Backup.PowerShell modules.
+#>
+
 param (
     [string]$VCenterServer,
     [string]$CsvFile,

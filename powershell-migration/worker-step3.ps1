@@ -1,3 +1,33 @@
+<#
+.SYNOPSIS
+    File-system queue worker that processes step3 migration tasks.
+
+.DESCRIPTION
+    Long-running worker that watches a file-system queue (pending/processing/done/failed
+    directories) for step3 migration task files. Picks up pending tasks, executes
+    step3-MigrateVM.ps1 for each, and moves them to done or failed based on the
+    outcome. Supports the worker-pool pattern for parallel VM migration.
+
+.PARAMETER QueueRoot
+    Root directory of the file-system queue. Mandatory.
+
+.PARAMETER WorkerName
+    Unique worker name for log file identification. Default: step3-worker-01.
+
+.PARAMETER PollIntervalSeconds
+    Interval between queue polls in seconds. Default: 3.
+
+.PARAMETER LogFile
+    Path to the log file. Auto-generated if not provided.
+
+.EXAMPLE
+    .\worker-step3.ps1 -QueueRoot D:\Scripts\Logs\step3-queue -WorkerName step3-worker-01
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+.
+#>
+
 param(
     [Parameter(Mandatory = $true)]
     [string]$QueueRoot,
