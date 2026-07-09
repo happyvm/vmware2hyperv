@@ -1,4 +1,47 @@
-﻿# lib.ps1 — Common functions for VMware → Hyper-V migration scripts
+﻿<#
+.SYNOPSIS
+    Shared function library for the VMware → Hyper-V migration toolkit.
+
+.DESCRIPTION
+    Central library imported by all migration scripts via dot-sourcing
+    (`. "$PSScriptRoot\lib.ps1"`). Provides 22 reusable functions covering:
+
+    - **Logging**: Write-MigrationLog (timestamped, multi-stream with file output)
+    - **Connections**: Connect-VCenter, Disconnect-VCenter, Import-RequiredModule
+    - **Module compatibility**: PowerShell 7 / Windows PowerShell fallback strategies
+      for modules that fail with .NET type-initializer errors in PS7
+      (VirtualMachineManager, Veeam.Backup.PowerShell, FailoverClusters)
+    - **OS mapping**: Normalize and map source OS labels to SCVMM operating systems
+    - **VLAN resolution**: Multi-layer VLAN ID discovery from VMware Distributed
+      Virtual Switches, standard port groups, and extension data
+    - **Migration targeting**: Resolve-MigrationTarget maps VMware clusters to
+      Hyper-V clusters via config.psd1 MigrationMappings.ClusterMappings
+    - **CSV helpers**: Read standard or CMDB-extract CSVs with auto-detection of
+      French/English column names and delimiter variants
+    - **VMware Tools**: Get-VMUptime, Get-OsGeneration, guest IP extraction
+    - **Email**: Send-HtmlMail via SMTP, ConvertTo-HtmlEncoded for safe HTML
+    - **Validation**: Assert-PathPresent, file-system helpers
+
+    All functions use Write-MigrationLog for structured logging and support the
+    -LogFile parameter for persistent audit trails.
+
+.EXAMPLE
+    # Dot-source from any migration script:
+    . "$PSScriptRoot\lib.ps1"
+
+    # Use individual functions:
+    Write-MigrationLog "Step completed." -Level SUCCESS -LogFile $LogFile
+    Connect-VCenter -Server "vcenter.domain.local" -LogFile $LogFile
+    $os = ConvertTo-NormalizedOperatingSystemName "Windows Server 2022 Datacenter"
+
+.NOTES
+    Part of the vmware2hyperv migration toolkit.
+    Requires PowerShell 7+ with VMware.PowerCLI, Veeam.Backup.PowerShell,
+    and VirtualMachineManager modules (imported on demand by individual functions).
+    All functions in this library are idempotent where possible.
+#>
+
+# lib.ps1 — Common functions for VMware → Hyper-V migration scripts
 # Load: . "$PSScriptRoot\lib.ps1"
 
 # ---------------------------------------------------------------------------
