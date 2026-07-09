@@ -118,10 +118,17 @@ if ($startIndex -le 1) {
     }
 
     Write-Information "" -InformationAction Continue
-    Write-Warning ">>> PAUSE before step3 (Instant Recovery)"
-    Write-Warning "    Check in the Veeam console that job 'Backup-$Tag' is completed."
-    Read-Host "    Press Enter to continue"
-    Write-MigrationLog "Manual validation confirmed — launching step3." -LogFile $LogFile
+    if ($NonInteractive -or $SkipManualValidation) {
+        Write-Warning ">>> NON-INTERACTIVE MODE: Skipping manual validation before step3 (Instant Recovery)"
+        Write-Warning "    Check in the Veeam console that job 'Backup-$Tag' is completed."
+        Write-MigrationLog "NonInteractive/SkipManualValidation — skipping manual validation, launching step3." -LogFile $LogFile
+    }
+    else {
+        Write-Warning ">>> PAUSE before step3 (Instant Recovery)"
+        Write-Warning "    Check in the Veeam console that job 'Backup-$Tag' is completed."
+        Read-Host "    Press Enter to continue"
+        Write-MigrationLog "Manual validation confirmed — launching step3." -LogFile $LogFile
+    }
 }
 
 # ── Retrieving VMware VLANs (single connection, before worker dispatch) ──
