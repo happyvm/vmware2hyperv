@@ -142,13 +142,14 @@ Groupes de destinataires pour les emails. Utilisé par `step2-ShutdownVM_StartBa
 Paths = @{
     CsvFile        = "D:\Scripts\lotissement.csv"
     CmdbExtractCsv = "D:\Scripts\cmdb_extract.csv"  # Optionnel
-    ExtractIpCsv   = "D:\Scripts\extract-ip.csv"
+    ExtractIpCsv   = "D:\Scripts\extract-ip.csv"    # Optionnel
     LogDir         = "D:\Scripts\Logs"
 }
 ```
 
 - `CsvFile` : CSV batch avec `VMName` et `Tag`, plus optionnel `OperatingSystem`, `ExpectedIP`, `IP`, `IPAddress`
 - `CmdbExtractCsv` : extrait CMDB optionnel pour enrichir les VMs avec `OperatingSystem`
+- `ExtractIpCsv` : CSV optionnel d'IP attendues (colonnes `VMName`/`Name` + `IP`/`IPAddress`/`ExpectedIP`), utilisé par `step4-StartVM.ps1` pour valider l'IP invitée après migration. Si absent, ce check est simplement ignoré.
 
 ### `Orchestrator`
 
@@ -197,11 +198,11 @@ Chemins des ISO Integration Services par famille d'OS.
 ```powershell
 StartVm = @{
     IntegrationPollIntervalSeconds = 30
-    IntegrationMaxIterations       = 10
+    IntegrationMaxIterations       = 0   # 0 = illimité
 }
 ```
 
-Réglages pour `step4-StartVM.ps1`.
+Réglages pour `step4-StartVM.ps1`. `IntegrationMaxIterations = 0` fait boucler le script jusqu'à ce que toutes les VMs soient conformes (réseau, IP, Integration Services, HA, tag backup) — interrompre avec Ctrl+C pour arrêter d'attendre sans perdre les VMs déjà démarrées. Une valeur positive borne le nombre d'itérations.
 
 ## Voir aussi
 

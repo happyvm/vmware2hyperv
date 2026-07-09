@@ -19,7 +19,7 @@ Orchestrateur de la pipeline de migration VMware → Hyper-V en 4 étapes.
 1. **Step 1** : Tag des ressources VMware et création du job Veeam
 2. **Step 2** : Arrêt des VMs sources, déclenchement du backup Veeam, envoi de l'email pré-migration
 3. **Step 3** : Instant Recovery bulk + workers parallèles pour commit/réseau/OS
-4. **Step 4** : Démarrage des VMs migrées + vérification des Integration Services ([step4-StartVM.ps1](step4-StartVM.md))
+4. **Step 4** : Démarrage des VMs migrées + validation de conformité (réseau, IP, Integration Services, HA, tag backup) — [step4-StartVM.ps1](step4-StartVM.md)
 
 L'orchestrateur supporte la reprise depuis n'importe quelle étape, le mode incident recovery mono-VM, et l'exécution non-interactive pour l'automatisation.
 
@@ -156,5 +156,5 @@ Pour chaque VM, l'orchestrateur :
 - [worker-step3.ps1](worker-step3.md) — Détail du worker
 - [step3-StartInstantRecovery.ps1](step3-StartInstantRecovery.md) — Bulk IR
 - [step3-MigrateVM.ps1](step3-MigrateVM.md) — Migration par VM
-- [step4-StartVM.ps1](step4-StartVM.md) — Démarrage VMs + Integration Services (step4)
+- [step4-StartVM.ps1](step4-StartVM.md) — Démarrage VMs + validation post-migration (step4)
 - [ADR-001](adr/001-architecture-decisions.md) — Décisions d'architecture

@@ -57,12 +57,11 @@ flowchart TD
 
     PAUSE{{Manual validation pause\n-SkipManualValidation to bypass}}
 
-    subgraph STEP4["Step 4 — Start"]
-        STARTVM[step4-StartVM.ps1\nStart VMs, Integration Services]
+    subgraph STEP4["Step 4 — Start & validate"]
+        STARTVM[step4-StartVM.ps1\nStart VMs, poll until compliant:\nnetwork, IP, Integration Services, HA, backup tag]
     end
 
     subgraph POST["Post-migration (manual, not orchestrated)"]
-        CHECKS[step5-PostMigrationChecks.ps1\nSCVMM compliance loop]
         CLEANUP[step6-CleanupVmware.ps1\nDelete source VMs]
     end
 
@@ -79,8 +78,7 @@ flowchart TD
     WORKER --> MIGRATE
     MIGRATE --> PAUSE
     PAUSE --> STARTVM
-    STARTVM --> CHECKS
-    CHECKS --> CLEANUP
+    STARTVM --> CLEANUP
 ```
 
 ### Architecture: step3 worker pool
@@ -260,43 +258,25 @@ pwsh ./powershell-migration/step3-StartInstantRecovery.ps1 -BackupJobName Backup
 The delay between two starts is tunable with `-StartDelaySeconds` (or `Orchestrator.InstantRecoveryStartDelaySec` in config) to smooth the load on Veeam and the mount hosts. The script exits non-zero and lists the affected VMs if any mount fails or times out.
 
 
-### Start migrated VMs + Integration Services / VMware Tools actions
+### Start migrated VMs + validate post-migration compliance
 
 `run-migration.ps1` runs this automatically as step4, right after the manual validation pause that follows step3. Run it standalone (or via `run-migration.ps1 -Tag HypMig-lot-118 -StartFrom step4`) to replay just this step. `step4-StartVM.ps1` :
 
-- start each VM from `lotissement.csv` (optionally filtered by `-Tag`);
-- list VM state + SCVMM configured operating system;
-- mount an Integration Services ISO for Windows Server 2003/2008 (paths from `IntegrationServices.IsoByOsFamily` in config);
-- try WinRM HTTPS then HTTP on Windows Server 2012+ VMs to upload and execute a VMware Tools removal script;
-- loop on Integration Services health checks (SCVMM signals) until ready or timeout.
+- starts each VM from `lotissement.csv` (optionally filtered by `-Tag`);
+- tries WinRM HTTPS then HTTP on Windows Server 2012+ VMs to upload and execute a VMware Tools removal script (OS below 2012, or WinRM unavailable, is reported as a manual action);
+- polls SCVMM until every VM is running, NIC connected, guest IPv4 matches the expected IP (`Paths.ExtractIpCsv`, if present), Integration Services are healthy, High Availability is enabled, and the post-migration backup tag (`Tags.BackupTag`) is present.
+
+By default the compliance loop is unlimited (`StartVm.IntegrationMaxIterations = 0`) — it keeps polling until every VM is compliant. Interrupt with Ctrl+C to stop waiting without losing the VMs already started, or pass `-IntegrationMaxIterations` to cap it (the script then exits non-zero if VMs are still non-compliant).
 
 ```powershell
 pwsh ./powershell-migration/step4-StartVM.ps1 -Tag HypMig-lot-118
 ```
 
-If OS is below 2012, or WinRM is unavailable for 2012+, the script reports that integration/manual cleanup actions must be done by hand.
-You can tune integration checks with `StartVm.IntegrationPollIntervalSeconds` and `StartVm.IntegrationMaxIterations` in config (or via script parameters).
-
-### Post-migration companion checks (SCVMM)
-
-Run this script once VMs are started (or in parallel with `run-migration.ps1`) to loop until all VMs in the CSV are compliant on SCVMM:
-
-- VM exists and is running
-- NIC is connected
-- Integration Services appear healthy
-- High Availability is enabled in SCVMM
-- SCVMM backup tag is present (`Tags.BackupTag`)
-- guest IPv4 still matches the expected IP from CSV (`ExpectedIP` / `IP` / `IPAddress` columns)
-
-```powershell
-pwsh ./powershell-migration/step5-PostMigrationChecks.ps1 -Tag HypMig-lot-118
-```
-
 Useful options:
 
 ```powershell
-pwsh ./powershell-migration/step5-PostMigrationChecks.ps1 -Tag HypMig-lot-118 -PollIntervalSeconds 120 -MaxIterations 30
-pwsh ./powershell-migration/step5-PostMigrationChecks.ps1 -CsvFile D:\Scripts\lotissement.csv
+pwsh ./powershell-migration/step4-StartVM.ps1 -Tag HypMig-lot-118 -IntegrationMaxIterations 30
+pwsh ./powershell-migration/step4-StartVM.ps1 -CsvFile D:\Scripts\lotissement.csv -ExtractIpCsvFile D:\Scripts\extract-ip.csv
 ```
 
 `-MaxIterations 0` means infinite loop until every VM is compliant.

@@ -35,17 +35,16 @@ Documentation détaillée de chaque script du toolkit de migration VMware vers H
 | [step3-StartInstantRecovery.ps1](step3-StartInstantRecovery.md) | Bulk Instant Recovery + monitoring unifié |
 | [step3-MigrateVM.ps1](step3-MigrateVM.md) | Migration par VM : commit, réseau, OS |
 
-## Étape 4 — Démarrage
+## Étape 4 — Démarrage et validation
 
 | Script | Rôle |
 |--------|------|
-| [step4-StartVM.ps1](step4-StartVM.md) | Démarrage VMs + Integration Services |
+| [step4-StartVM.ps1](step4-StartVM.md) | Démarrage VMs + validation post-migration (réseau, IP, Integration Services, HA, tag backup) |
 
 ## Post-migration (hors pipeline orchestrée)
 
 | Script | Rôle |
 |--------|------|
-| [step5-PostMigrationChecks.ps1](step5-PostMigrationChecks.md) | Vérifications SCVMM post-migration |
 | [step6-CleanupVmware.ps1](step6-CleanupVmware.md) | Suppression des VMs sources VMware |
 
 ## Librairie partagée
