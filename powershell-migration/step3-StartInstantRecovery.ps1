@@ -188,21 +188,21 @@ while ($true) {
         break
     }
 
+    $step3VeeamRecoveryPath = "$PSScriptRoot\step3\Step3.VeeamRecovery.ps1"
+
     $snapshots = @(Invoke-VeeamCommand -ScriptBlock {
-        param($VmNames)
+        param($VmNames, $VeeamRecoveryPath)
+
+        . $VeeamRecoveryPath
 
         $irSessions = @(Get-VBRInstantRecovery)
         $restoreSessions = @(Get-VBRRestoreSession)
 
         foreach ($vmName in @($VmNames)) {
             $irSession = $irSessions | Where-Object { $_.VMName -eq $vmName } | Select-Object -First 1
-            # Exact names plus a bounded pattern: a plain "$vmName*" wildcard would also
-            # match another batch VM whose name shares the prefix (WEB1 vs WEB10).
-            $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($vmName)
-            $restoreSession = $restoreSessions |
-                Where-Object { $_.Name -eq $vmName -or $_.Name -eq "$vmName-migrationhyp" -or $_.Name -match $vmSessionPattern } |
-                Sort-Object -Property CreationTime -Descending |
-                Select-Object -First 1
+            # Use the shared bounded-name helper to avoid matching another VM whose
+            # name shares a prefix (WEB1 vs WEB10).
+            $restoreSession = Find-VmRestoreSession -VmName $vmName -RestoreSessions $restoreSessions
 
             $waitingDetected = $false
             $detectionSource = $null
@@ -248,7 +248,7 @@ while ($true) {
                 DetectionSource = $detectionSource
             }
         }
-    } -ArgumentList @(, [string[]]$pendingNames))
+    } -ArgumentList @(, [string[]]$pendingNames, $step3VeeamRecoveryPath))
 
     foreach ($snapshot in $snapshots) {
         $tracked = $vmStatuses[[string]$snapshot.VMName]
