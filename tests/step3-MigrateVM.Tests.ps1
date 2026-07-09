@@ -1,71 +1,31 @@
 Set-StrictMode -Version Latest
 
-BeforeAll {
-    $repoRoot = Split-Path -Parent $PSScriptRoot
+# Pester 6 requires commands to exist before mocking.
+# Define stub functions in script scope inside BeforeAll, then mock them.
 
-    # ── Inline definitions of functions under test, extracted from the
-    # source scripts so we can test them without triggering the top-level
-    # parameter blocks, config imports, and side effects. ──────────────────
-
-    # Resolve-AdapterVlanId (from run-migration.ps1)
-    function Resolve-AdapterVlanId {
-        param(
-            [Parameter(Mandatory = $true)]
-            $Adapter,
-
-            [Parameter(Mandatory = $true)]
-            [hashtable]$DistributedPortGroupCache,
-
-            [Parameter(Mandatory = $true)]
-            [hashtable]$StandardPortGroupCache
-        )
-
-        $networkName = [string]$Adapter.NetworkName
-        if ([string]::IsNullOrWhiteSpace($networkName)) {
-            return "Not connected to a network"
-        }
-
-        if (-not $DistributedPortGroupCache.ContainsKey($networkName)) {
-            $DistributedPortGroupCache[$networkName] = @(Get-VDPortgroup -Name $networkName -ErrorAction SilentlyContinue)
-        }
-        $distributedPortGroups = @($DistributedPortGroupCache[$networkName])
-        foreach ($distributedPortGroup in $distributedPortGroups) {
-            try {
-                $vlanSpec = $distributedPortGroup.ExtensionData.Config.DefaultPortConfig.Vlan
-                if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
-                    $rawId = [int]$vlanSpec.VlanId
-                    if ($rawId -ge 1 -and $rawId -le 4094) {
-                        return [string]$rawId
-                    }
-                }
-            } catch {
-                Write-Verbose "DVS VLAN spec unavailable for port group '$networkName': $($_.Exception.Message)"
+Describe 'Resolve-AdapterVlanId' {
+    BeforeAll {
+        # Define the function under test
+        function script:Resolve-AdapterVlanId {
+            param(
+                [Parameter(Mandatory = $true)]
+                $Adapter,
+                [Parameter(Mandatory = $true)]
+                [hashtable]$DistributedPortGroupCache,
+                [Parameter(Mandatory = $true)]
+                [hashtable]$StandardPortGroupCache
+            )
+            $networkName = [string]$Adapter.NetworkName
+            if ([string]::IsNullOrWhiteSpace($networkName)) {
+                return "Not connected to a network"
             }
-
-            if ([string]$distributedPortGroup.VlanConfiguration -match '\d+') {
-                return [string]$matches[0]
+            if (-not $DistributedPortGroupCache.ContainsKey($networkName)) {
+                $DistributedPortGroupCache[$networkName] = @(Get-VDPortgroup -Name $networkName -ErrorAction SilentlyContinue)
             }
-        }
-
-        if (-not $StandardPortGroupCache.ContainsKey($networkName)) {
-            $StandardPortGroupCache[$networkName] = @(Get-VirtualPortGroup -Name $networkName -ErrorAction SilentlyContinue)
-        }
-        $standardPortGroups = @($StandardPortGroupCache[$networkName])
-        foreach ($standardPortGroup in $standardPortGroups) {
-            if ([string]$standardPortGroup.VLanId -match '^\d+$') {
-                return [string]$standardPortGroup.VLanId
-            }
-        }
-
-        $backing = $null
-        try { $backing = $Adapter.ExtensionData.Backing } catch {
-            Write-Verbose "Adapter backing data unavailable: $($_.Exception.Message)"
-        }
-        if ($backing -and $backing.PSObject.Properties['Port'] -and $backing.Port -and $backing.Port.PortgroupKey) {
-            $portGroupView = Get-View -Id $backing.Port.PortgroupKey -ErrorAction SilentlyContinue
-            if ($portGroupView -and $portGroupView.Config) {
+            $distributedPortGroups = @($DistributedPortGroupCache[$networkName])
+            foreach ($distributedPortGroup in $distributedPortGroups) {
                 try {
-                    $vlanSpec = $portGroupView.Config.DefaultPortConfig.Vlan
+                    $vlanSpec = $distributedPortGroup.ExtensionData.Config.DefaultPortConfig.Vlan
                     if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
                         $rawId = [int]$vlanSpec.VlanId
                         if ($rawId -ge 1 -and $rawId -le 4094) {
@@ -73,75 +33,56 @@ BeforeAll {
                         }
                     }
                 } catch {
-                    Write-Verbose "Port group view VLAN spec unavailable: $($_.Exception.Message)"
+                    Write-Verbose "DVS VLAN spec unavailable: $($_.Exception.Message)"
                 }
-                if ([string]$portGroupView.Config.DefaultPortConfig.Vlan -match '\d+') {
+                if ([string]$distributedPortGroup.VlanConfiguration -match '\d+') {
                     return [string]$matches[0]
                 }
             }
-        }
-
-        if ($networkName -match '_(\d{1,4})$') {
-            return $matches[1]
-        }
-
-        return "PortGroup not found"
-    }
-
-    # Get-VMwareClusterNameForVm (from run-migration.ps1)
-    function Get-VMwareClusterNameForVm {
-        param(
-            [Parameter(Mandatory = $true)]
-            $VMObject
-        )
-
-        try {
-            $cluster = VMware.VimAutomation.Core\Get-Cluster -VM $VMObject -ErrorAction Stop | Select-Object -First 1
-            if ($cluster -and -not [string]::IsNullOrWhiteSpace([string]$cluster.Name)) {
-                return [string]$cluster.Name
+            if (-not $StandardPortGroupCache.ContainsKey($networkName)) {
+                $StandardPortGroupCache[$networkName] = @(Get-VirtualPortGroup -Name $networkName -ErrorAction SilentlyContinue)
             }
-        } catch {
-            Write-Verbose "Get-Cluster lookup failed for VM '$($VMObject.Name)'; falling back to parent traversal: $($_.Exception.Message)"
-        }
-
-        $parent = $VMObject.VMHost.Parent
-        while ($parent) {
-            if ($parent.PSObject.Properties['Name'] -and -not [string]::IsNullOrWhiteSpace([string]$parent.Name)) {
-                if ([string]$parent.GetType().Name -match 'Cluster|ClusterImpl') {
-                    return [string]$parent.Name
+            $standardPortGroups = @($StandardPortGroupCache[$networkName])
+            foreach ($standardPortGroup in $standardPortGroups) {
+                if ([string]$standardPortGroup.VLanId -match '^\d+$') {
+                    return [string]$standardPortGroup.VLanId
                 }
             }
-
-            if ($parent.PSObject.Properties['Parent']) {
-                $parent = $parent.Parent
-            } else {
-                break
+            $backing = $null
+            try { $backing = $Adapter.ExtensionData.Backing } catch {
+                Write-Verbose "Adapter backing data unavailable: $($_.Exception.Message)"
             }
+            if ($backing -and $backing.PSObject.Properties['Port'] -and $backing.Port -and $backing.Port.PortgroupKey) {
+                $portGroupView = Get-View -Id $backing.Port.PortgroupKey -ErrorAction SilentlyContinue
+                if ($portGroupView -and $portGroupView.Config) {
+                    try {
+                        $vlanSpec = $portGroupView.Config.DefaultPortConfig.Vlan
+                        if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
+                            $rawId = [int]$vlanSpec.VlanId
+                            if ($rawId -ge 1 -and $rawId -le 4094) {
+                                return [string]$rawId
+                            }
+                        }
+                    } catch {
+                        Write-Verbose "Port group view VLAN spec unavailable: $($_.Exception.Message)"
+                    }
+                    if ([string]$portGroupView.Config.DefaultPortConfig.Vlan -match '\d+') {
+                        return [string]$matches[0]
+                    }
+                }
+            }
+            if ($networkName -match '_(\d{1,4})$') {
+                return $matches[1]
+            }
+            return "PortGroup not found"
         }
 
-        return $null
+        # Stub functions so Mock can find them
+        function script:Get-VDPortgroup { }
+        function script:Get-VirtualPortGroup { }
+        function script:Get-View { }
     }
 
-    # ConvertTo-NormalizedHostName (from step3-MigrateVM.ps1)
-    function ConvertTo-NormalizedHostName {
-        param(
-            [AllowNull()]
-            [string]$Name
-        )
-
-        if ([string]::IsNullOrWhiteSpace($Name)) {
-            return $null
-        }
-
-        return $Name.Trim().ToLowerInvariant().Split('.')[0]
-    }
-}
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Resolve-AdapterVlanId
-# ═════════════════════════════════════════════════════════════════════════════
-
-Describe 'Resolve-AdapterVlanId' {
     BeforeEach {
         $distributedCache = @{}
         $standardCache = @{}
@@ -149,152 +90,126 @@ Describe 'Resolve-AdapterVlanId' {
 
     It 'returns "Not connected to a network" when adapter has no network name' {
         $adapter = [PSCustomObject]@{ NetworkName = ''; MacAddress = '00:50:56:aa:bb:cc' }
-
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $distributedCache `
             -StandardPortGroupCache $standardCache
-
         $result | Should -Be 'Not connected to a network'
     }
 
     It 'returns VLAN ID from DVS VlanId property when valid (1-4094)' {
         $adapter = [PSCustomObject]@{ NetworkName = 'dvPG-LAN_1816'; MacAddress = '00:50:56:aa:bb:cc' }
-
         $fakeVlanSpec = [PSCustomObject]@{ VlanId = 1816 }
         $fakeDvsPortGroup = [PSCustomObject]@{
-            Name            = 'dvPG-LAN_1816'
+            Name = 'dvPG-LAN_1816'
             VlanConfiguration = 'VLAN 1816'
-            ExtensionData   = [PSCustomObject]@{
+            ExtensionData = [PSCustomObject]@{
                 Config = [PSCustomObject]@{
                     DefaultPortConfig = [PSCustomObject]@{ Vlan = $fakeVlanSpec }
                 }
             }
         }
-
-        Mock -CommandName 'Get-VDPortgroup' -MockWith { @($fakeDvsPortGroup) }
-
+        Mock Get-VDPortgroup { @($fakeDvsPortGroup) }
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $distributedCache `
             -StandardPortGroupCache $standardCache
-
         $result | Should -Be '1816'
     }
 
     It 'falls back to VlanConfiguration regex when VlanId property is absent' {
         $adapter = [PSCustomObject]@{ NetworkName = 'dvPG-Prod'; MacAddress = '00:50:56:aa:bb:cc' }
-
-        $fakeVlanSpec = [PSCustomObject]@{}  # no VlanId
+        $fakeVlanSpec = [PSCustomObject]@{}
         $fakeDvsPortGroup = [PSCustomObject]@{
-            Name            = 'dvPG-Prod'
+            Name = 'dvPG-Prod'
             VlanConfiguration = 'VLAN 42'
-            ExtensionData   = [PSCustomObject]@{
+            ExtensionData = [PSCustomObject]@{
                 Config = [PSCustomObject]@{
                     DefaultPortConfig = [PSCustomObject]@{ Vlan = $fakeVlanSpec }
                 }
             }
         }
-
-        Mock -CommandName 'Get-VDPortgroup' -MockWith { @($fakeDvsPortGroup) }
-
+        Mock Get-VDPortgroup { @($fakeDvsPortGroup) }
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $distributedCache `
             -StandardPortGroupCache $standardCache
-
         $result | Should -Be '42'
     }
 
     It 'falls back to standard port group VLanId when DVS lookup fails' {
         $adapter = [PSCustomObject]@{ NetworkName = 'VM Network'; MacAddress = '00:50:56:aa:bb:cc' }
-
-        Mock -CommandName 'Get-VDPortgroup' -MockWith { @() }
+        Mock Get-VDPortgroup { @() }
         $fakeStandardPg = [PSCustomObject]@{ Name = 'VM Network'; VLanId = '100' }
-        Mock -CommandName 'Get-VirtualPortGroup' -MockWith { @($fakeStandardPg) }
-
+        Mock Get-VirtualPortGroup { @($fakeStandardPg) }
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $distributedCache `
             -StandardPortGroupCache $standardCache
-
         $result | Should -Be '100'
     }
 
     It 'resolves VLAN from port group name suffix (e.g. _1816)' {
         $adapter = [PSCustomObject]@{ NetworkName = 'dvPG-LAN_1816'; MacAddress = '00:50:56:aa:bb:cc' }
-
-        Mock -CommandName 'Get-VDPortgroup' -MockWith { @() }
-        Mock -CommandName 'Get-VirtualPortGroup' -MockWith { @() }
-
+        Mock Get-VDPortgroup { @() }
+        Mock Get-VirtualPortGroup { @() }
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $distributedCache `
             -StandardPortGroupCache $standardCache
-
         $result | Should -Be '1816'
     }
 
     It 'returns "PortGroup not found" when no resolution works' {
         $adapter = [PSCustomObject]@{ NetworkName = 'UnknownNetwork'; MacAddress = '00:50:56:aa:bb:cc' }
-
-        Mock -CommandName 'Get-VDPortgroup' -MockWith { @() }
-        Mock -CommandName 'Get-VirtualPortGroup' -MockWith { @() }
-
+        Mock Get-VDPortgroup { @() }
+        Mock Get-VirtualPortGroup { @() }
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $distributedCache `
             -StandardPortGroupCache $standardCache
-
         $result | Should -Be 'PortGroup not found'
     }
 
     It 'uses the distributed port group cache to avoid repeat VMware calls' {
         $adapter = [PSCustomObject]@{ NetworkName = 'CachedNetwork'; MacAddress = '00:50:56:aa:bb:cc' }
-
         $fakeDvsPg = [PSCustomObject]@{
-            Name            = 'CachedNetwork'
+            Name = 'CachedNetwork'
             VlanConfiguration = 'VLAN 55'
-            ExtensionData   = [PSCustomObject]@{
+            ExtensionData = [PSCustomObject]@{
                 Config = [PSCustomObject]@{
                     DefaultPortConfig = [PSCustomObject]@{ Vlan = [PSCustomObject]@{ VlanId = 55 } }
                 }
             }
         }
-
+        Mock Get-VDPortgroup { @($fakeDvsPg) }
         $cache = @{ 'CachedNetwork' = @($fakeDvsPg) }
-
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $cache `
             -StandardPortGroupCache $standardCache
-
         $result | Should -Be '55'
-        Should -Invoke 'Get-VDPortgroup' -Times 0
+        Should -Invoke Get-VDPortgroup -Times 0
     }
 
     It 'uses the standard port group cache to avoid repeat VMware calls' {
         $adapter = [PSCustomObject]@{ NetworkName = 'StdCached'; MacAddress = '00:50:56:aa:bb:cc' }
-
-        Mock -CommandName 'Get-VDPortgroup' -MockWith { @() }
+        Mock Get-VDPortgroup { @() }
+        Mock Get-VirtualPortGroup { @([PSCustomObject]@{ Name = 'StdCached'; VLanId = '200' }) }
         $cache = @{ 'StdCached' = @([PSCustomObject]@{ Name = 'StdCached'; VLanId = '200' }) }
-
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $distributedCache `
             -StandardPortGroupCache $cache
-
         $result | Should -Be '200'
-        Should -Invoke 'Get-VDPortgroup' -Times 0
-        Should -Invoke 'Get-VirtualPortGroup' -Times 0
+        Should -Invoke Get-VDPortgroup -Times 1
+        Should -Invoke Get-VirtualPortGroup -Times 0
     }
 
     It 'resolves VLAN via backing port group view when name-based lookups fail' {
         $adapter = [PSCustomObject]@{
             NetworkName = 'SomeNetwork'
-            MacAddress  = '00:50:56:aa:bb:cc'
+            MacAddress = '00:50:56:aa:bb:cc'
             ExtensionData = [PSCustomObject]@{
                 Backing = [PSCustomObject]@{
                     Port = [PSCustomObject]@{ PortgroupKey = 'dvportgroup-123' }
                 }
             }
         }
-
-        Mock -CommandName 'Get-VDPortgroup' -MockWith { @() }
-        Mock -CommandName 'Get-VirtualPortGroup' -MockWith { @() }
-
+        Mock Get-VDPortgroup { @() }
+        Mock Get-VirtualPortGroup { @() }
         $fakePortGroupView = [PSCustomObject]@{
             Config = [PSCustomObject]@{
                 DefaultPortConfig = [PSCustomObject]@{
@@ -302,66 +217,87 @@ Describe 'Resolve-AdapterVlanId' {
                 }
             }
         }
-        Mock -CommandName 'Get-View' -MockWith { $fakePortGroupView }
-
+        Mock Get-View { $fakePortGroupView }
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $distributedCache `
             -StandardPortGroupCache $standardCache
-
         $result | Should -Be '999'
     }
 
     It 'rejects VLAN 0 (untagged) from DVS VlanId' {
         $adapter = [PSCustomObject]@{ NetworkName = 'dvPG-Untagged'; MacAddress = '00:50:56:aa:bb:cc' }
-
         $fakeVlanSpec = [PSCustomObject]@{ VlanId = 0 }
         $fakeDvsPortGroup = [PSCustomObject]@{
-            Name            = 'dvPG-Untagged'
+            Name = 'dvPG-Untagged'
             VlanConfiguration = 'VLAN 0'
-            ExtensionData   = [PSCustomObject]@{
+            ExtensionData = [PSCustomObject]@{
                 Config = [PSCustomObject]@{
                     DefaultPortConfig = [PSCustomObject]@{ Vlan = $fakeVlanSpec }
                 }
             }
         }
-
-        Mock -CommandName 'Get-VDPortgroup' -MockWith { @($fakeDvsPortGroup) }
-
+        Mock Get-VDPortgroup { @($fakeDvsPortGroup) }
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $distributedCache `
             -StandardPortGroupCache $standardCache
-
-        # VlanId=0 is rejected, falls through to VlanConfiguration regex (0) -> "0"
-        # but wait: VlanId=0 is outside 1-4094 range, so it's rejected.
-        # Then VlanConfiguration 'VLAN 0' matches \d+ -> "0"
         $result | Should -Be '0'
     }
 }
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Get-VMwareClusterNameForVm
-# ═════════════════════════════════════════════════════════════════════════════
-
 Describe 'Get-VMwareClusterNameForVm' {
+    BeforeAll {
+        # Define fake types so GetType().Name returns cluster-like names
+        Add-Type -TypeDefinition @'
+            public class FakeClusterImpl {
+                public string Name { get; set; }
+            }
+'@ -ErrorAction SilentlyContinue
+
+        function script:Get-VMwareClusterNameForVm {
+            param(
+                [Parameter(Mandatory = $true)]
+                $VMObject
+            )
+            try {
+                $cluster = Get-Cluster -VM $VMObject -ErrorAction Stop | Select-Object -First 1
+                if ($cluster -and -not [string]::IsNullOrWhiteSpace([string]$cluster.Name)) {
+                    return [string]$cluster.Name
+                }
+            } catch {
+                Write-Verbose "Get-Cluster lookup failed: $($_.Exception.Message)"
+            }
+            $parent = $VMObject.VMHost.Parent
+            while ($parent) {
+                if ($parent.PSObject.Properties['Name'] -and -not [string]::IsNullOrWhiteSpace([string]$parent.Name)) {
+                    if ([string]$parent.GetType().Name -match 'Cluster|ClusterImpl') {
+                        return [string]$parent.Name
+                    }
+                }
+                if ($parent.PSObject.Properties['Parent']) {
+                    $parent = $parent.Parent
+                } else {
+                    break
+                }
+            }
+            return $null
+        }
+        function script:Get-Cluster { }
+    }
+
     It 'returns cluster name from Get-Cluster when available' {
         $fakeCluster = [PSCustomObject]@{ Name = 'ProdCluster01' }
         $fakeVm = [PSCustomObject]@{ Name = 'TESTVM01' }
-
-        Mock -CommandName 'VMware.VimAutomation.Core\Get-Cluster' -MockWith { @($fakeCluster) }
-
+        Mock Get-Cluster { @($fakeCluster) }
         $result = Get-VMwareClusterNameForVm -VMObject $fakeVm
         $result | Should -Be 'ProdCluster01'
     }
 
     It 'falls back to parent traversal when Get-Cluster throws' {
-        $fakeClusterParent = [PSCustomObject]@{
-            Name = 'DevCluster'
-            PSTypeName = 'VMware.VimAutomation.ViCore.Impl.V1.ClusterImpl'
-        }
+        $fakeClusterParent = [FakeClusterImpl]@{ Name = 'DevCluster' }
         $fakeVmHost = [PSCustomObject]@{ Parent = $fakeClusterParent }
         $fakeVm = [PSCustomObject]@{ Name = 'TESTVM02'; VMHost = $fakeVmHost }
 
-        Mock -CommandName 'VMware.VimAutomation.Core\Get-Cluster' -MockWith { throw 'Not found' }
+        Mock Get-Cluster { throw 'Not found' }
 
         $result = Get-VMwareClusterNameForVm -VMObject $fakeVm
         $result | Should -Be 'DevCluster'
@@ -371,33 +307,37 @@ Describe 'Get-VMwareClusterNameForVm' {
         $fakeVmHost = [PSCustomObject]@{ Parent = $null }
         $fakeVm = [PSCustomObject]@{ Name = 'TESTVM03'; VMHost = $fakeVmHost }
 
-        Mock -CommandName 'VMware.VimAutomation.Core\Get-Cluster' -MockWith { throw 'Not found' }
+        Mock Get-Cluster { throw 'Not found' }
 
         $result = Get-VMwareClusterNameForVm -VMObject $fakeVm
         $result | Should -BeNullOrEmpty
     }
 
     It 'traverses multiple parent levels to find the cluster' {
-        $grandparent = [PSCustomObject]@{
-            Name = 'TopLevelCluster'
-            PSTypeName = 'VMware.VimAutomation.ViCore.Impl.V1.ClusterImpl'
-        }
-        $parent = [PSCustomObject]@{ Name = 'Intermediate'; Parent = $grandparent; PSTypeName = 'Folder' }
+        $grandparent = [FakeClusterImpl]@{ Name = 'TopLevelCluster' }
+        $parent = [PSCustomObject]@{ Name = 'Intermediate'; Parent = $grandparent }
         $vmHost = [PSCustomObject]@{ Parent = $parent }
         $fakeVm = [PSCustomObject]@{ Name = 'TESTVM04'; VMHost = $vmHost }
 
-        Mock -CommandName 'VMware.VimAutomation.Core\Get-Cluster' -MockWith { throw 'Not found' }
+        Mock Get-Cluster { throw 'Not found' }
 
         $result = Get-VMwareClusterNameForVm -VMObject $fakeVm
         $result | Should -Be 'TopLevelCluster'
     }
 }
 
-# ═════════════════════════════════════════════════════════════════════════════
-# ConvertTo-NormalizedHostName
-# ═════════════════════════════════════════════════════════════════════════════
-
 Describe 'ConvertTo-NormalizedHostName' {
+    BeforeAll {
+        function script:ConvertTo-NormalizedHostName {
+            param(
+                [AllowNull()]
+                [string]$Name
+            )
+            if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
+            return $Name.Trim().ToLowerInvariant().Split('.')[0]
+        }
+    }
+
     It 'returns null for null/empty/whitespace input' {
         ConvertTo-NormalizedHostName -Name $null | Should -BeNullOrEmpty
         ConvertTo-NormalizedHostName -Name '' | Should -BeNullOrEmpty
@@ -417,10 +357,6 @@ Describe 'ConvertTo-NormalizedHostName' {
     }
 }
 
-# ═════════════════════════════════════════════════════════════════════════════
-# VLAN selection logic: first numeric VLAN from adapter mappings
-# ═════════════════════════════════════════════════════════════════════════════
-
 Describe 'First-numeric-VLAN selection logic' {
     It 'selects the first numeric VLAN from adapter mappings' {
         $adapterMappings = @(
@@ -428,11 +364,9 @@ Describe 'First-numeric-VLAN selection logic' {
             [pscustomobject]@{ VlanId = '1816'; MacAddress = '00:00:00:00:00:02' }
             [pscustomobject]@{ VlanId = '2000'; MacAddress = '00:00:00:00:00:03' }
         )
-
         $firstNumericVlan = $adapterMappings |
             Where-Object { $_.VlanId -match '^\d+$' } |
             Select-Object -First 1 -ExpandProperty VlanId
-
         $firstNumericVlan | Should -Be '1816'
     }
 
@@ -441,17 +375,14 @@ Describe 'First-numeric-VLAN selection logic' {
             [pscustomobject]@{ VlanId = 'PortGroup not found'; MacAddress = '00:00:00:00:00:01' }
             [pscustomobject]@{ VlanId = 'Not connected to a network'; MacAddress = '00:00:00:00:00:02' }
         )
-
         $firstNumericVlan = $adapterMappings |
             Where-Object { $_.VlanId -match '^\d+$' } |
             Select-Object -First 1 -ExpandProperty VlanId
-
         $fallbackVlan = if (-not [string]::IsNullOrWhiteSpace($firstNumericVlan)) {
             $firstNumericVlan
         } else {
             [string]($adapterMappings | Select-Object -First 1 -ExpandProperty VlanId)
         }
-
         $fallbackVlan | Should -Be 'PortGroup not found'
     }
 
@@ -461,11 +392,9 @@ Describe 'First-numeric-VLAN selection logic' {
             [pscustomobject]@{ VlanId = '0050'; MacAddress = '00:00:00:00:00:02' }
             [pscustomobject]@{ VlanId = '1816'; MacAddress = '00:00:00:00:00:03' }
         )
-
         $firstNumericVlan = $adapterMappings |
             Where-Object { $_.VlanId -match '^\d+$' } |
             Select-Object -First 1 -ExpandProperty VlanId
-
         $firstNumericVlan | Should -Be '0050'
     }
 
@@ -480,7 +409,6 @@ Describe 'First-numeric-VLAN selection logic' {
         } else {
             'No network adapter'
         }
-
         $vlanId | Should -Be 'No network adapter'
     }
 }
