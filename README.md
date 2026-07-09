@@ -20,6 +20,76 @@ The migration is split into 3 steps:
 The orchestrator can start from any step (`step1`, `step2`, `step3`) to resume after interruption.
 If `step3` already restored the VM but failed during SCVMM network/OS/post-configuration, you can replay only that tail of `step3` with `-ForceNetworkConfigOnly`.
 
+### Workflow diagram
+
+```mermaid
+flowchart TD
+    CSV[Batch CSV\nVMName, Tag, OperatingSystem, VLAN]
+    CFG[config.psd1\nEndpoints, Tags, SMTP, Paths]
+
+    subgraph STEP0["Step 0 — Pre-flight"]
+        PRECHECK[step-precheck.ps1\nvCenter inventory, uptime, ipconfig]
+        UPTIME[step0-uptime_extract.ps1\nCSV export]
+    end
+
+    subgraph STEP1["Step 1 — Prepare"]
+        TAG[Tag VMware VMs]
+        VEEAMJOB[Create Veeam backup job]
+    end
+
+    subgraph STEP2["Step 2 — Cutover"]
+        SHUTDOWN[Shut down source VMs]
+        BACKUP[Trigger Veeam backup]
+        MAIL[stepx-premigration_mail.ps1\nNotify recipients]
+    end
+
+    subgraph STEP3["Step 3 — Migrate"]
+        direction TB
+        BULKIR[step3-StartInstantRecovery.ps1\nBulk mount all VMs]
+        WAIT[Wait for WaitingForUserAction]
+        WORKER[worker-step3.ps1 × N\nFile-system queue workers]
+        MIGRATE[step3-MigrateVM.ps1\nPer VM: commit, network, OS config]
+    end
+
+    subgraph POST["Post-migration"]
+        CHECKS[step-XX-PostMigrationChecks.ps1\nSCVMM compliance loop]
+        STARTVM[step-XX-StartVM.ps1\nStart VMs, Integration Services]
+        CLEANUP[step-XX-CleanupVmware.ps1\nDelete source VMs]
+    end
+
+    CSV --> PRECHECK
+    CFG --> PRECHECK
+    CSV --> TAG
+    TAG --> VEEAMJOB
+    VEEAMJOB --> SHUTDOWN
+    SHUTDOWN --> BACKUP
+    SHUTDOWN --> MAIL
+    BACKUP --> BULKIR
+    BULKIR --> WAIT
+    WAIT --> WORKER
+    WORKER --> MIGRATE
+    MIGRATE --> CHECKS
+    CHECKS --> STARTVM
+    STARTVM --> CLEANUP
+```
+
+### Architecture: step3 worker pool
+
+```mermaid
+flowchart LR
+    ORCH[run-migration.ps1] -->|generates tasks JSON| IR[step3-StartInstantRecovery]
+    IR -->|dispatches N task files| PENDING[queue/pending/]
+    ORCH -->|launches M workers| W1[worker-01]
+    ORCH -->|launches M workers| W2[worker-02]
+    PENDING -->|claim| W1
+    PENDING -->|claim| W2
+    W1 -->|executes| S3[step3-MigrateVM.ps1]
+    W2 -->|executes| S3
+    S3 -->|success| DONE[queue/done/]
+    S3 -->|failure| FAILED[queue/failed/]
+    ORCH -->|waits for| DISPATCH[dispatch.complete\nall workers idle]
+```
+
 ## Prerequisites
 
 - PowerShell 7+
