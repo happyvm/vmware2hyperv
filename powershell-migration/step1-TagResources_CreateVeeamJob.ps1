@@ -86,7 +86,7 @@ $csvTags = $csvData |
 # VMware cleanup: remove tag assignments from any VM currently carrying one of the tags defined in the CSV.
 # This ensures we reset the batching scope before re-applying the desired CSV state.
 foreach ($csvTag in $csvTags) {
-    $existingCsvTag = Get-Tag -Name $csvTag -ErrorAction SilentlyContinue
+    $existingCsvTag = Get-Tag -Name $csvTag -Category $TagCategory -ErrorAction SilentlyContinue
     if (-not $existingCsvTag) {
         Write-MigrationLog "Cleanup: tag '$csvTag' does not exist yet in VMware. Nothing to remove for this tag." -LogFile $LogFile
         continue
@@ -122,10 +122,10 @@ foreach ($entry in $csvData) {
 
     $tagName = $entry.Tag.Trim()
 
-    $existingTag = Get-Tag -Name $tagName -ErrorAction SilentlyContinue
+    $existingTag = Get-Tag -Name $tagName -Category $TagCategory -ErrorAction SilentlyContinue
     if (-not $existingTag) {
         Write-MigrationLog "Creating tag: $tagName" -LogFile $LogFile
-        New-Tag -Name $tagName -Category $TagCategory
+        $existingTag = New-Tag -Name $tagName -Category $TagCategory
     }
 
     $vm = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
@@ -141,7 +141,9 @@ foreach ($entry in $csvData) {
     }
 
     Write-MigrationLog "Adding tag $tagName to $vmName" -LogFile $LogFile
-    New-TagAssignment -Tag $tagName -Entity $vm
+    # Assign the resolved tag object: a bare name is ambiguous when a same-named tag
+    # exists in another category.
+    New-TagAssignment -Tag $existingTag -Entity $vm | Out-Null
 }
 
 # Creating Veeam jobs by tag from CSV (configurable and deterministic)

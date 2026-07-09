@@ -5,8 +5,8 @@
 .DESCRIPTION
     Deletes VMware VMs that are tagged with the given migration batch tag and are
     powered off. Powered-on VMs are skipped (and reported) to avoid accidental
-    deletion of active workloads. Also removes the VMware tag itself after all VMs
-    are processed.
+    deletion of active workloads. The VMware tag itself is kept (remove it manually
+    once the whole batch is validated).
 
     This script is meant to run AFTER step3 has completed and all migrated VMs have
     been validated in the Hyper-V environment.
@@ -51,7 +51,9 @@ Write-MigrationLog "Starting VMware cleanup step for tag '$Tag'." -LogFile $LogF
 Connect-VCenter -Server $VCenterServer -LogFile $LogFile
 
 try {
-    $vmwareTag = Get-Tag -Name $Tag -ErrorAction SilentlyContinue
+    # Scope to the migration category: Remove-VM -DeletePermanently must never act on a
+    # same-named tag from another category.
+    $vmwareTag = Get-Tag -Name $Tag -Category $Config.Tags.Category -ErrorAction SilentlyContinue
     if (-not $vmwareTag) {
         Write-MigrationLog "Tag '$Tag' not found in VMware. Nothing to cleanup." -Level WARNING -LogFile $LogFile
         return

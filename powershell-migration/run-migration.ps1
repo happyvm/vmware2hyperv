@@ -118,7 +118,14 @@ function Invoke-OrchestratorStep {
 
     Write-MigrationLog "--- Starting $Step ---" -LogFile $LogFile
     try {
+        # 'exit <n>' in a script invoked with '&' ends only that script and never reaches
+        # the catch below; reset then check $LASTEXITCODE so such failures cannot be
+        # silently reported as a successful step.
+        $global:LASTEXITCODE = 0
         & $Action
+        if ($LASTEXITCODE -ne 0) {
+            throw "$Step ended with exit code $LASTEXITCODE."
+        }
         Write-MigrationLog "--- $Step completed successfully ---" -Level SUCCESS -LogFile $LogFile
     } catch {
         Write-MigrationLog "$Step failed : $_. Migration stopped." -Level ERROR -LogFile $LogFile
@@ -528,7 +535,7 @@ if ($runInstantRecoveryStartOutsideWorkers) {
     $irTasksFile = Join-Path $Config.Paths.LogDir ("step3-ir-tasks-{0}-{1}.json" -f (Convert-ToSafeFileName -Value $Tag), (Get-Date -Format 'yyyyMMdd-HHmmss'))
     ConvertTo-Json -InputObject $irTasks -Depth 4 | Set-Content -Path $irTasksFile -Encoding utf8
 
-    $irStartDelaySeconds = if ($Config.Orchestrator.ContainsKey('InstantRecoveryStartDelaySec') -and [int]$Config.Orchestrator.InstantRecoveryStartDelaySec -ge 0) {
+    $irStartDelaySeconds = if ($Config.Orchestrator -and $Config.Orchestrator.ContainsKey('InstantRecoveryStartDelaySec') -and [int]$Config.Orchestrator.InstantRecoveryStartDelaySec -ge 0) {
         [int]$Config.Orchestrator.InstantRecoveryStartDelaySec
     } else {
         2

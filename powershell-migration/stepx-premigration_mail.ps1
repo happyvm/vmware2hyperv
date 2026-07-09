@@ -72,19 +72,22 @@ if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\stepx-premi
 $recipients = $Config.Recipients
 
 Write-MigrationLog "Starting stepx - pre-migration email for tag '$tagName'" -LogFile $LogFile
-Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -Confirm:$false | Out-Null
 
 if (-not $recipients.ContainsKey($recipientGroup)) {
-    Write-MigrationLog "Invalid recipient group: '$recipientGroup'. Values: $($recipients.Keys -join ', ')." -Level ERROR -LogFile $LogFile
-    exit 1
+    $message = "Invalid recipient group: '$recipientGroup'. Values: $($recipients.Keys -join ', ')."
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+    throw $message
 }
 
 $mailTo      = $recipients[$recipientGroup]
 $mailSubject = "VM Migration of $tagName tag"
 
+# Import PowerCLI before touching Set-PowerCLIConfiguration: relying on module
+# auto-loading fails when only VCF.PowerCLI is installed.
 if (-not (Get-Module -Name VMware.PowerCLI, VCF.PowerCLI)) {
     Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 }
+Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -Confirm:$false | Out-Null
 
 if (-not $SkipVCenterLogin) {
     Connect-VCenter -Server $vCenterServer -LogFile $LogFile
@@ -94,17 +97,19 @@ if (-not $SkipVCenterLogin) {
 
 Write-MigrationLog "Searching VMs with tag '$tagName'..." -LogFile $LogFile
 try {
-    $tag = Get-Tag -Name $tagName -ErrorAction Stop
+    $tag = Get-Tag -Name $tagName -Category $Config.Tags.Category -ErrorAction Stop
 } catch {
-    Write-MigrationLog "Unable to retrieve tag '$tagName' : $_" -Level ERROR -LogFile $LogFile
+    $message = "Unable to retrieve tag '$tagName' : $_"
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
     if (-not $SkipVCenterLogin) { Disconnect-VCenter -LogFile $LogFile }
-    exit 1
+    throw $message
 }
 
 if ($null -eq $tag) {
-    Write-MigrationLog "Tag '$tagName' does not exist." -Level ERROR -LogFile $LogFile
+    $message = "Tag '$tagName' does not exist."
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
     if (-not $SkipVCenterLogin) { Disconnect-VCenter -LogFile $LogFile }
-    exit 1
+    throw $message
 }
 
 $taggedVmIds = @(
@@ -118,7 +123,7 @@ Write-MigrationLog "VMs found with tag '$tagName' : $($vms.Count)" -LogFile $Log
 if ($vms.Count -eq 0) {
     Write-MigrationLog "No VM with tag '$tagName'." -Level WARNING -LogFile $LogFile
     if (-not $SkipVCenterLogin) { Disconnect-VCenter -LogFile $LogFile }
-    exit 0
+    return
 }
 
 # Generating HTML table
@@ -149,4 +154,3 @@ Send-HtmlMail -From $mailFrom -To $mailTo -Subject $mailSubject -HtmlBody $htmlB
 
 if (-not $SkipVCenterLogin) { Disconnect-VCenter -LogFile $LogFile }
 Write-MigrationLog "stepx completed successfully." -Level SUCCESS -LogFile $LogFile
-exit 0

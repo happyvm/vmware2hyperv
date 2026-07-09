@@ -81,13 +81,15 @@ function Get-NetworkConfigurationState {
     }
 
     $successMatch = Select-String -Path $VmLogFile -Pattern "Network configured (default VLAN" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
-    if ($successMatch) {
-        return "Configured"
-    }
-
     $warningMatch = Select-String -Path $VmLogFile -Pattern "fallback mapping used" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
-    if ($warningMatch) {
-        return "ConfiguredWithWarning"
+
+    # Fallback warnings are logged before the success line: test them together, otherwise
+    # a degraded configuration would always be summarized as plain "Configured".
+    if ($successMatch) {
+        if ($warningMatch) {
+            return "ConfiguredWithWarning"
+        }
+        return "Configured"
     }
 
     return "NotDetected"

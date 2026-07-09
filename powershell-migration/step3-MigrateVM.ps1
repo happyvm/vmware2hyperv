@@ -269,8 +269,14 @@ function Invoke-SCVMMNetworkAndPostConfig {
     Write-MigrationLog "[$Name] Network configuration (default VLAN $Vlan)..." -LogFile $LogFile
 
     if ($Vlan -notmatch "^\d+$") {
-        Write-MigrationLog "[$Name] Invalid VLAN ID: '$Vlan' — network mapping skipped." -Level WARNING -LogFile $LogFile
-        return
+        # Fail the task instead of returning: an early return here would silently skip
+        # the whole post-configuration (network, Integration Services, HA, LiveMigration,
+        # backup tag) while the worker still records the VM as a successful migration.
+        # Non-numeric values ("PortGroup not found", "VM not found", "No network adapter")
+        # are produced upstream by run-migration when VLAN resolution fails.
+        $message = "[$Name] Invalid VLAN ID: '$Vlan' — network/post-configuration cannot proceed. Fix the VLAN resolution (or the CSV) and re-run this VM with -Step3VmName."
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+        throw $message
     }
 
     $requiredConfigPaths = @(
@@ -291,8 +297,11 @@ function Invoke-SCVMMNetworkAndPostConfig {
             Select-Object -First 1
     } -ArgumentList @($Name, $ServerName)
     if (!$TargetVM) {
-        Write-MigrationLog "[$Name] VM not found in SCVMM." -Level WARNING -LogFile $LogFile
-        return
+        # Fail the task: skipping the whole post-configuration while the worker records
+        # a success would leave an unconfigured VM reported as migrated.
+        $message = "[$Name] VM not found in SCVMM — network/post-configuration cannot proceed."
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+        throw $message
     }
 
     $networkConfigRetryDelaySeconds = 30
@@ -1214,7 +1223,10 @@ function Invoke-SCVMMNetworkAndPostConfig {
         if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {
             Write-MigrationLog "[$Name] LiveMigration unavailable on this runner (missing local Hyper-V platform). Migration already completed; run host-to-host move from a Hyper-V capable node or via SCVMM." -Level WARNING -LogFile $LogFile
         } else {
+            # Propagate so the worker records the task as failed: swallowing the error
+            # here used to mark VMs left on the wrong host as successful migrations.
             Write-MigrationLog "[$Name] LiveMigration error: $_" -Level ERROR -LogFile $LogFile
+            throw
         }
     }
 
@@ -1410,8 +1422,12 @@ try {
             }
 
             if (-not $waitingDetected) {
+                # Exact names plus a bounded pattern ("VM (Instant Recovery)"…): a plain
+                # "$Vm*" wildcard would also match another batch VM whose name shares the
+                # prefix (e.g. WEB1 vs WEB10) and follow the wrong session.
+                $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($Vm)
                 $restoreSession = Get-VBRRestoreSession |
-                    Where-Object { $_.Name -eq $Vm -or $_.Name -eq "$Vm-migrationhyp" -or $_.Name -like "$Vm*" } |
+                    Where-Object { $_.Name -eq $Vm -or $_.Name -eq "$Vm-migrationhyp" -or $_.Name -match $vmSessionPattern } |
                     Sort-Object -Property CreationTime -Descending |
                     Select-Object -First 1
 
@@ -1509,8 +1525,11 @@ try {
         $finalizationCheck = Invoke-VeeamCommand -ScriptBlock {
             param($Vm)
 
+            # Same bounded matching as the wait phase: never follow a session belonging
+            # to another VM whose name shares this VM's prefix (WEB1 vs WEB10).
+            $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($Vm)
             $restoreSession = Get-VBRRestoreSession |
-                Where-Object { $_.Name -eq $Vm -or $_.Name -eq "$Vm-migrationhyp" -or $_.Name -like "$Vm*" } |
+                Where-Object { $_.Name -eq $Vm -or $_.Name -eq "$Vm-migrationhyp" -or $_.Name -match $vmSessionPattern } |
                 Sort-Object -Property CreationTime -Descending |
                 Select-Object -First 1
 

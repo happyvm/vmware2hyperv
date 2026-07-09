@@ -426,12 +426,24 @@ function Start-WinRmRemediationJob {
 
                 Copy-Item -Path $LocalScriptPath -Destination $RemoteScriptPath -ToSession $session -Force -ErrorAction Stop
 
-                Invoke-Command -Session $session -ScriptBlock {
+                # Le script distant est un .bat : powershell.exe -File n'accepte que des .ps1.
+                # Codes retour du batch : 0 = succès, 1 = erreur, 2 = cleanup VMware partiel.
+                $remoteExitCode = Invoke-Command -Session $session -ScriptBlock {
                     param($ScriptPath)
-                    powershell.exe -ExecutionPolicy Bypass -File $ScriptPath
-                } -ArgumentList @($RemoteScriptPath) -ErrorAction Stop | Out-Null
+                    & cmd.exe /c "`"$ScriptPath`"" | Out-Null
+                    $LASTEXITCODE
+                } -ArgumentList @($RemoteScriptPath) -ErrorAction Stop
 
-                Write-JobLog -Message "Script Integration Services exécuté via WinRM $protocol." -Level 'SUCCESS' -LogFile $JobLogFile
+                if ($remoteExitCode -eq 1) {
+                    Write-JobLog -Message "Script Integration Services terminé en erreur (exit code 1) via WinRM $protocol." -Level 'WARNING' -LogFile $JobLogFile
+                    return "ExecutionFailed-$protocol"
+                }
+
+                if ($remoteExitCode -eq 2) {
+                    Write-JobLog -Message "Script Integration Services terminé avec cleanup VMware partiel (exit code 2) via WinRM $protocol." -Level 'WARNING' -LogFile $JobLogFile
+                }
+
+                Write-JobLog -Message "Script Integration Services exécuté via WinRM $protocol (exit code $remoteExitCode)." -Level 'SUCCESS' -LogFile $JobLogFile
                 return "Success-$protocol"
             } catch {
                 Write-JobLog -Message "Échec via WinRM $protocol : $($_.Exception.Message)" -Level 'WARNING' -LogFile $JobLogFile
