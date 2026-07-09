@@ -70,7 +70,7 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 
 | Fonction | Description |
 |----------|-------------|
-| `Invoke-VMwareGetVM` | Wrapper indirection `Get-VM` pour faciliter le mocking en tests |
+| `Invoke-VMwareGetPoweredOnVMView` | Wrapper indirection `Get-View` (VM allumées, propriétés projetées) pour faciliter le mocking en tests |
 | `Get-VMUptime` | Récupère l'uptime de toutes les VMs powered-on |
 
 ### Email

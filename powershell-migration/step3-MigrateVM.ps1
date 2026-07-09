@@ -174,15 +174,30 @@ function Get-SCVMMVmRuntimeState {
         [string]$Name,
 
         [Parameter(Mandatory = $true)]
-        [string]$ServerName
+        [string]$ServerName,
+
+        # Refresh the VM in SCVMM and read its state within the same server round-trip.
+        # The polling loops used to pay two separate SCVMM connections per iteration
+        # (Update-SCVMMVirtualMachine then Get-SCVMMVmRuntimeState).
+        [switch]$Refresh
     )
 
     return Invoke-SCVMMCommand -ScriptBlock {
-        param($VmName, $VmmServerName)
+        param($VmName, $VmmServerName, $DoRefresh)
         $server = Get-SCVMMServer -ComputerName $VmmServerName
         $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server | Select-Object -First 1
         if (-not $vm) {
             return $null
+        }
+
+        if ($DoRefresh) {
+            $refreshCommand = Get-Command -Name 'Read-SCVirtualMachine' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($refreshCommand) {
+                $refreshedVm = & $refreshCommand -VM $vm | Select-Object -First 1
+                if ($refreshedVm) {
+                    $vm = $refreshedVm
+                }
+            }
         }
 
         $hostNameCandidates = @(
@@ -201,7 +216,7 @@ function Get-SCVMMVmRuntimeState {
             Status           = [string]$vm.Status
             StatusString     = [string]$vm.StatusString
         }
-    } -ArgumentList @($Name, $ServerName)
+    } -ArgumentList @($Name, $ServerName, [bool]$Refresh)
 }
 
 function ConvertTo-NormalizedHostName {
@@ -215,34 +230,6 @@ function ConvertTo-NormalizedHostName {
     }
 
     return $Name.Trim().ToLowerInvariant().Split('.')[0]
-}
-
-function Update-SCVMMVirtualMachine {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Name,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ServerName,
-
-        [string]$LogFile
-    )
-
-    Invoke-SCVMMCommand -ScriptBlock {
-        param($VmName, $VmmServerName)
-        $server = Get-SCVMMServer -ComputerName $VmmServerName
-        $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server | Select-Object -First 1
-        if (-not $vm) {
-            throw "VM '$VmName' not found in SCVMM while refreshing."
-        }
-
-        $refreshCommand = Get-Command -Name 'Read-SCVirtualMachine' -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($refreshCommand) {
-            & $refreshCommand -VM $vm | Out-Null
-        }
-    } -ArgumentList @($Name, $ServerName)
-
-    Write-MigrationLog "[$Name] SCVMM VM refresh completed." -LogFile $LogFile
 }
 
 function Invoke-SCVMMNetworkAndPostConfig {
@@ -585,6 +572,18 @@ function Invoke-SCVMMNetworkAndPostConfig {
                     }
                 }
 
+                $vmNetworksById = @{}
+                $vmNetworksByExactName = @{}
+                foreach ($network in $allVMNetworks) {
+                    if ($network.ID -and -not $vmNetworksById.ContainsKey([string]$network.ID)) {
+                        $vmNetworksById[[string]$network.ID] = $network
+                    }
+                    $exactName = [string]$network.Name
+                    if (-not [string]::IsNullOrWhiteSpace($exactName) -and -not $vmNetworksByExactName.ContainsKey($exactName)) {
+                        $vmNetworksByExactName[$exactName] = $network
+                    }
+                }
+
                 $existingCache = [pscustomobject]@{
                     LoadedAtUtc            = (Get-Date).ToUniversalTime()
                     AllVMNetworks          = $allVMNetworks
@@ -593,6 +592,8 @@ function Invoke-SCVMMNetworkAndPostConfig {
                     VMNetworksByVlan       = $vmNetworksByVlan
                     VMSubnetsByVlan        = $vmSubnetsByVlan
                     VMNetworksByLookupName = $vmNetworksByLookupName
+                    VMNetworksById         = $vmNetworksById
+                    VMNetworksByExactName  = $vmNetworksByExactName
                     VMSubnetsByVmNetworkId = $vmSubnetsByVmNetworkId
                     PortClassByName        = $portClassByName
                 }
@@ -619,12 +620,10 @@ function Invoke-SCVMMNetworkAndPostConfig {
                 foreach ($candidateSubnet in @($InventoryCache.VMSubnetsByRealVlan[$VlanKey])) {
                     $pairNetwork = $null
                     if ($candidateSubnet.VMNetwork -and $candidateSubnet.VMNetwork.ID) {
-                        $subnetNetworkId = [string]$candidateSubnet.VMNetwork.ID
-                        $pairNetwork = @($InventoryCache.AllVMNetworks | Where-Object { [string]$_.ID -eq $subnetNetworkId }) | Select-Object -First 1
+                        $pairNetwork = $InventoryCache.VMNetworksById[[string]$candidateSubnet.VMNetwork.ID]
                     }
                     if (-not $pairNetwork -and $candidateSubnet.PSObject.Properties['VMNetworkName'] -and $candidateSubnet.VMNetworkName) {
-                        $subnetNetworkName = [string]$candidateSubnet.VMNetworkName
-                        $pairNetwork = @($InventoryCache.AllVMNetworks | Where-Object { [string]$_.Name -eq $subnetNetworkName }) | Select-Object -First 1
+                        $pairNetwork = $InventoryCache.VMNetworksByExactName[[string]$candidateSubnet.VMNetworkName]
                     }
                     if ($pairNetwork) {
                         $pairs += [pscustomobject]@{ VMNetwork = $pairNetwork; VMSubnet = $candidateSubnet }
@@ -1158,8 +1157,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
             }
         }
 
-        Update-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
-        $vmStateAfterHa = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
+        $vmStateAfterHa = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName -Refresh
         if (-not $vmStateAfterHa.IsHighlyAvailable) {
             if ($clusterVmRegistrationCommand) {
                 throw "VM '$Name' is still not highly available in SCVMM after Add-ClusterVirtualMachineRole and refresh."
@@ -1172,8 +1170,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
     }
 
     try {
-        Update-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
-        $vmStateBeforeMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
+        $vmStateBeforeMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName -Refresh
         Write-MigrationLog "[$Name] Preparing host migration validation. Current host: '$($vmStateBeforeMove.HostName)'." -LogFile $LogFile
 
         try {
@@ -1203,8 +1200,7 @@ function Invoke-SCVMMNetworkAndPostConfig {
             Start-Sleep -Seconds $migrationValidationPollIntervalSeconds
             $migrationValidationElapsedSeconds += $migrationValidationPollIntervalSeconds
 
-            Update-SCVMMVirtualMachine -Name $Name -ServerName $ServerName -LogFile $LogFile
-            $vmStateAfterMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
+            $vmStateAfterMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName -Refresh
             $currentHostNormalized = ConvertTo-NormalizedHostName -Name $vmStateAfterMove.HostName
 
             if ($currentHostNormalized -eq $destinationHostNormalized) {

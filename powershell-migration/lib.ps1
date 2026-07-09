@@ -530,16 +530,17 @@ function Send-HtmlMail {
 
 
 # ---------------------------------------------------------------------------
-# Invoke-VMwareGetVM : indirection wrapper to simplify mocking VMware cmdlet in tests
+# Invoke-VMwareGetPoweredOnVMView : indirection wrapper to simplify mocking in tests.
+# Server-side PowerState filter + property projection: Get-VM used to materialize
+# every VM of the vCenter as a full object before filtering client-side.
 # ---------------------------------------------------------------------------
-function Invoke-VMwareGetVM {
+function Invoke-VMwareGetPoweredOnVMView {
     [CmdletBinding()]
-    param(
-        [Parameter(ValueFromRemainingArguments = $true)]
-        [object[]]$Arguments
-    )
+    param()
 
-    return VMware.VimAutomation.Core\Get-VM @Arguments
+    return VMware.VimAutomation.Core\Get-View -ViewType VirtualMachine `
+        -Filter @{ 'Runtime.PowerState' = 'poweredOn' } `
+        -Property @('Name', 'Guest', 'Runtime.BootTime')
 }
 
 # ---------------------------------------------------------------------------
@@ -548,17 +549,17 @@ function Invoke-VMwareGetVM {
 function Get-VMUptime {
     param([string]$LogFile)
 
-    $vms = @(Invoke-VMwareGetVM | Where-Object { $_.PowerState -eq "PoweredOn" })
+    $vms = @(Invoke-VMwareGetPoweredOnVMView)
     Write-MigrationLog "Powered-on VMs: $($vms.Count)" -LogFile $LogFile
 
     $results = foreach ($vm in $vms) {
-        $guestInfo = $vm.ExtensionData.Guest
+        $guestInfo = $vm.Guest
         $bootTime  = $null
 
         if ($guestInfo.ToolsStatus -eq "toolsOk" -and $guestInfo.BootTime) {
             $bootTime = $guestInfo.BootTime
         } else {
-            $bootTime = $vm.ExtensionData.Runtime.BootTime
+            $bootTime = $vm.Runtime.BootTime
         }
 
         $uptime = if ($bootTime) {

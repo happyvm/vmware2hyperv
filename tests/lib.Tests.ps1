@@ -88,16 +88,14 @@ Describe 'Get-VMUptime' {
             GuestFullName = 'Windows Server 2019'
         }
 
+        # Shape of a Get-View VirtualMachine result (Guest/Runtime at the root).
         $fakeVm = [PSCustomObject]@{
-            Name         = 'TESTVM01'
-            PowerState   = 'PoweredOn'
-            ExtensionData = [PSCustomObject]@{
-                Guest   = $fakeGuest
-                Runtime = [PSCustomObject]@{ BootTime = $fakeBootTime }
-            }
+            Name    = 'TESTVM01'
+            Guest   = $fakeGuest
+            Runtime = [PSCustomObject]@{ BootTime = $fakeBootTime }
         }
 
-        Mock -CommandName 'Invoke-VMwareGetVM' -MockWith { @($fakeVm) }
+        Mock -CommandName 'Invoke-VMwareGetPoweredOnVMView' -MockWith { @($fakeVm) }
 
         $result = Get-VMUptime
         $result | Should -HaveCount 1
@@ -113,15 +111,12 @@ Describe 'Get-VMUptime' {
         }
 
         $fakeVm = [PSCustomObject]@{
-            Name         = 'LINUXVM01'
-            PowerState   = 'PoweredOn'
-            ExtensionData = [PSCustomObject]@{
-                Guest   = $fakeGuest
-                Runtime = [PSCustomObject]@{ BootTime = $null }
-            }
+            Name    = 'LINUXVM01'
+            Guest   = $fakeGuest
+            Runtime = [PSCustomObject]@{ BootTime = $null }
         }
 
-        Mock -CommandName 'Invoke-VMwareGetVM' -MockWith { @($fakeVm) }
+        Mock -CommandName 'Invoke-VMwareGetPoweredOnVMView' -MockWith { @($fakeVm) }
 
         $result = Get-VMUptime
         $result[0].Uptime | Should -Be 'Unavailable'

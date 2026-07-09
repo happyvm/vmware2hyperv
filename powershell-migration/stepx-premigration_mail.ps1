@@ -87,7 +87,8 @@ $mailSubject = "VM Migration of $tagName tag"
 if (-not (Get-Module -Name VMware.PowerCLI, VCF.PowerCLI)) {
     Import-RequiredModule -Name "VMware.PowerCLI" -LogFile $LogFile
 }
-Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -Confirm:$false | Out-Null
+# Session scope: the User scope rewrote the PowerCLI user profile on every run.
+Set-PowerCLIConfiguration -Scope Session -ParticipateInCEIP $false -Confirm:$false | Out-Null
 
 if (-not $SkipVCenterLogin) {
     Connect-VCenter -Server $vCenterServer -LogFile $LogFile
