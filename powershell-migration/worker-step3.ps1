@@ -71,12 +71,58 @@ function Write-TaskStateFile {
 }
 
 function Get-NetworkConfigurationState {
+    <#
+    .SYNOPSIS
+        Determines the network configuration state from the TaskResult JSON
+        (preferred) or falls back to grepping the VM log (legacy).
+
+    .DESCRIPTION
+        First tries to read "{VmLogFile}.result.json" produced by the refactored
+        step3-MigrateVM.ps1 (Step3.TaskResult). If the file exists, extracts the
+        NetworkConfiguration phase status and maps it to the canonical states:
+        Configured / ConfiguredWithWarning / NotDetected.
+
+        Falls back to the legacy log-grep approach when no result file exists,
+        ensuring backward compatibility with the pre-refactoring step3-MigrateVM.ps1.
+
+    .PARAMETER VmLogFile
+        Path to the VM log file. The result file is expected at "{VmLogFile}.result.json".
+    #>
+
     param(
         [AllowNull()]
         [string]$VmLogFile
     )
 
-    if ([string]::IsNullOrWhiteSpace($VmLogFile) -or -not (Test-Path -Path $VmLogFile)) {
+    if ([string]::IsNullOrWhiteSpace($VmLogFile)) {
+        return "Unknown"
+    }
+
+    # ── Preferred path: read the structured TaskResult JSON ──
+    $resultFilePath = "$VmLogFile.result.json"
+    if (Test-Path -Path $resultFilePath -PathType Leaf) {
+        try {
+            $result = Get-Content -Path $resultFilePath -Raw -ErrorAction Stop |
+                ConvertFrom-Json -ErrorAction Stop
+
+            # Phases from JSON is a PSCustomObject; access NetworkConfiguration directly
+            $phase = $result.Phases.NetworkConfiguration
+            if ($phase) {
+                switch ($phase.Status) {
+                    'Success' { return 'Configured' }
+                    'Warning' { return 'ConfiguredWithWarning' }
+                    'Failed'  { return 'NotDetected' }
+                    'Skipped' { return 'NotDetected' }
+                }
+            }
+            return 'NotDetected'
+        } catch {
+            Write-MigrationLog "[$WorkerName] Unable to read TaskResult file '$resultFilePath': $($_.Exception.Message). Falling back to log grep." -Level WARNING -LogFile $LogFile
+        }
+    }
+
+    # ── Legacy fallback: grep the VM log (pre-refactoring step3-MigrateVM.ps1) ──
+    if (-not (Test-Path -Path $VmLogFile)) {
         return "Unknown"
     }
 
