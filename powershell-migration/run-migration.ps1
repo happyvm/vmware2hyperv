@@ -541,11 +541,19 @@ if ($runInstantRecoveryStartOutsideWorkers) {
         2
     }
 
-    & "$PSScriptRoot\step3-StartInstantRecovery.ps1" `
-        -BackupJobName "Backup-$Tag" `
-        -TasksFile $irTasksFile `
-        -StartDelaySeconds $irStartDelaySeconds `
-        -LogFile $LogFile
+    # Abort step3 if the bulk start fails (including a parse error in the child
+    # script): the workers would otherwise commit mounts that never started.
+    try {
+        & "$PSScriptRoot\step3-StartInstantRecovery.ps1" `
+            -BackupJobName "Backup-$Tag" `
+            -TasksFile $irTasksFile `
+            -StartDelaySeconds $irStartDelaySeconds `
+            -LogFile $LogFile
+    } catch {
+        $message = "Step3 phase 1/2 (bulk Instant Recovery start) failed: $($_.Exception.Message)"
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+        throw $message
+    }
 }
 
 # ── Worker-based commit+bascule and network/post-configuration execution (step3) ─────────
