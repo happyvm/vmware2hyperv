@@ -213,15 +213,23 @@ while ($true) {
             # name shares a prefix (WEB1 vs WEB10).
             $restoreSession = Find-VmRestoreSession -VmName $vmName -RestoreSessions $restoreSessions
 
+            # Same property guard as VMName above: Get-VBRInstantRecovery / Get-VBRRestoreSession
+            # can return objects that don't (yet) expose a 'State' property (e.g. while the
+            # session is still being created), and StrictMode throws PropertyNotFoundException
+            # on direct access.
+            $irState = if ($irSession -and $irSession.PSObject.Properties['State']) { [string]$irSession.State } else { $null }
+            $restoreSessionStateRaw = if ($restoreSession -and $restoreSession.PSObject.Properties['State']) { [string]$restoreSession.State } else { $null }
+            $restoreSessionResultRaw = if ($restoreSession -and $restoreSession.PSObject.Properties['Result']) { [string]$restoreSession.Result } else { $null }
+
             $waitingDetected = $false
             $detectionSource = $null
-            if ($irSession -and [string]$irSession.State -eq 'WaitingForUserAction') {
+            if ($irState -eq 'WaitingForUserAction') {
                 $waitingDetected = $true
                 $detectionSource = 'instant-recovery-state'
             }
 
-            $sessionState = if ($restoreSession) { [string]$restoreSession.State } else { '<none>' }
-            $sessionResult = if ($restoreSession) { [string]$restoreSession.Result } else { $null }
+            $sessionState = if ($restoreSessionStateRaw) { $restoreSessionStateRaw } else { '<none>' }
+            $sessionResult = $restoreSessionResultRaw
             $progress = $null
             if ($restoreSession -and $restoreSession.PSObject.Properties['Progress'] -and $null -ne $restoreSession.Progress) {
                 $progress = [string]$restoreSession.Progress
@@ -249,7 +257,7 @@ while ($true) {
 
             [pscustomobject]@{
                 VMName          = $vmName
-                IrState         = if ($irSession) { [string]$irSession.State } else { '<none>' }
+                IrState         = if ($irState) { $irState } else { '<none>' }
                 SessionState    = $sessionState
                 SessionResult   = $sessionResult
                 Progress        = $progress
