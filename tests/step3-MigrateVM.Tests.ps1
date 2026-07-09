@@ -412,3 +412,86 @@ Describe 'First-numeric-VLAN selection logic' {
         $vlanId | Should -Be 'No network adapter'
     }
 }
+
+Describe 'step3-MigrateVM.ps1 - phase Action wiring against step3/ function signatures' {
+    <#
+    Regression coverage for two bugs found in production on 2026-07-09: the BEA-276
+    orchestrator rewrite called Set-VmNetworkConfiguration / Set-SCVMMOperatingSystem /
+    Register-VmHighAvailability / Move-VmToSecondHost / Set-VmBackupTag with -Context/-Result
+    (a convention only Start-VmInstantRecovery / Wait-InstantRecoveryUserAction /
+    Complete-InstantRecovery actually use), and called Set-VmIntegrationServices, a function
+    that was never defined anywhere in step3/. Both failed at runtime with no static check
+    catching them ("A parameter cannot be found..." / "term not recognized"), even though the
+    suite reported green. This test parses step3-MigrateVM.ps1 and every step3/*.ps1 module
+    with the PowerShell AST (no execution, no live SCVMM/Veeam needed) and checks that every
+    function called from inside an Invoke-Phase -Action block actually exists in step3/, and
+    that every named argument used at the call site matches a parameter that function declares.
+    #>
+    BeforeAll {
+        $scriptPath = "$PSScriptRoot/../powershell-migration/step3-MigrateVM.ps1"
+        $step3Dir = "$PSScriptRoot/../powershell-migration/step3"
+
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $scriptPath, [ref]$tokens, [ref]$parseErrors)
+        $parseErrors | Should -BeNullOrEmpty
+
+        # Map every function defined anywhere in step3/*.ps1 to its declared parameter names.
+        $script:step3Functions = @{}
+        Get-ChildItem "$step3Dir\*.ps1" | ForEach-Object {
+            $modAst = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$null)
+            $modAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true) | ForEach-Object {
+                $paramAsts = if ($_.Parameters) { $_.Parameters } elseif ($_.Body.ParamBlock) { $_.Body.ParamBlock.Parameters } else { @() }
+                $paramNames = @($paramAsts | ForEach-Object { $_.Name.VariablePath.UserPath })
+                $script:step3Functions[$_.Name] = $paramNames
+            }
+        }
+
+        # Every command invocation made from inside an Invoke-Phase -Action scriptblock —
+        # this is exactly the boundary that broke: the orchestrator's assumptions about a
+        # step3/ function's calling convention versus what the function actually declares.
+        $script:phaseCalls = $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Invoke-Phase'
+        }, $true) | ForEach-Object {
+            $_.CommandElements | Where-Object {
+                $_ -is [System.Management.Automation.Language.ScriptBlockExpressionAst]
+            }
+        } | ForEach-Object {
+            $_.ScriptBlock.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst]
+            }, $true)
+        }
+    }
+
+    It 'Only calls step3/ functions that are actually defined there' {
+        $calledNames = @($script:phaseCalls | ForEach-Object { $_.GetCommandName() } | Sort-Object -Unique)
+        $missing = @($calledNames | Where-Object { -not $script:step3Functions.ContainsKey($_) })
+        $missing | Should -BeNullOrEmpty -Because "these are called from an Invoke-Phase action but not defined in any step3/*.ps1 file: $($missing -join ', ')"
+    }
+
+    It 'Every named argument at a step3/ function call site matches a parameter that function declares' {
+        $mismatches = @(
+            foreach ($call in $script:phaseCalls) {
+                $fnName = $call.GetCommandName()
+                if (-not $script:step3Functions.ContainsKey($fnName)) { continue }
+                $declaredParams = $script:step3Functions[$fnName]
+                $usedParams = $call.CommandElements | Where-Object {
+                    $_ -is [System.Management.Automation.Language.CommandParameterAst]
+                } | ForEach-Object { $_.ParameterName }
+                foreach ($p in $usedParams) {
+                    if ($declaredParams -notcontains $p) {
+                        "line $($call.Extent.StartLineNumber): $fnName -$p (declares: $($declaredParams -join ', '))"
+                    }
+                }
+            }
+        )
+        $mismatches | Should -BeNullOrEmpty -Because "step3-MigrateVM.ps1 passes a parameter name the target function doesn't declare:`n$($mismatches -join "`n")"
+    }
+}

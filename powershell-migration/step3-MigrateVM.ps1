@@ -15,7 +15,7 @@
     VLAN ID pour la VM restaurée. Obligatoire.
 .PARAMETER Phases
     (Futur) Liste explicite des phases. Prioritaire sur les switches Skip*.
-    Valeurs : IRStart, IRCommit, Network, IntegrationServices, OS, HA, LiveMigration, BackupTag.
+    Valeurs : IRStart, IRCommit, Network, OS, HA, LiveMigration, BackupTag.
 .EXAMPLE
     .\step3-MigrateVM.ps1 -BackupJobName Backup-HypMig-lot-118 -VMName SRV-WEB01 -VlanId 100 -HyperVHost hv01
 .EXAMPLE
@@ -57,7 +57,7 @@ param (
     [switch]$SkipNetworkAndPostConfig,
 
     # ── Futur : sélection explicite de phases ────────────────────────────
-    [ValidateSet('IRStart', 'IRCommit', 'Network', 'IntegrationServices', 'OS', 'HA', 'LiveMigration', 'BackupTag')]
+    [ValidateSet('IRStart', 'IRCommit', 'Network', 'OS', 'HA', 'LiveMigration', 'BackupTag')]
     [string[]]$Phases,
 
     [string]$LogFile
@@ -108,7 +108,7 @@ function Should-RunPhase {
     switch ($Name) {
         'IRStart'              { return -not $SkipInstantRecoveryStart }
         'IRCommit'             { return -not $SkipInstantRecoveryFinalization }
-        { $_ -in @('Network','IntegrationServices','OS','HA','LiveMigration','BackupTag') } { return -not $SkipNetworkAndPostConfig }
+        { $_ -in @('Network','OS','HA','LiveMigration','BackupTag') } { return -not $SkipNetworkAndPostConfig }
         default                { return $true }
     }
 }
@@ -175,24 +175,30 @@ if (Should-RunPhase 'Network') {
     $context.AdapterVlanMappings = $adapterVlanMappings
 }
 Invoke-Phase -Name 'Network' -DisplayName 'NetworkConfiguration' -Action {
-    Set-VmNetworkConfiguration -Context $context -Result $result
+    $null = Set-VmNetworkConfiguration -Name $context.VMName -ServerName $context.VMMServerName `
+        -Vlan $context.VlanId -AdapterVlanMappings $context.AdapterVlanMappings `
+        -SourceRemark $context.Remark -Config $context.Config -LogFile $context.LogFile
 }
 
-# ── Phases 5-9 : Post-configuration (non-bloquantes sauf Network) ─────────
-Invoke-Phase -Name 'IntegrationServices' -DisplayName 'IntegrationServices' -NonBlocking -Action {
-    Set-VmIntegrationServices -Context $context -Result $result
-}
+# ── Phases 6-9 : Post-configuration (non-bloquantes sauf Network) ─────────
+# Note : Integration Services est configuré par Set-VmNetworkConfiguration
+# ci-dessus (Set-SCVirtualMachine) — pas de phase distincte.
 Invoke-Phase -Name 'OS' -DisplayName 'OperatingSystem' -NonBlocking -Action {
-    Set-SCVMMOperatingSystem -Context $context -Result $result
+    Set-SCVMMOperatingSystem -Name $context.VMName -ServerName $context.VMMServerName `
+        -SourceOperatingSystem $context.OperatingSystem -OperatingSystemMap $context.Config.SCVMM.OperatingSystemMap `
+        -LogFile $context.LogFile
 }
 Invoke-Phase -Name 'HA' -DisplayName 'HighAvailability' -NonBlocking -Action {
-    Register-VmHighAvailability -Context $context -Result $result
+    Register-VmHighAvailability -Name $context.VMName -ServerName $context.VMMServerName `
+        -ClusterName $context.HyperVCluster -LogFile $context.LogFile
 }
 Invoke-Phase -Name 'LiveMigration' -DisplayName 'LiveMigration' -NonBlocking -Action {
-    Move-VmToSecondHost -Context $context -Result $result
+    Move-VmToSecondHost -Name $context.VMName -ServerName $context.VMMServerName `
+        -DestinationHost $context.HyperVHost2 -LogFile $context.LogFile
 }
 Invoke-Phase -Name 'BackupTag' -DisplayName 'BackupTag' -NonBlocking -Action {
-    Set-VmBackupTag -Context $context -Result $result
+    Set-VmBackupTag -Name $context.VMName -ServerName $context.VMMServerName `
+        -TagName $context.BackupTag -LogFile $context.LogFile
 }
 
 # ── Finalisation ───────────────────────────────────────────────────────────
