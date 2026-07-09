@@ -40,6 +40,9 @@ param(
 )
 
 . "$PSScriptRoot\lib.ps1"
+Get-ChildItem "$PSScriptRoot\step3\Step3.*.ps1" |
+    Where-Object Name -ne 'Step3.ScvmmSession.Functions.ps1' |
+    ForEach-Object { . $_.FullName }
 
 if (-not $LogFile) {
     $LogFile = "$PSScriptRoot\$WorkerName.log"
@@ -71,28 +74,55 @@ function Write-TaskStateFile {
 }
 
 function Get-NetworkConfigurationState {
+    <#
+    .SYNOPSIS
+        Determine the network configuration outcome from the structured step3 result.
+        Falls back to legacy log grep when the JSON result file does not exist.
+    #>
     param(
         [AllowNull()]
         [string]$VmLogFile
     )
 
+    # Prefer the structured result written by step3-MigrateVM.ps1
+    if (-not [string]::IsNullOrWhiteSpace($VmLogFile) -and (Test-Path -Path $VmLogFile)) {
+        $structuredResult = Read-Step3TaskResult -VmLogFile $VmLogFile
+        if ($structuredResult) {
+            $networkPhase = $structuredResult.Phases.PSObject.Properties |
+                Where-Object { $_.Name -like '*Network*' -or $_.Name -like '*PostConfig*' } |
+                Select-Object -First 1
+
+            if ($networkPhase) {
+                $state = $networkPhase.Value.State
+                $detail = $networkPhase.Value.Detail
+                if ($state -eq 'Success' -and $detail -match 'fallback') {
+                    return 'ConfiguredWithWarning'
+                }
+                if ($state -eq 'Success') { return 'Configured' }
+                if ($state -eq 'Warning') { return 'ConfiguredWithWarning' }
+                if ($state -eq 'Failed')  { return 'NotDetected' }
+                if ($state -eq 'Skipped') { return 'NotDetected' }
+            }
+        }
+    }
+
+    # Legacy fallback: grep the VM log (kept for backward compatibility with
+    # migrations that ran before TaskResult was introduced).
     if ([string]::IsNullOrWhiteSpace($VmLogFile) -or -not (Test-Path -Path $VmLogFile)) {
-        return "Unknown"
+        return 'Unknown'
     }
 
     $successMatch = Select-String -Path $VmLogFile -Pattern "Network configured (default VLAN" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
     $warningMatch = Select-String -Path $VmLogFile -Pattern "fallback mapping used" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
 
-    # Fallback warnings are logged before the success line: test them together, otherwise
-    # a degraded configuration would always be summarized as plain "Configured".
     if ($successMatch) {
         if ($warningMatch) {
-            return "ConfiguredWithWarning"
+            return 'ConfiguredWithWarning'
         }
-        return "Configured"
+        return 'Configured'
     }
 
-    return "NotDetected"
+    return 'NotDetected'
 }
 
 Write-MigrationLog "[$WorkerName] Persistent step3 worker starting. Queue root: $QueueRoot" -LogFile $LogFile
@@ -173,6 +203,7 @@ while ($true) {
         $task | Add-Member -NotePropertyName CompletedAt -NotePropertyValue (Get-Date).ToString("o") -Force
         $task | Add-Member -NotePropertyName ErrorMessage -NotePropertyValue $null -Force
         $task | Add-Member -NotePropertyName NetworkConfigurationState -NotePropertyValue (Get-NetworkConfigurationState -VmLogFile ([string]$task.VmLogFile)) -Force
+        $task | Add-Member -NotePropertyName Step3Result -NotePropertyValue (Read-Step3TaskResult -VmLogFile ([string]$task.VmLogFile)) -Force
 
         Write-TaskStateFile -Path (Join-Path $doneDir $nextTask.Name) -TaskObject $task
         Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
@@ -183,6 +214,7 @@ while ($true) {
         $task | Add-Member -NotePropertyName ErrorMessage -NotePropertyValue $_.Exception.Message -Force
         $task | Add-Member -NotePropertyName ErrorRecord -NotePropertyValue ([string]$_) -Force
         $task | Add-Member -NotePropertyName NetworkConfigurationState -NotePropertyValue (Get-NetworkConfigurationState -VmLogFile ([string]$task.VmLogFile)) -Force
+        $task | Add-Member -NotePropertyName Step3Result -NotePropertyValue (Read-Step3TaskResult -VmLogFile ([string]$task.VmLogFile)) -Force
 
         Write-TaskStateFile -Path (Join-Path $failedDir $nextTask.Name) -TaskObject $task
         Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
