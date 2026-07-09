@@ -187,7 +187,7 @@
 
     StartVm = @{
         IntegrationPollIntervalSeconds = 30
-        IntegrationMaxIterations       = 10
+        IntegrationMaxIterations       = 0   # 0 = unlimited: loop until every VM is compliant (Ctrl+C to stop waiting)
     }
 
     Orchestrator = @{

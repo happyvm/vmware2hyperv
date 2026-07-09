@@ -1,17 +1,31 @@
 ﻿<#
 .SYNOPSIS
-    Start Hyper-V VMs and verify integration services after migration.
+    Start Hyper-V VMs and validate post-migration compliance.
 
 .DESCRIPTION
-    Starts the migrated VMs on Hyper-V hosts, monitors integration services (heartbeat,
-    time sync, data exchange, backup, guest services) through SCVMM, and performs
-    WinRM connectivity checks to confirm the VM is operational post-migration.
+    Starts the migrated VMs on Hyper-V hosts, then loops until every VM is fully
+    compliant (or the loop is interrupted / -IntegrationMaxIterations is reached):
+    - VM running, NIC connected, guest IPv4 matches the expected IP (extract-ip.csv)
+    - Integration services healthy (heartbeat, time sync, data exchange, guest agent)
+    - High Availability enabled and the post-migration backup tag present in SCVMM
+    - WinRM-based VMware Tools removal on Windows Server 2012+ (best effort)
+
+    This folds what used to be a separate post-migration-checks pass into the same
+    SCVMM inventory loop as the VM start/Integration Services polling, avoiding a
+    second full pass over every VM. By default the loop has no iteration cap: it
+    keeps polling until every VM is compliant. Interrupt with Ctrl+C to stop waiting
+    without losing the VMs already started, or pass -IntegrationMaxIterations to cap it.
 
 .PARAMETER ConfigFile
     Optional path to the configuration file. Defaults to config.psd1.
 
 .PARAMETER CsvFile
     Path to the batch CSV file. Defaults to Config.Paths.CsvFile.
+
+.PARAMETER ExtractIpCsvFile
+    Path to the CSV of expected guest IPs. Defaults to Config.Paths.ExtractIpCsv, or
+    <CsvFile folder>\extract-ip.csv. Optional: if the file is missing, the expected-IP
+    check is skipped (treated as compliant) instead of failing the whole script.
 
 .PARAMETER Tag
     Optional batch tag to filter VMs from the CSV.
@@ -20,10 +34,11 @@
     Path to the log file. Auto-generated if not provided.
 
 .PARAMETER IntegrationPollIntervalSeconds
-    Interval between integration services status polls. Default: 30.
+    Interval between compliance polls. Default: 30.
 
 .PARAMETER IntegrationMaxIterations
-    Maximum iterations for integration services polling. Default: 10.
+    Maximum polling iterations. Default: 0 (unlimited — loop until every VM is
+    compliant or the script is interrupted).
 
 .PARAMETER WinRmRetryDelaySeconds
     Delay between WinRM retries in seconds. Default: 15.
@@ -34,6 +49,9 @@
 .EXAMPLE
     .\step4-StartVM.ps1 -Tag HypMig-lot-118
 
+.EXAMPLE
+    .\step4-StartVM.ps1 -Tag HypMig-lot-118 -IntegrationMaxIterations 20
+
 .NOTES
     Part of the vmware2hyperv migration toolkit.
     Requires PowerShell 7+ with VirtualMachineManager module.
@@ -42,10 +60,11 @@
 param (
     [string]$ConfigFile,
     [string]$CsvFile,
+    [string]$ExtractIpCsvFile,
     [string]$Tag,
     [string]$LogFile,
     [int]$IntegrationPollIntervalSeconds = 30,
-    [int]$IntegrationMaxIterations = 10,
+    [int]$IntegrationMaxIterations = 0,
     [int]$WinRmRetryDelaySeconds = 15,
     [int]$WinRmMaxAttempts = 20
 )
@@ -58,6 +77,15 @@ $Config = Import-MigrationConfig -ConfigFile $ConfigFile
 if (-not $CsvFile) { $CsvFile = $Config.Paths.CsvFile }
 Assert-PathPresent -Path $CsvFile -Label "Batch CSV"
 
+if (-not $ExtractIpCsvFile) {
+    if ($Config.Paths.ExtractIpCsv) {
+        $ExtractIpCsvFile = [string]$Config.Paths.ExtractIpCsv
+    } else {
+        $batchFolder = Split-Path -Path $CsvFile -Parent
+        $ExtractIpCsvFile = Join-Path -Path $batchFolder -ChildPath "extract-ip.csv"
+    }
+}
+
 if (-not $LogFile) {
     $batchLabel = if ([string]::IsNullOrWhiteSpace($Tag)) { 'all' } else { $Tag }
     $LogFile = "$($Config.Paths.LogDir)\step4-startvm-$batchLabel-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
@@ -65,13 +93,51 @@ if (-not $LogFile) {
 
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
 
+function Get-ExpectedIpMap {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $rows = Import-Csv -Path $Path -Delimiter ";"
+    $map = @{}
+
+    foreach ($row in $rows) {
+        $vmName = Get-FirstPropertyValue -InputObject $row -PropertyNames @(
+            'VMName', 'VmName', 'Name', 'NomVM'
+        )
+        $ip = Get-FirstPropertyValue -InputObject $row -PropertyNames @(
+            'ExpectedIP', 'ExpectedIp', 'IPAttendue', 'TargetIP', 'TargetIp', 'IP', 'IPAddress', 'IpAddress'
+        )
+
+        if ([string]::IsNullOrWhiteSpace($vmName) -or [string]::IsNullOrWhiteSpace($ip)) {
+            continue
+        }
+
+        $map[$vmName.ToLowerInvariant()] = $ip
+    }
+
+    return $map
+}
+
+if (Test-Path -Path $ExtractIpCsvFile) {
+    $expectedIpMap = Get-ExpectedIpMap -Path $ExtractIpCsvFile
+} else {
+    Write-MigrationLog "Extract IP CSV not found ($ExtractIpCsvFile) — skipping expected-IP validation." -Level WARNING -LogFile $LogFile
+    $expectedIpMap = @{}
+}
+
 function Get-SCVMMVmInventory {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ServerName,
 
         [Parameter(Mandatory = $true)]
-        [string[]]$VMNames
+        [string[]]$VMNames,
+
+        [hashtable]$ExpectedIpMap = @{},
+
+        [string]$ExpectedBackupTag
     )
 
     $names = @(
@@ -87,7 +153,7 @@ function Get-SCVMMVmInventory {
 
     return @(
         Invoke-SCVMMCommand -ScriptBlock {
-            param($VmmServerName, $Names)
+            param($VmmServerName, $Names, $IpMap, $BackupTag)
 
             function Get-IntegrationStatusSummary {
                 param($Vm)
@@ -99,7 +165,8 @@ function Get-SCVMMVmInventory {
                 ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
                 $secondarySignals = @(
-                    [string]$Vm.HeartbeatStatus
+                    [string]$Vm.HeartbeatStatus,
+                    [string]$Vm.HeartbeatEnabled
                 ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
                 $summary = $null
@@ -134,15 +201,21 @@ function Get-SCVMMVmInventory {
 
                 if (-not $vm) {
                     [pscustomobject]@{
-                        VMName               = $name
-                        Exists               = $false
-                        Running              = $false
-                        HypervConfiguredOs   = $null
-                        Status               = $null
-                        StatusString         = $null
-                        VMHostComputerName   = $null
-                        IntegrationReady     = $false
-                        IntegrationDetails   = 'VM introuvable'
+                        VMName                  = $name
+                        Exists                  = $false
+                        Running                 = $false
+                        HypervConfiguredOs      = $null
+                        Status                  = $null
+                        StatusString            = $null
+                        VMHostComputerName      = $null
+                        IntegrationReady        = $false
+                        IntegrationDetails      = 'VM introuvable'
+                        NetworkConnected        = $false
+                        CurrentIPs              = @()
+                        IPMatches               = $false
+                        HighAvailabilityEnabled = $false
+                        CurrentTag              = $null
+                        BackupTagPresent        = $false
                     }
                     continue
                 }
@@ -167,19 +240,59 @@ function Get-SCVMMVmInventory {
                 $running = $statusRaw -match 'Running|Power.*On|En cours d.?exécution|Démarré'
                 $integrationStatus = Get-IntegrationStatusSummary -Vm $vm
 
+                $adapters = @(Get-SCVirtualNetworkAdapter -VM $vm -ErrorAction SilentlyContinue)
+                $connectedAdapters = @($adapters | Where-Object {
+                    $state = [string]$_.ConnectionState
+                    $state -match 'Connected|Connecté|OK|On' -or
+                    (-not [string]::IsNullOrWhiteSpace([string]$_.VMNetwork)) -or
+                    (-not [string]::IsNullOrWhiteSpace([string]$_.VMSubnet))
+                })
+                $networkConnected = $connectedAdapters.Count -gt 0
+
+                $allIps = @(
+                    foreach ($adapter in $adapters) {
+                        foreach ($address in @($adapter.IPv4Addresses)) {
+                            if (-not [string]::IsNullOrWhiteSpace([string]$address)) {
+                                [string]$address
+                            }
+                        }
+                    }
+                ) | Select-Object -Unique
+
+                $expectedIp = $null
+                if ($IpMap -and $IpMap.ContainsKey($name.ToLowerInvariant())) {
+                    $expectedIp = [string]$IpMap[$name.ToLowerInvariant()]
+                }
+                $ipMatches = if ([string]::IsNullOrWhiteSpace($expectedIp)) { $true } else { $allIps -contains $expectedIp }
+
+                $highAvailabilityEnabled = [bool]$vm.IsHighlyAvailable
+
+                $currentTag = [string]$vm.Tag
+                $backupTagPresent = if ([string]::IsNullOrWhiteSpace($BackupTag)) {
+                    $true
+                } else {
+                    [bool]($currentTag -split ';|,' | ForEach-Object { $_.Trim() } | Where-Object { $_ -eq $BackupTag } | Measure-Object | Select-Object -ExpandProperty Count)
+                }
+
                 [pscustomobject]@{
-                    VMName               = $name
-                    Exists               = $true
-                    Running              = [bool]$running
-                    HypervConfiguredOs   = [string]$vm.OperatingSystem
-                    Status               = [string]$vm.Status
-                    StatusString         = [string]$vm.StatusString
-                    VMHostComputerName   = [string]$vm.VMHost.ComputerName
-                    IntegrationReady     = [bool]$integrationStatus.Ready
-                    IntegrationDetails   = [string]$integrationStatus.Summary
+                    VMName                  = $name
+                    Exists                  = $true
+                    Running                 = [bool]$running
+                    HypervConfiguredOs      = [string]$vm.OperatingSystem
+                    Status                  = [string]$vm.Status
+                    StatusString            = [string]$vm.StatusString
+                    VMHostComputerName      = [string]$vm.VMHost.ComputerName
+                    IntegrationReady        = [bool]$integrationStatus.Ready
+                    IntegrationDetails      = [string]$integrationStatus.Summary
+                    NetworkConnected        = [bool]$networkConnected
+                    CurrentIPs              = @($allIps)
+                    IPMatches               = [bool]$ipMatches
+                    HighAvailabilityEnabled = [bool]$highAvailabilityEnabled
+                    CurrentTag              = $currentTag
+                    BackupTagPresent        = [bool]$backupTagPresent
                 }
             }
-        } -ArgumentList @($ServerName, $names)
+        } -ArgumentList @($ServerName, $names, $ExpectedIpMap, $ExpectedBackupTag)
     )
 }
 
@@ -237,6 +350,47 @@ function Resolve-OsActionPlan {
         OsGeneration = $generation
         ActionPlan   = 'ManualOther'
     }
+}
+
+# ---------------------------------------------------------------------------
+# Test-VmCompliant : a VM is fully done once it's running, connected, has its
+# expected IP, integration services are healthy, HA is on, and the
+# post-migration backup tag is present — folds what used to be the separate
+# post-migration-checks pass into this same loop.
+# ---------------------------------------------------------------------------
+function Test-VmCompliant {
+    param(
+        [bool]$Exists,
+        [bool]$Running,
+        [bool]$NetworkConnected,
+        [bool]$IntegrationReady,
+        [bool]$HighAvailabilityEnabled,
+        [bool]$BackupTagPresent,
+        [bool]$IPMatches
+    )
+
+    return [bool]($Exists -and $Running -and $NetworkConnected -and $IntegrationReady -and $HighAvailabilityEnabled -and $BackupTagPresent -and $IPMatches)
+}
+
+function Get-ComplianceIssues {
+    param(
+        [Parameter(Mandatory = $true)]
+        $VmItem
+    )
+
+    if (-not $VmItem.VmFound) {
+        return @('VM introuvable')
+    }
+
+    $issues = @()
+    if (-not $VmItem.Started) { $issues += 'non démarrée' }
+    if (-not $VmItem.NetworkConnected) { $issues += 'NIC non connectée' }
+    if (-not $VmItem.IPMatches) { $issues += 'IP inattendue' }
+    if (-not $VmItem.IntegrationReady) { $issues += 'Integration Services non OK' }
+    if (-not $VmItem.HighAvailabilityEnabled) { $issues += 'HA non activée' }
+    if (-not $VmItem.BackupTagPresent) { $issues += 'tag backup absent' }
+
+    return $issues
 }
 
 function Get-ActionDisplayText {
@@ -570,11 +724,11 @@ function Show-PendingDashboard {
             Sort-Object VMName |
             ForEach-Object {
                 [pscustomobject]@{
-                    'Nom de la VM'                 = $_.VMName
-                    'Power state'                  = Get-PowerStateDisplayText -VmItem $_
-                    'OS'                           = if ([string]::IsNullOrWhiteSpace($_.DisplayOperatingSystem)) { 'Inconnu' } else { $_.DisplayOperatingSystem }
-                    'Integration services status'  = $_.IntegrationDetails
-                    'Actions à mener'              = Get-ActionDisplayText -VmItem $_
+                    'Nom de la VM'      = $_.VMName
+                    'Power state'       = Get-PowerStateDisplayText -VmItem $_
+                    'OS'                = if ([string]::IsNullOrWhiteSpace($_.DisplayOperatingSystem)) { 'Inconnu' } else { $_.DisplayOperatingSystem }
+                    'Non-conformités'   = (Get-ComplianceIssues -VmItem $_) -join ', '
+                    'Actions à mener'   = Get-ActionDisplayText -VmItem $_
                 }
             }
     )
@@ -583,7 +737,8 @@ function Show-PendingDashboard {
         try { Clear-Host } catch { Write-Verbose "Clear-Host is not supported by the current host: $($_.Exception.Message)" }
     }
 
-    Write-Information "Suivi lotissement - rafraîchissement $Iteration/$MaxIterations - éléments restants : $($pendingRows.Count)" -InformationAction Continue
+    $iterationLabel = if ($MaxIterations -le 0) { "$Iteration (illimité, Ctrl+C pour arrêter)" } else { "$Iteration/$MaxIterations" }
+    Write-Information "Suivi lotissement - rafraîchissement $iterationLabel - éléments restants : $($pendingRows.Count)" -InformationAction Continue
     Write-Information "" -InformationAction Continue
 
     if ($pendingRows) {
@@ -592,7 +747,7 @@ function Show-PendingDashboard {
             Out-String -Width 4096 |
             ForEach-Object { Write-Information $_ -InformationAction Continue }
     } else {
-        Write-Information "Toutes les VM ont désormais leurs Integration Services actifs." -InformationAction Continue
+        Write-Information "Toutes les VM sont conformes (démarrées, réseau, IP, Integration Services, HA, tag backup)." -InformationAction Continue
     }
 }
 
@@ -628,8 +783,9 @@ if ($Config.RemoteActions.WinRm.Credential) {
 
 $localWinRmScriptPath = [string]$Config.RemoteActions.WinRm.RemoveVmwareToolsScriptLocalPath
 $remoteWinRmScriptPath = [string]$Config.RemoteActions.WinRm.RemoveVmwareToolsScriptRemotePath
+$expectedBackupTag = [string]$Config.Tags.BackupTag
 
-$initialSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames ($targetRows.VMName)
+$initialSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames ($targetRows.VMName) -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag
 $initialSnapshotByName = @{}
 foreach ($snapshot in $initialSnapshots) {
     $initialSnapshotByName[[string]$snapshot.VMName] = $snapshot
@@ -650,29 +806,41 @@ $vmInventory = foreach ($row in $targetRows) {
 
     if (-not $snapshot) {
         $snapshot = [pscustomobject]@{
-            VMName             = $vmName
-            Exists             = $false
-            Running            = $false
-            HypervConfiguredOs = $null
-            IntegrationReady   = $false
-            IntegrationDetails = 'VM introuvable'
+            VMName                  = $vmName
+            Exists                  = $false
+            Running                 = $false
+            HypervConfiguredOs      = $null
+            IntegrationReady        = $false
+            IntegrationDetails      = 'VM introuvable'
+            NetworkConnected        = $false
+            CurrentIPs              = @()
+            IPMatches               = $false
+            HighAvailabilityEnabled = $false
+            CurrentTag              = $null
+            BackupTagPresent        = $false
         }
     }
 
     [pscustomobject]@{
-        VMName                = $vmName
-        SourceOperatingSystem = $sourceOs
-        DisplayOperatingSystem= $displayOperatingSystem
-        OsGeneration          = $actionPlan.OsGeneration
-        ActionPlan            = $actionPlan.ActionPlan
-        ActionState           = if ($snapshot.Exists) { 'Queued' } else { 'Skipped' }
-        ActionJobId           = $null
-        VmFound               = [bool]$snapshot.Exists
-        Started               = [bool]$snapshot.Running
-        StartError            = $null
-        IntegrationReady      = [bool]$snapshot.IntegrationReady
-        IntegrationDetails    = if ($snapshot.Exists) { [string]$snapshot.IntegrationDetails } else { 'VM introuvable' }
-        DisplayCompleted      = [bool]$snapshot.IntegrationReady
+        VMName                  = $vmName
+        SourceOperatingSystem   = $sourceOs
+        DisplayOperatingSystem  = $displayOperatingSystem
+        OsGeneration            = $actionPlan.OsGeneration
+        ActionPlan              = $actionPlan.ActionPlan
+        ActionState             = if ($snapshot.Exists) { 'Queued' } else { 'Skipped' }
+        ActionJobId             = $null
+        VmFound                 = [bool]$snapshot.Exists
+        Started                 = [bool]$snapshot.Running
+        StartError              = $null
+        IntegrationReady        = [bool]$snapshot.IntegrationReady
+        IntegrationDetails      = if ($snapshot.Exists) { [string]$snapshot.IntegrationDetails } else { 'VM introuvable' }
+        NetworkConnected        = [bool]$snapshot.NetworkConnected
+        CurrentIPs              = @($snapshot.CurrentIPs)
+        IPMatches               = [bool]$snapshot.IPMatches
+        HighAvailabilityEnabled = [bool]$snapshot.HighAvailabilityEnabled
+        CurrentTag              = $snapshot.CurrentTag
+        BackupTagPresent        = [bool]$snapshot.BackupTagPresent
+        DisplayCompleted        = Test-VmCompliant -Exists $snapshot.Exists -Running $snapshot.Running -NetworkConnected $snapshot.NetworkConnected -IntegrationReady $snapshot.IntegrationReady -HighAvailabilityEnabled $snapshot.HighAvailabilityEnabled -BackupTagPresent $snapshot.BackupTagPresent -IPMatches $snapshot.IPMatches
     }
 }
 
@@ -728,7 +896,9 @@ foreach ($vmItem in @($vmInventory | Where-Object { $_.VmFound -and -not $_.Disp
 $iteration = 0
 $refreshNeeded = $true
 
-while ($refreshNeeded -and $iteration -lt $IntegrationMaxIterations) {
+# IntegrationMaxIterations = 0 means unlimited: keep polling until every VM is
+# compliant, or the operator interrupts with Ctrl+C.
+while ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $IntegrationMaxIterations)) {
     $iteration++
 
     foreach ($vmItem in @($vmInventory | Where-Object { $_.ActionPlan -eq 'WinRM' })) {
@@ -742,7 +912,7 @@ while ($refreshNeeded -and $iteration -lt $IntegrationMaxIterations) {
     )
 
     if ($namesToRefresh) {
-        $refreshedSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames $namesToRefresh
+        $refreshedSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames $namesToRefresh -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag
         $snapshotByName = @{}
         foreach ($snapshot in $refreshedSnapshots) {
             $snapshotByName[[string]$snapshot.VMName] = $snapshot
@@ -770,13 +940,18 @@ while ($refreshNeeded -and $iteration -lt $IntegrationMaxIterations) {
                 }
             }
 
-            $previouslyReady = [bool]$vmItem.IntegrationReady
             $vmItem.IntegrationReady = [bool]$snapshot.IntegrationReady
             $vmItem.IntegrationDetails = [string]$snapshot.IntegrationDetails
+            $vmItem.NetworkConnected = [bool]$snapshot.NetworkConnected
+            $vmItem.CurrentIPs = @($snapshot.CurrentIPs)
+            $vmItem.IPMatches = [bool]$snapshot.IPMatches
+            $vmItem.HighAvailabilityEnabled = [bool]$snapshot.HighAvailabilityEnabled
+            $vmItem.CurrentTag = $snapshot.CurrentTag
+            $vmItem.BackupTagPresent = [bool]$snapshot.BackupTagPresent
 
-            if (-not $previouslyReady -and $vmItem.IntegrationReady) {
+            if (Test-VmCompliant -Exists $vmItem.VmFound -Running $vmItem.Started -NetworkConnected $vmItem.NetworkConnected -IntegrationReady $vmItem.IntegrationReady -HighAvailabilityEnabled $vmItem.HighAvailabilityEnabled -BackupTagPresent $vmItem.BackupTagPresent -IPMatches $vmItem.IPMatches) {
                 $vmItem.DisplayCompleted = $true
-                Write-MigrationLog "[$($vmItem.VMName)] Integration Services actifs, retrait de la liste dynamique." -Level SUCCESS -LogFile $LogFile
+                Write-MigrationLog "[$($vmItem.VMName)] Conforme (démarrée, réseau, IP, Integration Services, HA, tag backup)." -Level SUCCESS -LogFile $LogFile
             }
 
             if (
@@ -799,7 +974,7 @@ while ($refreshNeeded -and $iteration -lt $IntegrationMaxIterations) {
     $remainingItems = @($vmInventory | Where-Object { -not $_.DisplayCompleted })
     $refreshNeeded = $remainingItems.Count -gt 0
 
-    if ($refreshNeeded -and $iteration -lt $IntegrationMaxIterations) {
+    if ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $IntegrationMaxIterations)) {
         Start-Sleep -Seconds $IntegrationPollIntervalSeconds
     }
 }
@@ -810,7 +985,13 @@ foreach ($vmItem in @($vmInventory | Where-Object { $_.ActionPlan -eq 'WinRM' })
 
 $remainingAfterLoop = @($vmInventory | Where-Object { -not $_.DisplayCompleted })
 if ($remainingAfterLoop) {
-    Write-MigrationLog "Des VM restent visibles après la boucle de rafraîchissement: $($remainingAfterLoop.Count)." -Level WARNING -LogFile $LogFile
+    Write-MigrationLog "$($remainingAfterLoop.Count) VM(s) non conformes après $iteration itération(s) (IntegrationMaxIterations atteint)." -Level WARNING -LogFile $LogFile
+    foreach ($vmItem in $remainingAfterLoop) {
+        $issues = (Get-ComplianceIssues -VmItem $vmItem) -join '; '
+        Write-MigrationLog "[$($vmItem.VMName)] $issues" -Level WARNING -LogFile $LogFile
+    }
+} else {
+    Write-MigrationLog "Toutes les VM sont conformes après $iteration itération(s)." -Level SUCCESS -LogFile $LogFile
 }
 
 $results = foreach ($vmItem in $vmInventory) {
@@ -821,8 +1002,14 @@ $results = foreach ($vmItem in $vmInventory) {
         OsGeneration              = $vmItem.OsGeneration
         VmFound                   = $vmItem.VmFound
         Started                   = $vmItem.Started
+        NetworkConnected          = $vmItem.NetworkConnected
+        CurrentIPs                = ($vmItem.CurrentIPs -join ',')
+        IPMatches                 = $vmItem.IPMatches
         IntegrationReady          = $vmItem.IntegrationReady
         IntegrationServicesStatus = $vmItem.IntegrationDetails
+        HighAvailabilityEnabled   = $vmItem.HighAvailabilityEnabled
+        BackupTagPresent          = $vmItem.BackupTagPresent
+        Compliant                 = $vmItem.DisplayCompleted
         ActionPlan                = $vmItem.ActionPlan
         ActionState               = $vmItem.ActionState
         ActionToTake              = Get-ActionDisplayText -VmItem $vmItem
@@ -832,7 +1019,7 @@ $results = foreach ($vmItem in $vmInventory) {
 
 Write-Information "" -InformationAction Continue
 $results |
-    Select-Object VMName, PowerState, OperatingSystem, IntegrationServicesStatus, ActionToTake |
+    Select-Object VMName, PowerState, OperatingSystem, Compliant, IntegrationServicesStatus, ActionToTake |
     Format-Table -AutoSize |
     Out-String -Width 4096 |
     ForEach-Object { Write-Information $_ -InformationAction Continue }
@@ -841,3 +1028,7 @@ $summaryPath = Join-Path -Path $Config.Paths.LogDir -ChildPath "step4-startvm-su
 $results | Export-Csv -Path $summaryPath -Delimiter ';' -NoTypeInformation
 Write-MigrationLog "Résumé exporté: $summaryPath" -Level SUCCESS -LogFile $LogFile
 Write-MigrationLog "step4-startvm terminé." -Level SUCCESS -LogFile $LogFile
+
+if ($remainingAfterLoop -and $IntegrationMaxIterations -gt 0) {
+    exit 2
+}

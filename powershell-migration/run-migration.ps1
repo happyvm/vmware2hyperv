@@ -5,10 +5,10 @@
 .DESCRIPTION
     Orchestrates the migration pipeline: (1) tag VMware VMs and create Veeam backup
     jobs, (2) shut down VMs and trigger Veeam backups, (3) run Instant Recovery and
-    post-migration configuration, (4) start the migrated VMs and verify Integration
-    Services (a manual validation pause happens between step3 and step4). Supports
-    resumption from any step, single-VM incident recovery, and automation-friendly
-    non-interactive mode.
+    post-migration configuration, (4) start the migrated VMs and poll until they are
+    fully compliant (network, IP, Integration Services, HA, backup tag) — a manual
+    validation pause happens between step3 and step4. Supports resumption from any
+    step, single-VM incident recovery, and automation-friendly non-interactive mode.
 
     Invoked with no arguments at all, it switches to an interactive mode: it first
     checks config.local.psd1 for missing values (running configure-migration.ps1's
@@ -816,10 +816,10 @@ Write-MigrationLog "======================================================" -Log
 if ($startIndex -le 3) {
     Write-Information "" -InformationAction Continue
     if ($NonInteractive -or $SkipManualValidation) {
-        Write-Warning ">>> NON-INTERACTIVE MODE: Skipping manual validation before step4 (StartVM / Integration Services)"
+        Write-Warning ">>> NON-INTERACTIVE MODE: Skipping manual validation before step4 (StartVM & post-migration validation)"
         Write-MigrationLog "NonInteractive/SkipManualValidation — skipping manual validation after step3." -LogFile $LogFile
     } else {
-        Write-Warning ">>> PAUSE before step4 (StartVM / Integration Services)"
+        Write-Warning ">>> PAUSE before step4 (StartVM & post-migration validation)"
         Write-Warning "    Check the migrated VMs in SCVMM/Hyper-V before Integration Services are configured."
         Read-Host "    Press Enter to continue"
         Write-MigrationLog "Manual validation confirmed — launching step4." -LogFile $LogFile
