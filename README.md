@@ -53,8 +53,8 @@ flowchart TD
     end
 
     subgraph POST["Post-migration"]
-        CHECKS[step4-PostMigrationChecks.ps1\nSCVMM compliance loop]
-        STARTVM[step5-StartVM.ps1\nStart VMs, Integration Services]
+        STARTVM[step4-StartVM.ps1\nStart VMs, Integration Services]
+        CHECKS[step5-PostMigrationChecks.ps1\nSCVMM compliance loop]
         CLEANUP[step6-CleanupVmware.ps1\nDelete source VMs]
     end
 
@@ -69,9 +69,9 @@ flowchart TD
     BULKIR --> WAIT
     WAIT --> WORKER
     WORKER --> MIGRATE
-    MIGRATE --> CHECKS
-    CHECKS --> STARTVM
-    STARTVM --> CLEANUP
+    MIGRATE --> STARTVM
+    STARTVM --> CHECKS
+    CHECKS --> CLEANUP
 ```
 
 ### Architecture: step3 worker pool
@@ -251,9 +251,26 @@ pwsh ./powershell-migration/step3-StartInstantRecovery.ps1 -BackupJobName Backup
 The delay between two starts is tunable with `-StartDelaySeconds` (or `Orchestrator.InstantRecoveryStartDelaySec` in config) to smooth the load on Veeam and the mount hosts. The script exits non-zero and lists the affected VMs if any mount fails or times out.
 
 
+### Start migrated VMs + Integration Services / VMware Tools actions
+
+Use `step4-StartVM.ps1` to:
+
+- start each VM from `lotissement.csv` (optionally filtered by `-Tag`);
+- list VM state + SCVMM configured operating system;
+- mount an Integration Services ISO for Windows Server 2003/2008 (paths from `IntegrationServices.IsoByOsFamily` in config);
+- try WinRM HTTPS then HTTP on Windows Server 2012+ VMs to upload and execute a VMware Tools removal script;
+- loop on Integration Services health checks (SCVMM signals) until ready or timeout.
+
+```powershell
+pwsh ./powershell-migration/step4-StartVM.ps1 -Tag HypMig-lot-118
+```
+
+If OS is below 2012, or WinRM is unavailable for 2012+, the script reports that integration/manual cleanup actions must be done by hand.
+You can tune integration checks with `StartVm.IntegrationPollIntervalSeconds` and `StartVm.IntegrationMaxIterations` in config (or via script parameters).
+
 ### Post-migration companion checks (SCVMM)
 
-Run this script in parallel with `run-migration.ps1` (or just after) to loop until all VMs in the CSV are compliant on SCVMM:
+Run this script once VMs are started (or in parallel with `run-migration.ps1`) to loop until all VMs in the CSV are compliant on SCVMM:
 
 - VM exists and is running
 - NIC is connected
@@ -263,34 +280,17 @@ Run this script in parallel with `run-migration.ps1` (or just after) to loop unt
 - guest IPv4 still matches the expected IP from CSV (`ExpectedIP` / `IP` / `IPAddress` columns)
 
 ```powershell
-pwsh ./powershell-migration/step4-PostMigrationChecks.ps1 -Tag HypMig-lot-118
+pwsh ./powershell-migration/step5-PostMigrationChecks.ps1 -Tag HypMig-lot-118
 ```
 
 Useful options:
 
 ```powershell
-pwsh ./powershell-migration/step4-PostMigrationChecks.ps1 -Tag HypMig-lot-118 -PollIntervalSeconds 120 -MaxIterations 30
-pwsh ./powershell-migration/step4-PostMigrationChecks.ps1 -CsvFile D:\Scripts\lotissement.csv
+pwsh ./powershell-migration/step5-PostMigrationChecks.ps1 -Tag HypMig-lot-118 -PollIntervalSeconds 120 -MaxIterations 30
+pwsh ./powershell-migration/step5-PostMigrationChecks.ps1 -CsvFile D:\Scripts\lotissement.csv
 ```
 
 `-MaxIterations 0` means infinite loop until every VM is compliant.
-
-### Start migrated VMs + Integration Services / VMware Tools actions
-
-Use `step5-StartVM.ps1` to:
-
-- start each VM from `lotissement.csv` (optionally filtered by `-Tag`);
-- list VM state + SCVMM configured operating system;
-- mount an Integration Services ISO for Windows Server 2003/2008 (paths from `IntegrationServices.IsoByOsFamily` in config);
-- try WinRM HTTPS then HTTP on Windows Server 2012+ VMs to upload and execute a VMware Tools removal script;
-- loop on Integration Services health checks (SCVMM signals) until ready or timeout.
-
-```powershell
-pwsh ./powershell-migration/step5-StartVM.ps1 -Tag HypMig-lot-118
-```
-
-If OS is below 2012, or WinRM is unavailable for 2012+, the script reports that integration/manual cleanup actions must be done by hand.
-You can tune integration checks with `StartVm.IntegrationPollIntervalSeconds` and `StartVm.IntegrationMaxIterations` in config (or via script parameters).
 
 ## Logs
 

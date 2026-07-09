@@ -32,7 +32,7 @@
     Maximum WinRM connection attempts. Default: 20.
 
 .EXAMPLE
-    .\step5-StartVM.ps1 -Tag HypMig-lot-118
+    .\step4-StartVM.ps1 -Tag HypMig-lot-118
 
 .NOTES
     Part of the vmware2hyperv migration toolkit.
@@ -60,7 +60,7 @@ Assert-PathPresent -Path $CsvFile -Label "Batch CSV"
 
 if (-not $LogFile) {
     $batchLabel = if ([string]::IsNullOrWhiteSpace($Tag)) { 'all' } else { $Tag }
-    $LogFile = "$($Config.Paths.LogDir)\step5-startvm-$batchLabel-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $LogFile = "$($Config.Paths.LogDir)\step4-startvm-$batchLabel-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 }
 
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
@@ -837,7 +837,7 @@ $results |
     Out-String -Width 4096 |
     ForEach-Object { Write-Information $_ -InformationAction Continue }
 
-$summaryPath = Join-Path -Path $Config.Paths.LogDir -ChildPath "step5-startvm-summary-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
+$summaryPath = Join-Path -Path $Config.Paths.LogDir -ChildPath "step4-startvm-summary-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
 $results | Export-Csv -Path $summaryPath -Delimiter ';' -NoTypeInformation
 Write-MigrationLog "Résumé exporté: $summaryPath" -Level SUCCESS -LogFile $LogFile
-Write-MigrationLog "step5-startvm terminé." -Level SUCCESS -LogFile $LogFile
+Write-MigrationLog "step4-startvm terminé." -Level SUCCESS -LogFile $LogFile

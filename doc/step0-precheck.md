@@ -37,8 +37,8 @@ SRV-LIN-001;LOT-02
 
 | Paramètre | Type | Défaut | Description |
 |-----------|------|--------|-------------|
-| `-VCenter` | string | `config.psd1` | Serveur vCenter |
-| `-InputCsv` | string | `config.psd1` | CSV d'entrée |
+| `-VCenter` | string | `config.psd1`/`config.local.psd1` | Serveur vCenter |
+| `-InputCsv` | string | `config.psd1`/`config.local.psd1` | CSV d'entrée |
 | `-OutputFolder` | string | `.` | Dossier de sortie |
 | `-TagCategoryName` | string | `MigrationLot` | Nom de la catégorie de tag |
 | `-CustomAttributeName` | string | `NB_last_backup` | Attribut personnalisé pour le backup |
@@ -83,9 +83,11 @@ Le script détecte l'année Windows via :
 
 ## Dépendances
 
+- `lib.ps1` — `Import-MigrationConfig` (fusion avec `config.local.psd1`)
 - `config.psd1`
 - Module `VMware.PowerCLI`
 
 ## Voir aussi
 
 - [config.psd1](config.md) — Configuration
+- [configure-migration.ps1](configure-migration.md) — Assistant de configuration interactif

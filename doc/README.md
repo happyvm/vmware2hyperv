@@ -39,8 +39,8 @@ Documentation détaillée de chaque script du toolkit de migration VMware vers H
 
 | Script | Rôle |
 |--------|------|
-| [step4-PostMigrationChecks.ps1](step4-PostMigrationChecks.md) | Vérifications SCVMM post-migration |
-| [step5-StartVM.ps1](step5-StartVM.md) | Démarrage VMs + Integration Services |
+| [step4-StartVM.ps1](step4-StartVM.md) | Démarrage VMs + Integration Services |
+| [step5-PostMigrationChecks.ps1](step5-PostMigrationChecks.md) | Vérifications SCVMM post-migration |
 | [step6-CleanupVmware.ps1](step6-CleanupVmware.md) | Suppression des VMs sources VMware |
 
 ## Librairie partagée

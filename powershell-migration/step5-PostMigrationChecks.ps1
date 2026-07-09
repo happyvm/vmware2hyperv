@@ -29,7 +29,7 @@
     Path to the log file. Auto-generated if not provided.
 
 .EXAMPLE
-    .\step4-PostMigrationChecks.ps1 -Tag HypMig-lot-118
+    .\step5-PostMigrationChecks.ps1 -Tag HypMig-lot-118
 
 .NOTES
     Part of the vmware2hyperv migration toolkit.
@@ -65,7 +65,7 @@ Assert-PathPresent -Path $ExtractIpCsvFile -Label "Extract IP CSV"
 
 if (-not $LogFile) {
     $batchLabel = if ([string]::IsNullOrWhiteSpace($Tag)) { 'all' } else { $Tag }
-    $LogFile = "$($Config.Paths.LogDir)\step4-postcheck-$batchLabel-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $LogFile = "$($Config.Paths.LogDir)\step5-postcheck-$batchLabel-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 }
 
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback

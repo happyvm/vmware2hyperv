@@ -201,7 +201,7 @@ StartVm = @{
 }
 ```
 
-Réglages pour `step5-StartVM.ps1`.
+Réglages pour `step4-StartVM.ps1`.
 
 ## Voir aussi
 
