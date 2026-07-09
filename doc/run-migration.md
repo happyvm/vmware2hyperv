@@ -21,6 +21,8 @@ Orchestrateur de la pipeline de migration VMware → Hyper-V en 3 étapes.
 
 L'orchestrateur supporte la reprise depuis n'importe quelle étape, le mode incident recovery mono-VM, et l'exécution non-interactive pour l'automatisation.
 
+Aucune pause manuelle n'interrompt plus l'enchaînement step2 → step3 : le backup Veeam se termine (step2) et l'Instant Recovery (step3) démarre directement à la suite. Une pause de validation manuelle a lieu **après step3**, une fois la migration terminée : elle laisse le temps de vérifier les VMs migrées dans SCVMM/Hyper-V avant de lancer [step4-StartVM.ps1](step4-StartVM.md) (démarrage + Integration Services), qui reste un script séparé non orchestré par `run-migration.ps1`. `-SkipManualValidation` (ou `-NonInteractive`) saute cette pause.
+
 ### Mode interactif (aucun argument)
 
 Lancé sans le moindre paramètre, le script bascule en mode interactif :
@@ -43,7 +45,7 @@ Dès qu'un paramètre est passé explicitement (ou `-NonInteractive`), ce mode e
 | `-Step3VmName` | string | Non | — | Restreint step3 à une seule VM (incident recovery) |
 | `-Step3RecoveryMode` | string | Non | `Standard` | Mode recovery : `Standard`, `FullStep3`, `CommitAndNetwork` |
 | `-NonInteractive` | switch | Non | — | Désactive les prompts interactifs |
-| `-SkipManualValidation` | switch | Non | — | Saute la pause de validation manuelle avant step3 |
+| `-SkipManualValidation` | switch | Non | — | Saute la pause de validation manuelle après step3, avant step4 |
 
 ## Architecture du pool de workers (step3)
 

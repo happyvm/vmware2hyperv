@@ -42,7 +42,7 @@
     Disable all interactive prompts for automation-friendly execution.
 
 .PARAMETER SkipManualValidation
-    Skip the manual validation pause between step2 and step3.
+    Skip the manual validation pause after step3 completes, before step4 (StartVM).
 
 .EXAMPLE
     .\run-migration.ps1
@@ -98,7 +98,7 @@ param (
     # Disable all interactive prompts (automation-friendly mode)
     [switch]$NonInteractive,
 
-    # Skip the manual validation pause between step2 and step3
+    # Skip the manual validation pause after step3, before step4 (StartVM)
     [switch]$SkipManualValidation
 )
 
@@ -227,19 +227,6 @@ if ($startIndex -le 0) {
 if ($startIndex -le 1) {
     Invoke-OrchestratorStep -Step "step2" -Action {
         & "$PSScriptRoot\step2-ShutdownVM_StartBackupVeeam.ps1" -Tag $Tag -RecipientGroup $RecipientGroup -LogFile $LogFile
-    }
-
-    Write-Information "" -InformationAction Continue
-    if ($NonInteractive -or $SkipManualValidation) {
-        Write-Warning ">>> NON-INTERACTIVE MODE: Skipping manual validation before step3 (Instant Recovery)"
-        Write-Warning "    Check in the Veeam console that job 'Backup-$Tag' is completed."
-        Write-MigrationLog "NonInteractive/SkipManualValidation — skipping manual validation, launching step3." -LogFile $LogFile
-    }
-    else {
-        Write-Warning ">>> PAUSE before step3 (Instant Recovery)"
-        Write-Warning "    Check in the Veeam console that job 'Backup-$Tag' is completed."
-        Read-Host "    Press Enter to continue"
-        Write-MigrationLog "Manual validation confirmed — launching step3." -LogFile $LogFile
     }
 }
 
@@ -815,3 +802,14 @@ if ($finalFailedCount -gt 0) {
 Write-MigrationLog "======================================================" -LogFile $LogFile
 Write-MigrationLog "Migration of batch $Tag completed successfully." -Level SUCCESS -LogFile $LogFile
 Write-MigrationLog "======================================================" -LogFile $LogFile
+
+Write-Information "" -InformationAction Continue
+if ($NonInteractive -or $SkipManualValidation) {
+    Write-Warning ">>> NON-INTERACTIVE MODE: Skipping manual validation before step4 (StartVM / Integration Services)"
+    Write-MigrationLog "NonInteractive/SkipManualValidation — skipping manual validation after step3." -LogFile $LogFile
+} else {
+    Write-Warning ">>> PAUSE before step4 (StartVM / Integration Services)"
+    Write-Warning "    Check the migrated VMs in SCVMM/Hyper-V, then run step4-StartVM.ps1 -Tag $Tag when ready."
+    Read-Host "    Press Enter to confirm and finish"
+    Write-MigrationLog "Manual validation confirmed after step3." -LogFile $LogFile
+}
