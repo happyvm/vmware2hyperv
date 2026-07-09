@@ -494,4 +494,40 @@ Describe 'step3-MigrateVM.ps1 - phase Action wiring against step3/ function sign
         )
         $mismatches | Should -BeNullOrEmpty -Because "step3-MigrateVM.ps1 passes a parameter name the target function doesn't declare:`n$($mismatches -join "`n")"
     }
+
+    It 'Invoke-Phase declares NonBlocking as a switch, matching how every call site uses it' {
+        <#
+        Regression: NonBlocking was declared [bool]$NonBlocking = $false, but every call
+        site (OS/HA/LiveMigration/BackupTag phases) uses it as a bare flag: "-NonBlocking -Action {...}".
+        A [bool] parameter needs an explicit value, so PowerShell tried to bind the next
+        token (-Action) as NonBlocking's value and failed: "Missing an argument for parameter
+        'NonBlocking'. Specify a parameter of type 'System.Boolean' and try again." This only
+        surfaced once a task got far enough to reach the first NonBlocking phase (OS) — the
+        earlier -Context/-Result bug had masked it until now.
+        #>
+        $invokePhaseFn = $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Invoke-Phase'
+        }, $true) | Select-Object -First 1
+        $invokePhaseFn | Should -Not -BeNullOrEmpty
+
+        $nonBlockingParam = $invokePhaseFn.Body.ParamBlock.Parameters | Where-Object {
+            $_.Name.VariablePath.UserPath -eq 'NonBlocking'
+        }
+        $nonBlockingParam | Should -Not -BeNullOrEmpty
+
+        $bareFlagCallSites = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Invoke-Phase'
+        }, $true) | Where-Object {
+            $_.CommandElements | Where-Object {
+                $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'NonBlocking'
+            }
+        })
+        $bareFlagCallSites.Count | Should -BeGreaterThan 0 -Because 'this test is only meaningful if -NonBlocking is actually used somewhere'
+
+        $nonBlockingParam.StaticType.Name | Should -Be 'SwitchParameter' -Because "every call site (e.g. line $($bareFlagCallSites[0].Extent.StartLineNumber)) uses '-NonBlocking' as a bare flag with no explicit value"
+    }
 }

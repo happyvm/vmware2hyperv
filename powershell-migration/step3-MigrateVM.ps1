@@ -118,7 +118,7 @@ function Invoke-Phase {
         [string]$Name,
         [string]$DisplayName,
         [scriptblock]$Action,
-        [bool]$NonBlocking = $false
+        [switch]$NonBlocking
     )
     if (-not (Should-RunPhase $Name)) {
         Add-Step3PhaseResult -Result $result -Phase $DisplayName -Status 'Skipped' -Message "Désactivée"
