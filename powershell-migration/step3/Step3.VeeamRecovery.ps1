@@ -236,12 +236,16 @@ function Wait-InstantRecoveryUserAction {
                 Where-Object { $_.VMName -eq $Vm } |
                 Select-Object -First 1
 
-            $currentState = if ($instantRecoverySession) { [string]$instantRecoverySession.State } else { "<none>" }
+            # Property guard: Get-VBRInstantRecovery / Get-VBRRestoreSession can return objects
+            # that don't (yet) expose a 'State' property (e.g. while the session is still being
+            # created), and StrictMode throws PropertyNotFoundException on direct access.
+            $irState = if ($instantRecoverySession -and $instantRecoverySession.PSObject.Properties['State']) { [string]$instantRecoverySession.State } else { $null }
+            $currentState = if ($irState) { $irState } else { "<none>" }
             $restoreSessionState = "<none>"
             $waitingDetected = $false
             $detectionSource = $null
 
-            if ($instantRecoverySession -and $instantRecoverySession.State -eq "WaitingForUserAction") {
+            if ($irState -eq "WaitingForUserAction") {
                 $waitingDetected = $true
                 $detectionSource = "instant-recovery-state"
             }
@@ -260,7 +264,9 @@ function Wait-InstantRecoveryUserAction {
                     Select-Object -First 1
 
                 if ($restoreSession) {
-                    $restoreSessionState = [string]$restoreSession.State
+                    if ($restoreSession.PSObject.Properties['State']) {
+                        $restoreSessionState = [string]$restoreSession.State
+                    }
                     $sessionLog = $restoreSession.Logger.GetLog()
                     $logRecords = @()
                     if ($sessionLog.UpdatedRecords) { $logRecords += $sessionLog.UpdatedRecords }
@@ -423,8 +429,8 @@ function Complete-InstantRecovery {
             [PSCustomObject]@{
                 Found  = $true
                 Name   = [string]$restoreSession.Name
-                State  = [string]$restoreSession.State
-                Result = [string]$restoreSession.Result
+                State  = if ($restoreSession.PSObject.Properties['State']) { [string]$restoreSession.State } else { $null }
+                Result = if ($restoreSession.PSObject.Properties['Result']) { [string]$restoreSession.Result } else { $null }
             }
         } -ArgumentList @($VMName)
 
