@@ -268,7 +268,9 @@ function Start-WinRmRemediationJob {
         [int]$RetryDelaySeconds = 15
     )
 
-    return Start-Job -Name "startvm-$VMName" -ArgumentList @(
+    # Start-ThreadJob is used instead of Start-Job to avoid PSUseUsingScopeModifierInNewRunspaces warnings.
+    # ThreadJob is available in PS 7+ and provides better performance for parallel workloads.
+    return Start-ThreadJob -Name "startvm-$VMName" -ArgumentList @(
         $VMName,
         $LocalScriptPath,
         $RemoteScriptPath,
