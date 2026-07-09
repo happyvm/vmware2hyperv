@@ -204,7 +204,11 @@ while ($true) {
         $restoreSessions = @(Get-VBRRestoreSession)
 
         foreach ($vmName in @($VmNames)) {
-            $irSession = $irSessions | Where-Object { $_.VMName -eq $vmName } | Select-Object -First 1
+            # Property guard: the dot-sourced module enables StrictMode in this session,
+            # and Get-VBRInstantRecovery can return objects without a VMName property.
+            $irSession = $irSessions |
+                Where-Object { $_.PSObject.Properties['VMName'] -and [string]$_.VMName -eq $vmName } |
+                Select-Object -First 1
             # Use the shared bounded-name helper to avoid matching another VM whose
             # name shares a prefix (WEB1 vs WEB10).
             $restoreSession = Find-VmRestoreSession -VmName $vmName -RestoreSessions $restoreSessions
@@ -253,11 +257,16 @@ while ($true) {
                 DetectionSource = $detectionSource
             }
         }
-    } -ArgumentList @(, [string[]]$pendingNames, $step3VeeamRecoveryPath))
+    } -ArgumentList @([string[]]$pendingNames, $step3VeeamRecoveryPath))
 
     foreach ($snapshot in $snapshots) {
         $tracked = $vmStatuses[[string]$snapshot.VMName]
-        if (-not $tracked) { continue }
+        if (-not $tracked) {
+            # A snapshot that maps to no tracked VM means the poll payload is malformed
+            # (e.g. argument binding regression) — surface it instead of dropping it.
+            Write-MigrationLog "Monitoring snapshot ignored: unknown VM '$($snapshot.VMName)' (tracked: $($vmStatuses.Keys -join ', '))." -Level WARNING -LogFile $LogFile
+            continue
+        }
 
         $tracked.IrState = [string]$snapshot.IrState
         $tracked.SessionState = [string]$snapshot.SessionState
