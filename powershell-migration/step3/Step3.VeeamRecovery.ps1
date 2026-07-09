@@ -279,8 +279,13 @@ function Wait-InstantRecoveryUserAction {
                         $logRecords += $sessionLog.Records
                     }
 
+                    # Property guard: record objects on this Veeam module don't all expose
+                    # the same fields (e.g. 'Message' can be absent) — read only what exists.
                     $logText = ($logRecords | ForEach-Object {
-                        @($_.Title, $_.Description, $_.Message, $_.Text)
+                        $record = $_
+                        @('Title', 'Description', 'Message', 'Text') | ForEach-Object {
+                            if ($record.PSObject.Properties[$_]) { $record.$_ }
+                        }
                     } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join "`n"
 
                     if ($logText -match "Waiting for user action") {
