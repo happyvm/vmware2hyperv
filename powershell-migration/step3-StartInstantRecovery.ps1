@@ -196,8 +196,11 @@ while ($true) {
 
         foreach ($vmName in @($VmNames)) {
             $irSession = $irSessions | Where-Object { $_.VMName -eq $vmName } | Select-Object -First 1
+            # Exact names plus a bounded pattern: a plain "$vmName*" wildcard would also
+            # match another batch VM whose name shares the prefix (WEB1 vs WEB10).
+            $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($vmName)
             $restoreSession = $restoreSessions |
-                Where-Object { $_.Name -eq $vmName -or $_.Name -eq "$vmName-migrationhyp" -or $_.Name -like "$vmName*" } |
+                Where-Object { $_.Name -eq $vmName -or $_.Name -eq "$vmName-migrationhyp" -or $_.Name -match $vmSessionPattern } |
                 Sort-Object -Property CreationTime -Descending |
                 Select-Object -First 1
 

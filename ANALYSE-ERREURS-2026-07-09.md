@@ -216,14 +216,20 @@ Le même défaut `Get-Tag` sans catégorie existe dans
 
 ## Synthèse des priorités
 
-| # | Sévérité | Fichier | Correctif | Effort |
+| # | Sévérité | Fichier | Correctif | Statut |
 |---|---|---|---|---|
-| 1 | Critique | step2 + run-migration | `exit 1` → `throw` (ou contrôle `$LASTEXITCODE`) | 30 min |
-| 2 | Critique | step-XX-StartVM l.431 | `powershell -File .bat` → `cmd.exe /c` | 15 min |
-| 3 | Important | step3-MigrateVM, step3-StartInstantRecovery | supprimer `-like "$Vm*"` | 30 min |
-| 4 | Important | step3-MigrateVM l.1213 | propager l'échec LiveMigration | 30 min |
-| 5 | Important | step3-MigrateVM l.271 | VLAN invalide = échec de tâche | 30 min |
-| 6 | Moyen | stepx-premigration_mail | `exit` → `throw`, import avant Set-PowerCLIConfiguration | 20 min |
-| 7 | Moyen | run-migration l.531 | garde null sur `Orchestrator` | 10 min |
-| 8 | Moyen | worker-step3 | inverser l'ordre des tests d'état | 10 min |
-| 9 | Moyen | cleanup/step1/mail | `Get-Tag` avec `-Category` ; supprimer le tag ou corriger la doc | 30 min |
+| 1 | Critique | step2 + run-migration | `exit 1` → `throw` + garde `$LASTEXITCODE` dans l'orchestrateur | ✅ Corrigé |
+| 2 | Critique | step-XX-StartVM l.431 | `powershell -File .bat` → `cmd.exe /c` + gestion des codes retour 0/1/2 | ✅ Corrigé |
+| 3 | Important | step3-MigrateVM, step3-StartInstantRecovery | motif borné `^VM($|[^\w-])` au lieu de `-like "$Vm*"` | ✅ Corrigé |
+| 4 | Important | step3-MigrateVM l.1213 | échec LiveMigration propagé (`throw`), cas « runner sans Hyper-V » conservé en warning | ✅ Corrigé |
+| 5 | Important | step3-MigrateVM l.271 | VLAN invalide (et VM absente de SCVMM) = échec de tâche | ✅ Corrigé |
+| 6 | Moyen | stepx-premigration_mail | `exit` → `throw`, import avant Set-PowerCLIConfiguration ; appel rendu non bloquant dans step2 | ✅ Corrigé |
+| 7 | Moyen | run-migration l.531 | garde null sur `Orchestrator` | ✅ Corrigé |
+| 8 | Moyen | worker-step3 | tests d'état combinés (`ConfiguredWithWarning` atteignable) | ✅ Corrigé |
+| 9 | Moyen | cleanup/step1/mail | `Get-Tag`/`New-TagAssignment` scopés à la catégorie ; doc cleanup alignée sur le code | ✅ Corrigé |
+| 10 | Mineur | step0-uptime_extract_mail | `-MailTo` en `[string[]]`, `exit` → `throw` | ✅ Corrigé |
+
+Validation post-correctifs : 0 erreur de syntaxe, 122 tests Pester verts, aucun nouveau
+warning PSScriptAnalyzer. Restent volontairement non traités : BOM des `.psd1`
+(commentaires seulement), portée globale de `Disconnect-VCenter` (comportement assumé),
+`Send-HtmlMail` non bloquant (par conception).

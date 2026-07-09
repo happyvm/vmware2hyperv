@@ -76,8 +76,9 @@ $rowsWithTag = @($vmList | Where-Object { $_.PSObject.Properties['Tag'] -and -no
 if ($rowsWithTag) {
     $taggedRows = @($rowsWithTag | Where-Object { $_.Tag.Trim() -eq $Tag })
     if (-not $taggedRows) {
-        Write-MigrationLog "No CSV row carries tag '$Tag'; refusing to shut down VMs from other batches." -Level ERROR -LogFile $LogFile
-        exit 1
+        $message = "No CSV row carries tag '$Tag'; refusing to shut down VMs from other batches."
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+        throw $message
     }
 
     $excludedCount = $vmList.Count - $taggedRows.Count
@@ -201,8 +202,9 @@ if ($vmStates.Count -gt 0) {
         if (-not $allPoweredOff) {
             if ($elapsedSeconds -ge ($timeoutSeconds + $forcedStopGraceSeconds)) {
                 $stuckVms = @($vmStates.Keys | Where-Object { -not $vmStates[$_].PoweredOffLogged }) -join ', '
-                Write-MigrationLog "Still powered on ${forcedStopGraceSeconds}s after forced power-off: $stuckVms. Aborting step2 before starting the backup." -Level ERROR -LogFile $LogFile
-                exit 1
+                $message = "Still powered on ${forcedStopGraceSeconds}s after forced power-off: $stuckVms. Aborting step2 before starting the backup."
+                Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+                throw $message
             }
 
             Start-Sleep -Seconds $pollIntervalSeconds
@@ -210,10 +212,18 @@ if ($vmStates.Count -gt 0) {
     } while (-not $allPoweredOff)
 }
 
-Disconnect-VCenter -LogFile $LogFile
-
 Write-MigrationLog "Sending pre-migration email" -LogFile $LogFile
-& $PreMigrationMailScript -tagName $Tag -recipientGroup $RecipientGroup -vCenterServer $VCenterServer
+try {
+    # Reuse the vCenter session opened by this step (-SkipVCenterLogin) instead of
+    # letting the mail script disconnect/reconnect a second full PowerCLI session.
+    & $PreMigrationMailScript -tagName $Tag -recipientGroup $RecipientGroup -vCenterServer $VCenterServer -SkipVCenterLogin
+} catch {
+    # The notification email must not block the backup: VMs are already shut down at
+    # this point, aborting here would leave the batch neither backed up nor restarted.
+    Write-MigrationLog "Pre-migration email failed: $($_.Exception.Message). Continuing with the Veeam backup (notification is non-blocking)." -Level WARNING -LogFile $LogFile
+}
+
+Disconnect-VCenter -LogFile $LogFile
 
 if ($PSVersionTable.PSEdition -eq "Core") {
     Write-MigrationLog "PowerShell 7 detected: starting the Veeam job in Windows PowerShell to avoid deserialized objects." -Level WARNING -LogFile $LogFile
@@ -257,15 +267,16 @@ Write-Output "[SUCCESS] Job Veeam '$JobName' started successfully."
     if ($winPsExitCode -ne 0) {
         $message = "Failed to start Veeam job '$JobName' in Windows PowerShell (exit code $winPsExitCode)."
         Write-MigrationLog $message -Level ERROR -LogFile $LogFile
-        exit 1
+        throw $message
     }
 } else {
     $Job = Get-VBRJob -Name $JobName
     if ($Job) {
-        Start-VBRJob -Job $Job
+        Start-VBRJob -Job $Job | Out-Null
         Write-MigrationLog "Job Veeam '$JobName' started successfully." -Level SUCCESS -LogFile $LogFile
     } else {
-        Write-MigrationLog "Job '$JobName' not found in Veeam." -Level ERROR -LogFile $LogFile
-        exit 1
+        $message = "Job '$JobName' not found in Veeam."
+        Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+        throw $message
     }
 }
