@@ -177,9 +177,16 @@ Use this script from an administrative shell on a server that has the SCVMM Powe
 
 ## Invoke-SCVMMHostPatchBaseline.ps1
 
-**Purpose:** Automate the SCVMM-managed Hyper-V patching cycle from a scheduled task: synchronize the WSUS catalog managed by SCVMM, refresh a patch baseline, assign it to Hyper-V hosts, scan compliance, then remediate hosts with SCVMM maintenance mode and Live Migration.
+**Purpose:** Automate the SCVMM-managed Hyper-V patching cycle from a scheduled task: synchronize the WSUS catalog managed by SCVMM, refresh a patch baseline, assign it to Hyper-V hosts, scan compliance in parallel, remediate hosts with SCVMM maintenance mode and Live Migration, then re-scan and report each host's final compliance state.
 
 Run this script from an administrative shell or a Windows scheduled task on a management server with the SCVMM PowerShell module installed. By default, hosts are remediated one by one to preserve cluster capacity while SCVMM live-migrates workloads away from the host being patched.
+
+Behavior designed for unattended runs:
+
+- every step is timestamped on the console and, with `-LogFile`, appended to a log file (an unwritable path degrades to console-only with a single warning);
+- a host whose compliance scan fails is excluded from remediation and counted as failed;
+- a typo in `-VMHostNames` aborts the run instead of silently skipping the host;
+- exit code `0` means no host failed, `1` means at least one host failed (or a fatal error occurred) — wire this into the scheduled task result monitoring.
 
 ### Requirements
 
@@ -203,7 +210,9 @@ Run this script from an administrative shell or a Windows scheduled task on a ma
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Invoke-SCVMMHostPatchBaseline.ps1 `
     -VMMServer scvmm01.contoso.local `
     -BaselineName 'Hyper-V Monthly Security Baseline' `
-    -HostGroupName 'All Hosts\Production\Hyper-V'
+    -HostGroupName 'All Hosts\Production\Hyper-V' `
+    -LogFile 'C:\Logs\HyperV-Patching.log' `
+    -ContinueOnHostFailure
 
 # Limit the maintenance window to selected hosts
 .\Invoke-SCVMMHostPatchBaseline.ps1 `
@@ -224,8 +233,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Invoke-SCVMMH
 | `-UpdateClassifications` | No | WSUS/SCVMM classifications to include; defaults to security, critical, rollup, and updates |
 | `-IncludeUpdateTitleRegex` | No | Optional regex to keep only matching update titles |
 | `-ExcludeUpdateTitleRegex` | No | Regex to exclude update titles; defaults to previews, language packs, and feature updates |
+| `-LogFile` | No | Timestamped log file, recommended for scheduled runs |
+| `-PollIntervalSeconds` | No | SCVMM job polling interval; defaults to 30 seconds |
 | `-SkipSynchronization` | No | Reuse the existing catalog without starting WSUS synchronization |
 | `-SkipRemediation` | No | Refresh baseline and scan compliance only, without patching hosts |
+| `-SkipFinalComplianceScan` | No | Skip the post-remediation compliance re-scan and final state report |
+| `-ContinueOnHostFailure` | No | Keep patching the remaining hosts when one host's remediation fails (sequential mode); failures still drive exit code 1 |
 | `-ParallelRemediation` | No | Remediate all selected hosts in parallel; not recommended unless cluster capacity has been validated |
 
 
