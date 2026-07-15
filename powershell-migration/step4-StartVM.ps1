@@ -166,9 +166,17 @@ function Get-SCVMMVmInventory {
             # properties (VirtualMachineState, GuestAgentStatus...), and in local
             # (non-compat) mode this scriptblock runs under the caller's StrictMode.
             function Get-VmPropertyText {
-                param($Vm, [string]$PropertyName)
+                param($Vm, [string]$PropertyName, [string]$Context = 'SCVMM VM')
+                if (-not $Vm) {
+                    Write-Verbose "SCVMM debug: $Context is null while reading '$PropertyName'."
+                    return ''
+                }
+
                 $property = $Vm.PSObject.Properties[$PropertyName]
                 if ($property) { return [string]$property.Value }
+
+                $availableProperties = @($Vm.PSObject.Properties.Name | Sort-Object) -join ', '
+                Write-Verbose "SCVMM debug: property '$PropertyName' is missing on $Context ($($Vm.GetType().FullName)). Available properties: $availableProperties"
                 return ''
             }
 
@@ -293,10 +301,13 @@ function Get-SCVMMVmInventory {
 
                 $adapters = @(Get-SCVirtualNetworkAdapter -VM $vm -ErrorAction SilentlyContinue)
                 $connectedAdapters = @($adapters | Where-Object {
-                    $state = [string]$_.ConnectionState
+                    $state = Get-VmPropertyText -Vm $_ -PropertyName 'ConnectionState' -Context "network adapter for '$name'"
+                    $vmNetwork = Get-VmPropertyText -Vm $_ -PropertyName 'VMNetwork' -Context "network adapter for '$name'"
+                    $vmSubnet = Get-VmPropertyText -Vm $_ -PropertyName 'VMSubnet' -Context "network adapter for '$name'"
+
                     $state -match 'Connected|Connect\u00e9|OK|On' -or
-                    (-not [string]::IsNullOrWhiteSpace([string]$_.VMNetwork)) -or
-                    (-not [string]::IsNullOrWhiteSpace([string]$_.VMSubnet))
+                    (-not [string]::IsNullOrWhiteSpace($vmNetwork)) -or
+                    (-not [string]::IsNullOrWhiteSpace($vmSubnet))
                 })
                 $networkConnected = $connectedAdapters.Count -gt 0
 
