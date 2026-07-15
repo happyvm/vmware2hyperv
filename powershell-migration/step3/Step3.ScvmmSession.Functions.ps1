@@ -31,6 +31,43 @@
 Set-StrictMode -Version Latest
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Get-ScvmmObjectPropertyValue
+# ══════════════════════════════════════════════════════════════════════════════
+function Get-ScvmmObjectPropertyValue {
+    <#
+    .SYNOPSIS
+        StrictMode-safe SCVMM object property reader.
+
+    .DESCRIPTION
+        SCVMM cmdlets can return objects with different property sets depending
+        on module version, object freshness, or serialization through the WinPS
+        compatibility session. Direct dot-property access can throw under
+        Set-StrictMode -Version Latest when the property is absent. This helper
+        safely reads a property by name and returns $null when it is missing.
+    #>
+    param(
+        $InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyName,
+
+        [string]$Context = 'SCVMM object'
+    )
+
+    if (-not $InputObject) {
+        Write-Verbose "SCVMM debug: $Context is null while reading '$PropertyName'."
+        return $null
+    }
+
+    $property = $InputObject.PSObject.Properties[$PropertyName]
+    if ($property) { return $property.Value }
+
+    $availableProperties = @($InputObject.PSObject.Properties.Name | Sort-Object) -join ', '
+    Write-Verbose "SCVMM debug: property '$PropertyName' is missing on $Context ($($InputObject.GetType().FullName)). Available properties: $availableProperties"
+    return $null
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Initialize-ScvmmSessionFunction (PS7 orchestrator — runs LOCALLY, not pushed)
 # ══════════════════════════════════════════════════════════════════════════════
 function Initialize-ScvmmSessionFunction {
