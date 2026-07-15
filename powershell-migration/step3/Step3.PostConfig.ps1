@@ -17,7 +17,8 @@
 .NOTES
     Depends on lib.ps1 (Write-MigrationLog, Invoke-SCVMMCommand, Import-RequiredModule,
     Install-RsatHyperV, Get-SCVMMVmRuntimeState, Start-SCVMMHostMigration,
-    ConvertTo-NormalizedHostName, ConvertTo-NormalizedOperatingSystemName,
+    Get-SCVMMHostMigrationJobState, ConvertTo-NormalizedHostName,
+    ConvertTo-NormalizedOperatingSystemName,
     Resolve-OperatingSystemMapping).
 #>
 
@@ -157,9 +158,15 @@ function Move-VmToSecondHost {
         $vmStateBeforeMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName -Refresh
         Write-MigrationLog "[$Name] Preparing host migration validation. Current host: '$($vmStateBeforeMove.HostName)'." -LogFile $LogFile
 
+        $scvmmMigrationJob = $null
+
         try {
-            Start-SCVMMHostMigration -Name $Name -ServerName $ServerName -DestinationHost $DestinationHost
-            Write-MigrationLog "[$Name] LiveMigration to $DestinationHost requested via SCVMM." -Level SUCCESS -LogFile $LogFile
+            $scvmmMigrationJob = Start-SCVMMHostMigration -Name $Name -ServerName $ServerName -DestinationHost $DestinationHost
+            if ($scvmmMigrationJob -and -not [string]::IsNullOrWhiteSpace($scvmmMigrationJob.ID)) {
+                Write-MigrationLog "[$Name] LiveMigration to $DestinationHost requested via SCVMM (job: '$($scvmmMigrationJob.Name)', id: '$($scvmmMigrationJob.ID)', status: '$($scvmmMigrationJob.Status)')." -Level SUCCESS -LogFile $LogFile
+            } else {
+                Write-MigrationLog "[$Name] LiveMigration to $DestinationHost requested via SCVMM." -Level SUCCESS -LogFile $LogFile
+            }
         } catch {
             Write-MigrationLog "[$Name] SCVMM migration failed; retrying via Hyper-V Move-VM. Details: $_" -Level WARNING -LogFile $LogFile
 
@@ -186,6 +193,17 @@ function Move-VmToSecondHost {
 
             $vmStateAfterMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName -Refresh
             $currentHostNormalized = ConvertTo-NormalizedHostName -Name $vmStateAfterMove.HostName
+
+            if ($scvmmMigrationJob -and -not [string]::IsNullOrWhiteSpace($scvmmMigrationJob.ID)) {
+                $scvmmMigrationJobState = Get-SCVMMHostMigrationJobState -ServerName $ServerName -JobId $scvmmMigrationJob.ID
+                if ($scvmmMigrationJobState) {
+                    $jobStatus = [string]$scvmmMigrationJobState.Status
+                    if ($jobStatus -match 'Failed|Canceled|Cancelled') {
+                        $jobDetails = @($scvmmMigrationJobState.StatusString, $scvmmMigrationJobState.ErrorInfo) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                        throw "LiveMigration SCVMM job '$($scvmmMigrationJobState.Name)' ended with status '$jobStatus'. $($jobDetails -join ' ')"
+                    }
+                }
+            }
 
             if ($currentHostNormalized -eq $destinationHostNormalized) {
                 Write-MigrationLog "[$Name] LiveMigration validated: VM is now running on '$($vmStateAfterMove.HostName)'." -Level SUCCESS -LogFile $LogFile

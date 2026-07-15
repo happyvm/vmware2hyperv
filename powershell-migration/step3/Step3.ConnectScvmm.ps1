@@ -11,6 +11,7 @@
     Functions:
     - Connect-Step3Scvmm           SCVMM connection with IndigoLayer retry
     - Start-SCVMMHostMigration     Initiate VM host migration via SCVMM
+    - Get-SCVMMHostMigrationJobState Query a SCVMM migration job status
     - Get-SCVMMVmRuntimeState      Query VM runtime state (host, HA, status)
     - ConvertTo-NormalizedHostName  Normalize hostname for comparison
 
@@ -153,8 +154,60 @@ function Start-SCVMMHostMigration {
             throw "Destination host '$TargetHostName' not found in SCVMM."
         }
 
-        Move-SCVirtualMachine -VM $vm -VMHost $targetHost -UseLAN -RunAsynchronously | Out-Null
+        $job = Move-SCVirtualMachine -VM $vm -VMHost $targetHost -UseLAN -RunAsynchronously
+        if (-not $job) {
+            return $null
+        }
+
+        [pscustomobject]@{
+            ID           = [string]$job.ID
+            Name         = [string]$job.Name
+            Status       = [string]$job.Status
+            StatusString = [string]$job.StatusString
+            ErrorInfo    = [string]$job.ErrorInfo
+        }
     } -ArgumentList @($Name, $ServerName, $DestinationHost)
+}
+
+# ---------------------------------------------------------------------------
+# Get-SCVMMHostMigrationJobState — query SCVMM migration job status
+# ---------------------------------------------------------------------------
+<#
+.SYNOPSIS
+    Query a SCVMM migration job returned by Start-SCVMMHostMigration.
+
+.DESCRIPTION
+    Move-SCVirtualMachine -RunAsynchronously returns before the migration is
+    complete. This helper lets the caller distinguish an operation that is
+    still running from a failed/cancelled SCVMM job instead of only waiting for
+    the VM host to change until timeout.
+#>
+function Get-SCVMMHostMigrationJobState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$JobId
+    )
+
+    return Invoke-SCVMMCommand -ScriptBlock {
+        param($VmmServerName, $ScvmmJobId)
+
+        $server = Get-SCVMMServer -ComputerName $VmmServerName
+        $job = Get-SCJob -VMMServer $server | Where-Object { [string]$_.ID -eq $ScvmmJobId } | Select-Object -First 1
+        if (-not $job) {
+            return $null
+        }
+
+        [pscustomobject]@{
+            ID           = [string]$job.ID
+            Name         = [string]$job.Name
+            Status       = [string]$job.Status
+            StatusString = [string]$job.StatusString
+            ErrorInfo    = [string]$job.ErrorInfo
+        }
+    } -ArgumentList @($ServerName, $JobId)
 }
 
 # ---------------------------------------------------------------------------
