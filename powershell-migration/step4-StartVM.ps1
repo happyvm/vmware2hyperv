@@ -830,6 +830,28 @@ function Update-WinRmActionState {
     }
 }
 
+
+function Limit-DashboardText {
+    param(
+        [AllowNull()]
+        [object]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaxLength
+    )
+
+    $text = if ($null -eq $Value) { '' } else { [string]$Value }
+    if ($MaxLength -le 0 -or $text.Length -le $MaxLength) {
+        return $text
+    }
+
+    if ($MaxLength -eq 1) {
+        return '…'
+    }
+
+    return ($text.Substring(0, $MaxLength - 1) + '…')
+}
+
 function Show-PendingDashboard {
     param(
         [Parameter(Mandatory = $true)]
@@ -846,11 +868,11 @@ function Show-PendingDashboard {
             Sort-Object VMName |
             ForEach-Object {
                 [pscustomobject]@{
-                    'VM name'      = $_.VMName
-                    'Power state'       = Get-PowerStateDisplayText -VmItem $_
-                    'OS'                = if ([string]::IsNullOrWhiteSpace($_.DisplayOperatingSystem)) { 'Unknown' } else { $_.DisplayOperatingSystem }
-                    'Non-compliance'   = (Get-ComplianceIssues -VmItem $_) -join ', '
-                    'Actions to take'   = Get-ActionDisplayText -VmItem $_
+                    'VM name'        = Limit-DashboardText -Value $_.VMName -MaxLength 26
+                    'Power state'    = Limit-DashboardText -Value (Get-PowerStateDisplayText -VmItem $_) -MaxLength 12
+                    'OS'             = Limit-DashboardText -Value $(if ([string]::IsNullOrWhiteSpace($_.DisplayOperatingSystem)) { 'Unknown' } else { $_.DisplayOperatingSystem }) -MaxLength 32
+                    'Non-compliance' = Limit-DashboardText -Value ((Get-ComplianceIssues -VmItem $_) -join ', ') -MaxLength 34
+                    'Actions to take' = Limit-DashboardText -Value (Get-ActionDisplayText -VmItem $_) -MaxLength 48
                 }
             }
     )
@@ -865,8 +887,14 @@ function Show-PendingDashboard {
 
     if ($pendingRows) {
         $pendingRows |
-            Format-Table -AutoSize |
-            Out-String -Width 4096 |
+            Format-Table -Property @(
+                @{ Label = 'VM name'; Expression = { $_.'VM name' }; Width = 26 },
+                @{ Label = 'Power state'; Expression = { $_.'Power state' }; Width = 12 },
+                @{ Label = 'OS'; Expression = { $_.OS }; Width = 32 },
+                @{ Label = 'Non-compliance'; Expression = { $_.'Non-compliance' }; Width = 34 },
+                @{ Label = 'Actions to take'; Expression = { $_.'Actions to take' }; Width = 48 }
+            ) |
+            Out-String -Width 180 |
             ForEach-Object { Write-Information $_ -InformationAction Continue }
     } else {
         Write-Information "All VMs are compliant (started, network, IP, Integration Services, HA, backup tag)." -InformationAction Continue
