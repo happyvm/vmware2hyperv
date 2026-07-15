@@ -39,6 +39,8 @@ param(
     [string]$LogFile
 )
 
+Set-StrictMode -Version Latest
+
 . "$PSScriptRoot\lib.ps1"
 . "$PSScriptRoot\step3\Step3.TaskResult.ps1"
 

@@ -41,6 +41,8 @@ param (
     [string]$LogFile
 )
 
+Set-StrictMode -Version Latest
+
 . "$PSScriptRoot\lib.ps1"
 $Config = Import-MigrationConfig -ConfigFile "$PSScriptRoot\config.psd1"
 
@@ -106,7 +108,8 @@ function Disconnect-VmNetworkAdapters {
         return
     }
 
-    $connectedAdapters = $networkAdapters | Where-Object { $_.Connected }
+    # @(): a single connected adapter is a scalar and .Count on it throws under StrictMode.
+    $connectedAdapters = @($networkAdapters | Where-Object { $_.Connected })
     if (-not $connectedAdapters) {
         Write-MigrationLog "All NICs are already disconnected on VM $VmName." -Level INFO -LogFile $LogFile
         return
@@ -210,7 +213,7 @@ if ($vmStates.Count -gt 0) {
     } while (-not $allPoweredOff)
 }
 
-if (-not $Config.Smtp.Enabled) {
+if (-not (Get-MigrationConfigValue -Config $Config -Path 'Smtp.Enabled' -Default $false)) {
     Write-MigrationLog "Pre-migration email disabled (Smtp.Enabled = `$false in config.psd1)." -LogFile $LogFile
 } else {
     Write-MigrationLog "Sending pre-migration email" -LogFile $LogFile

@@ -12,6 +12,8 @@
     Part of vmware2hyperv — BEA-283. PowerShell 7+.
 #>
 
+Set-StrictMode -Version Latest
+
 # Step3.PhaseRunner.ps1 — Phase execution helpers for step3 orchestrator
 # Load: . "$PSScriptRoot\step3\Step3.PhaseRunner.ps1"
 

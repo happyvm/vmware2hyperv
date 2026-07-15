@@ -20,6 +20,8 @@
     Ref: doc/refactoring-step3.md §5 — "Extraction de la logique pure".
 #>
 
+Set-StrictMode -Version Latest
+
 # ---------------------------------------------------------------------------
 # Pure helpers — also defined in step3-MigrateVM.ps1 (lines 694-720).
 # Duplicated here to keep Step3.NetworkMapping.ps1 self-contained and
@@ -276,5 +278,7 @@ function Get-AdapterMappingPlan {
         })
     }
 
-    return $plan.ToArray()
+    # Comma operator: without it an empty plan unrolls to $null on return and
+    # the caller's .Count would throw under StrictMode.
+    return ,$plan.ToArray()
 }

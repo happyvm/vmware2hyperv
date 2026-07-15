@@ -41,6 +41,8 @@ param (
     [switch]$Full
 )
 
+Set-StrictMode -Version Latest
+
 . "$PSScriptRoot\lib.ps1"
 
 if (-not $ConfigFile) { $ConfigFile = "$PSScriptRoot\config.psd1" }

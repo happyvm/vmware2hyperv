@@ -61,6 +61,9 @@ param (
     [string]$LogFile
 )
 
+# Explicite (les modules Step3.* dot-sourcés l'activaient déjà de facto).
+Set-StrictMode -Version Latest
+
 . "$PSScriptRoot\lib.ps1"
 Get-ChildItem "$PSScriptRoot\step3\Step3.*.ps1" |
     Where-Object Name -ne 'Step3.ScvmmSession.Functions.ps1' |
@@ -72,7 +75,7 @@ if (-not $LogFile) { $LogFile = "$($Config.Paths.LogDir)\step3-ir-start-$(Get-Da
 Assert-PathPresent -Path $TasksFile -Label "Instant Recovery tasks file" -LogFile $LogFile
 
 $tasks = @(Get-Content -Path $TasksFile -Raw | ConvertFrom-Json) |
-    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.VMName) }
+    Where-Object { $_.PSObject.Properties['VMName'] -and -not [string]::IsNullOrWhiteSpace([string]$_.VMName) }
 $tasks = @($tasks)
 if (-not $tasks) {
     $message = "No VM entry found in tasks file '$TasksFile'."

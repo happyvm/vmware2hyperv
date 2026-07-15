@@ -18,6 +18,8 @@
     This module is loaded via dot-sourcing from step3-MigrateVM.ps1.
 #>
 
+Set-StrictMode -Version Latest
+
 # Step3.TaskResult.ps1 — Phase-by-phase migration result tracking
 # Load: . "$PSScriptRoot\step3\Step3.TaskResult.ps1"
 
@@ -247,7 +249,11 @@ function Get-Step3NetworkConfigurationState {
     $phase = if ($Result.Phases -is [System.Collections.IDictionary]) {
         $Result.Phases['NetworkConfiguration']
     } else {
-        $Result.Phases.NetworkConfiguration
+        # Property guard: a result deserialised from JSON may have no
+        # NetworkConfiguration phase at all, and a bare access throws under
+        # StrictMode instead of returning $null.
+        $phaseProperty = $Result.Phases.PSObject.Properties['NetworkConfiguration']
+        if ($phaseProperty) { $phaseProperty.Value } else { $null }
     }
     if (-not $phase) {
         return 'NotDetected'

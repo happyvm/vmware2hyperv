@@ -81,6 +81,8 @@ param(
     [string]$CsvDelimiter = ";"
 )
 
+Set-StrictMode -Version Latest
+
 # ============================================================
 # Load config.psd1, layered with config.local.psd1 (operator overrides —
 # see Import-MigrationConfig in lib.ps1). Explicit CLI parameters always

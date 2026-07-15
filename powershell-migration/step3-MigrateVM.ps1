@@ -67,6 +67,10 @@ param (
     [string]$LogFile
 )
 
+# Explicite (les modules step3/ dot-sourcés l'activaient déjà de facto pour
+# tout ce script) : le mode strict est un choix assumé, pas un héritage.
+Set-StrictMode -Version Latest
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Initialisation — dot-sourcing
 # ═══════════════════════════════════════════════════════════════════════════

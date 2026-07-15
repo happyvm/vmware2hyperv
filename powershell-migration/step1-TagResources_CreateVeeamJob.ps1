@@ -46,6 +46,8 @@ param (
     [string]$LogFile
 )
 
+Set-StrictMode -Version Latest
+
 . "$PSScriptRoot\lib.ps1"
 $Config = Import-MigrationConfig -ConfigFile "$PSScriptRoot\config.psd1"
 
@@ -77,8 +79,10 @@ if (-not $category) {
 }
 
 $csvData = Import-Csv -Path $CsvFile -Delimiter ";"
+# Property-guarded read: a CSV without a Tag column must yield an empty tag
+# list, not a StrictMode PropertyNotFoundException.
 $csvTags = $csvData |
-    ForEach-Object { $_.Tag } |
+    ForEach-Object { Get-FirstPropertyValue -InputObject $_ -PropertyNames @('Tag') } |
     Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
     ForEach-Object { $_.Trim() } |
     Sort-Object -Unique
@@ -132,7 +136,7 @@ if ($cleanupEntries) {
 # Bulk lookups before the assignment loop (previously one Get-VM and one
 # Get-TagAssignment per CSV row): resolve all batch VMs in one call and load every
 # assignment of the category once, indexed by entity Id.
-$csvVmNames = @($csvData | ForEach-Object { $_.VMName } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+$csvVmNames = @($csvData | ForEach-Object { Get-FirstPropertyValue -InputObject $_ -PropertyNames @('VMName') } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
 $vmsByName = @{}
 if ($csvVmNames) {
     foreach ($vmObject in @(VMware.VimAutomation.Core\Get-VM -Name $csvVmNames -ErrorAction SilentlyContinue)) {
@@ -158,8 +162,9 @@ try {
 
 $processedVmNames = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($entry in $csvData) {
-    $vmName  = $entry.VMName
-    if ([string]::IsNullOrWhiteSpace($entry.Tag)) {
+    $vmName   = Get-FirstPropertyValue -InputObject $entry -PropertyNames @('VMName')
+    $entryTag = Get-FirstPropertyValue -InputObject $entry -PropertyNames @('Tag')
+    if ([string]::IsNullOrWhiteSpace($entryTag)) {
         Write-MigrationLog "Missing tag in CSV for VM '$vmName'. Skipping this entry." -Level WARNING -LogFile $LogFile
         continue
     }
@@ -169,7 +174,7 @@ foreach ($entry in $csvData) {
         continue
     }
 
-    $tagName = $entry.Tag.Trim()
+    $tagName = $entryTag.Trim()
 
     $existingTag = Get-Tag -Name $tagName -Category $TagCategory -ErrorAction SilentlyContinue
     if (-not $existingTag) {

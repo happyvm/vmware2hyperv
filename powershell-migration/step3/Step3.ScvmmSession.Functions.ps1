@@ -28,6 +28,8 @@
     COMMIT OBLIGATOIRE — BEA-271
 #>
 
+Set-StrictMode -Version Latest
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Initialize-ScvmmSessionFunction (PS7 orchestrator — runs LOCALLY, not pushed)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -134,8 +136,10 @@ function Get-CachedScvmmServer {
     if (-not $ForceRefresh -and $script:CachedVmmServer) {
         $cachedName = if ($script:CachedVmmServer.PSObject.Properties['Name'] -and $script:CachedVmmServer.Name) {
             [string]$script:CachedVmmServer.Name
-        } else {
+        } elseif ($script:CachedVmmServer.PSObject.Properties['ComputerName']) {
             [string]$script:CachedVmmServer.ComputerName
+        } else {
+            ''
         }
 
         if ($cachedName -eq $ServerName) {
@@ -287,8 +291,10 @@ function Get-ScvmmInventoryCache {
         $script:ScvmmInventoryCacheByServer = @{}
     }
 
-    $serverKey = [string]$Server.Name
-    if ([string]::IsNullOrWhiteSpace($serverKey)) {
+    # Property-guarded reads: under StrictMode a bare access on an object
+    # lacking Name/ComputerName would throw.
+    $serverKey = if ($Server.PSObject.Properties['Name']) { [string]$Server.Name } else { '' }
+    if ([string]::IsNullOrWhiteSpace($serverKey) -and $Server.PSObject.Properties['ComputerName']) {
         $serverKey = [string]$Server.ComputerName
     }
     $serverKey = $serverKey.ToLowerInvariant()
@@ -569,16 +575,18 @@ function Resolve-ScvmmVlanMapping {
         }
     }
 
-    $matchingNetworks = if ($InventoryCache.VMNetworksByVlan.ContainsKey($VlanKey)) {
+    # Outer @(): assigning an if/else expression unrolls an empty array to $null,
+    # and the .Count reads below would then throw under StrictMode.
+    $matchingNetworks = @(if ($InventoryCache.VMNetworksByVlan.ContainsKey($VlanKey)) {
         @($InventoryCache.VMNetworksByVlan[$VlanKey])
     } else {
         @($InventoryCache.AllVMNetworks | Where-Object { $_.Name -like "*$VlanKey*" -or $_.Description -like "*$VlanKey*" })
-    }
-    $matchingSubnets = if ($InventoryCache.VMSubnetsByVlan.ContainsKey($VlanKey)) {
+    })
+    $matchingSubnets = @(if ($InventoryCache.VMSubnetsByVlan.ContainsKey($VlanKey)) {
         @($InventoryCache.VMSubnetsByVlan[$VlanKey])
     } else {
         @($InventoryCache.AllVMSubnets | Where-Object { $_.Name -like "*$VlanKey*" -or $_.Description -like "*$VlanKey*" })
-    }
+    })
 
     if ($matchingNetworks.Count -eq 0 -or $matchingSubnets.Count -eq 0) {
         return $null
