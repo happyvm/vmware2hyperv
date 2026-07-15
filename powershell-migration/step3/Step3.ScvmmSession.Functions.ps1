@@ -454,7 +454,9 @@ function Get-ScvmmInventoryCache {
 
         $vmNetworksByVlan = @{}
         foreach ($network in $allVMNetworks) {
-            $candidates = @([string]$network.Name, [string]$network.Description)
+            $networkName = Get-ScvmmObjectPropertyValue -InputObject $network -PropertyName 'Name' -Context 'VMNetwork'
+            $networkDescription = Get-ScvmmObjectPropertyValue -InputObject $network -PropertyName 'Description' -Context 'VMNetwork'
+            $candidates = @([string]$networkName, [string]$networkDescription)
             foreach ($candidateText in $candidates) {
                 if ([string]::IsNullOrWhiteSpace($candidateText)) { continue }
                 foreach ($match in [regex]::Matches($candidateText, '\d+')) {
@@ -469,7 +471,9 @@ function Get-ScvmmInventoryCache {
 
         $vmSubnetsByVlan = @{}
         foreach ($subnet in $allVMSubnets) {
-            $candidates = @([string]$subnet.Name, [string]$subnet.Description)
+            $subnetName = Get-ScvmmObjectPropertyValue -InputObject $subnet -PropertyName 'Name' -Context 'VMSubnet'
+            $subnetDescription = Get-ScvmmObjectPropertyValue -InputObject $subnet -PropertyName 'Description' -Context 'VMSubnet'
+            $candidates = @([string]$subnetName, [string]$subnetDescription)
             foreach ($candidateText in $candidates) {
                 if ([string]::IsNullOrWhiteSpace($candidateText)) { continue }
                 foreach ($match in [regex]::Matches($candidateText, '\d+')) {
@@ -484,7 +488,9 @@ function Get-ScvmmInventoryCache {
 
         $vmNetworksByLookupName = @{}
         foreach ($network in $allVMNetworks) {
-            foreach ($nameKey in @([string]$network.Name, [string]$network.Description)) {
+            $networkName = Get-ScvmmObjectPropertyValue -InputObject $network -PropertyName 'Name' -Context 'VMNetwork'
+            $networkDescription = Get-ScvmmObjectPropertyValue -InputObject $network -PropertyName 'Description' -Context 'VMNetwork'
+            foreach ($nameKey in @([string]$networkName, [string]$networkDescription)) {
                 if ([string]::IsNullOrWhiteSpace($nameKey)) { continue }
                 $normalizedName = $nameKey.Trim().ToLowerInvariant()
                 if (-not $vmNetworksByLookupName.ContainsKey($normalizedName)) {
@@ -617,12 +623,20 @@ function Resolve-ScvmmVlanMapping {
     $matchingNetworks = @(if ($InventoryCache.VMNetworksByVlan.ContainsKey($VlanKey)) {
         @($InventoryCache.VMNetworksByVlan[$VlanKey])
     } else {
-        @($InventoryCache.AllVMNetworks | Where-Object { $_.Name -like "*$VlanKey*" -or $_.Description -like "*$VlanKey*" })
+        @($InventoryCache.AllVMNetworks | Where-Object {
+            $networkName = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'Name' -Context 'VMNetwork'
+            $networkDescription = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'Description' -Context 'VMNetwork'
+            $networkName -like "*$VlanKey*" -or $networkDescription -like "*$VlanKey*"
+        })
     })
     $matchingSubnets = @(if ($InventoryCache.VMSubnetsByVlan.ContainsKey($VlanKey)) {
         @($InventoryCache.VMSubnetsByVlan[$VlanKey])
     } else {
-        @($InventoryCache.AllVMSubnets | Where-Object { $_.Name -like "*$VlanKey*" -or $_.Description -like "*$VlanKey*" })
+        @($InventoryCache.AllVMSubnets | Where-Object {
+            $subnetName = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'Name' -Context 'VMSubnet'
+            $subnetDescription = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'Description' -Context 'VMSubnet'
+            $subnetName -like "*$VlanKey*" -or $subnetDescription -like "*$VlanKey*"
+        })
     })
 
     if ($matchingNetworks.Count -eq 0 -or $matchingSubnets.Count -eq 0) {
