@@ -259,6 +259,14 @@ function Get-GuestFamily {
         return "Windows"
     }
 
+    # vSphere GuestId families without a standalone "windows" word — the same
+    # identifiers Get-WindowsYearFromText decodes (GuestFullName can be empty or
+    # stale when VMware Tools is old, which is common on 2003):
+    #   winNet* / winLonghorn* / windows7Server* / windows8Server* / windows9Server*
+    if ($text -match "(?i)winNet(Standard|Enterprise|Datacenter|Web|Business)|winLonghorn|windows\d+Server") {
+        return "Windows"
+    }
+
     if ($text -match "(?i)linux|ubuntu|debian|centos|red hat|rhel|suse|oracle linux|rocky|alma") {
         return "Linux"
     }

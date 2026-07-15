@@ -148,7 +148,9 @@
 
     Smtp = @{
         Server  = "smtpd.domain"
-        Port    = 25
+        # Send-HtmlMail (lib.ps1) forces STARTTLS (EnableSsl); 587 is the submission
+        # port. Port 25 only works if the relay accepts STARTTLS on it.
+        Port    = 587
         From    = "migrationhyperv-noreply@domain.com"
         Enabled = $true   # Set to $false to disable outgoing email (e.g. pre-migration notifications)
     }

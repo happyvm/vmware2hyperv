@@ -152,9 +152,12 @@ function Get-HyperVVmInventory {
 
     return @(
         Invoke-SCVMMCommand -ScriptBlock {
-            param($Names, $BackupTag)
+            # $using: is only valid when the scriptblock crosses a remoting boundary;
+            # Invoke-SCVMMCommand also runs it locally with '&', so every external
+            # value must be passed through -ArgumentList.
+            param($Names, $BackupTag, $VmmServerName)
 
-            $server = Get-SCVMMServer -ComputerName $using:Config.SCVMM.Server
+            $server = Get-SCVMMServer -ComputerName $VmmServerName
             $nameLookup = @{}
             foreach ($n in $Names) { $nameLookup[$n.ToLowerInvariant()] = $n }
 
@@ -202,8 +205,10 @@ function Get-HyperVVmInventory {
 
                 $haEnabled = [bool]$vm.IsHighlyAvailable
 
+                # Exact match after split (same rule as step4): a substring match would
+                # let a tag like 'Hyp' pass for 'HypMig'.
                 $tagPresent = if ([string]::IsNullOrWhiteSpace($BackupTag)) { $true }
-                else { [bool]([string]$vm.Tag -split ';|,' -match [regex]::Escape($BackupTag)) }
+                else { [bool]([string]$vm.Tag -split ';|,' | ForEach-Object { $_.Trim() } | Where-Object { $_ -eq $BackupTag } | Measure-Object | Select-Object -ExpandProperty Count) }
 
                 $result += [pscustomobject]@{
                     VMName           = $name
@@ -222,7 +227,7 @@ function Get-HyperVVmInventory {
                 }
             }
             return $result
-        } -ArgumentList @($VMNames, $Config.Tags.BackupTag)
+        } -ArgumentList @($VMNames, $Config.Tags.BackupTag, $Config.SCVMM.Server)
     )
 }
 

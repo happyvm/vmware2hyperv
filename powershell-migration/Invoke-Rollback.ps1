@@ -294,7 +294,18 @@ function Invoke-PowerOnRollback {
                     Start-VM -VM $vm -ErrorAction Stop | Out-Null
                     Write-MigrationLog "[$VMName] VMware VM started." -Level SUCCESS -LogFile $LogFile
                 } else {
+                    # The VM was seen PoweredOff at step 1 but is no longer resolvable in
+                    # that state: the rollback did NOT restart it — report a failure
+                    # instead of a silent success.
                     Write-MigrationLog "[$VMName] No powered-off VMware VM found." -Level ERROR -LogFile $LogFile
+                    return [pscustomobject]@{
+                        VMName      = $VMName
+                        Layer       = 'PowerOn'
+                        Success     = $false
+                        Error       = 'No powered-off VMware VM found at start time; VM was not restarted.'
+                        VmwareState = $vmwareState
+                        HyperVInfo  = $hypervInfo
+                    }
                 }
             } catch {
                 Write-MigrationLog "[$VMName] Failed to start VMware VM: $_" -Level ERROR -LogFile $LogFile
@@ -312,6 +323,18 @@ function Invoke-PowerOnRollback {
         }
     } elseif ($vmwareState.PowerState -eq 'PoweredOn') {
         Write-MigrationLog "[$VMName] VMware VM is already powered on." -LogFile $LogFile
+    } else {
+        # Suspended or any other unexpected power state: powering on blindly could
+        # resume a stale workload — require manual handling and report a failure.
+        Write-MigrationLog "[$VMName] Unexpected VMware power state '$($vmwareState.PowerState)' — manual action required." -Level ERROR -LogFile $LogFile
+        return [pscustomobject]@{
+            VMName      = $VMName
+            Layer       = 'PowerOn'
+            Success     = $false
+            Error       = "Unexpected VMware power state '$($vmwareState.PowerState)'; VM was not restarted."
+            VmwareState = $vmwareState
+            HyperVInfo  = $hypervInfo
+        }
     }
 
     return [pscustomobject]@{
@@ -467,7 +490,7 @@ try {
                 Invoke-VeeamInstantRollback -VMName $vmName -BackupJobName "Backup-$Tag"
             }
             'Full' {
-                Write-MigrationLog "[$VMName] Layer 3 — Full Veeam Restore (not yet implemented)" -Level WARNING -LogFile $LogFile
+                Write-MigrationLog "[$vmName] Layer 3 — Full Veeam Restore (not yet implemented)" -Level WARNING -LogFile $LogFile
                 [pscustomobject]@{ VMName = $vmName; Layer = 'Full'; Success = $false; Error = 'Full restore not implemented in this version' }
             }
         }

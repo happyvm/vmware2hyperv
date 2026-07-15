@@ -73,7 +73,10 @@ param (
 
 # 1. Librairie partagée (Write-MigrationLog, Resolve-MigrationTarget, etc.)
 . "$PSScriptRoot\lib.ps1"
-$Config = Import-PowerShellDataFile "$PSScriptRoot\config.psd1"
+# Import-MigrationConfig (et non Import-PowerShellDataFile) : applique les overrides
+# opérateur de config.local.psd1 (SCVMM.Server, Tags.BackupTag, SCVMM.Network...),
+# comme tous les autres scripts du pipeline.
+$Config = Import-MigrationConfig -ConfigFile "$PSScriptRoot\config.psd1"
 
 if (-not $SCVMMServer)   { $SCVMMServer   = $Config.SCVMM.Server }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step3-migrate-$VMName-$(Get-Date -Format 'yyyyMMdd').log" }

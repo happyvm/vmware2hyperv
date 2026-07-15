@@ -260,9 +260,12 @@ function Get-SCVMMVmInventory {
                             $vm = $refreshedVm
                         }
                     } catch {
-                        Write-MigrationLog "Read-SCVirtualMachine -Force failed for VM, using cached object: $($_.Exception.Message)" -Level WARNING -LogFile $LogFile
                         # Keep the VM object from the batched inventory. Falling back to a
                         # per-VM Get-SCVirtualMachine here would reintroduce the slow path.
+                        # No Write-MigrationLog here: this scriptblock may execute inside the
+                        # WinPS compat session where neither the function nor $LogFile exist —
+                        # calling it would turn a tolerated refresh failure into a hard error.
+                        Write-Verbose "Read-SCVirtualMachine -Force failed for VM '$name', using cached object: $($_.Exception.Message)"
                     }
                 }
 
@@ -847,13 +850,16 @@ function Show-PendingDashboard {
 }
 
 $rows = Import-Csv -Path $CsvFile -Delimiter ';'
-$targetRows = @(
-    $rows | Where-Object {
-        -not [string]::IsNullOrWhiteSpace($_.VMName) -and (
-            [string]::IsNullOrWhiteSpace($Tag) -or $_.Tag -eq $Tag
-        )
+$targetRows = @($rows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.VMName) })
+
+# Same batch-filtering rule as step2/step3/step5: trim the CSV tag before comparing,
+# and keep the previous behavior (all rows) for CSVs without a populated Tag column.
+if (-not [string]::IsNullOrWhiteSpace($Tag)) {
+    $rowsWithTag = @($targetRows | Where-Object { $_.PSObject.Properties['Tag'] -and -not [string]::IsNullOrWhiteSpace($_.Tag) })
+    if ($rowsWithTag) {
+        $targetRows = @($rowsWithTag | Where-Object { $_.Tag.Trim() -eq $Tag })
     }
-)
+}
 
 if (-not $targetRows) {
     $target = if ([string]::IsNullOrWhiteSpace($Tag)) { 'all rows' } else { "tag '$Tag'" }

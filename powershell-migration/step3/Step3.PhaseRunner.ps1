@@ -117,7 +117,10 @@ function Invoke-Phase {
         return
     }
     try {
-        & $Action
+        # Discard the action's pipeline output: phase functions return status objects
+        # (Wait-InstantRecoveryUserAction, Set-VmNetworkConfiguration...) that would
+        # otherwise pollute the orchestrator's output next to the final $result.
+        $null = & $Action
         Add-Step3PhaseResult -Result $result -Phase $DisplayName -Status 'Success' -Message 'OK'
     } catch {
         $status = if ($NonBlocking) { 'Warning' } else { 'Failed' }
