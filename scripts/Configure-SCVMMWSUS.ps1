@@ -27,7 +27,8 @@ Use -WhatIf first to review the target and selection.
     SCVMM version whose products must be included: None, 2022, 2025, or Both.
 
 .PARAMETER Languages
-    WSUS language codes to keep for synchronization.
+    WSUS language codes to keep for synchronization. Use WSUS codes such as
+    'en', 'fr', 'pt-br' or 'zh-cn' (not .NET culture names like 'fr-FR').
 
 .PARAMETER ExcludeDefender
     Do not add Microsoft Defender Antivirus or the Definition Updates classification.
@@ -72,6 +73,7 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^[A-Za-z]{2,3}(-[A-Za-z]{2,4})?$')]
     [string[]]$Languages = @('en', 'fr'),
 
     [Parameter()]

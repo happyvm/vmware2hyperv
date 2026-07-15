@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Validates that every .ps1 file under a directory parses cleanly.
 
@@ -45,7 +45,9 @@ foreach ($file in Get-ChildItem -Path $Path -Recurse -Filter *.ps1 -File) {
         }
     }
 
-    foreach ($marker in ($raw -split "`n" | Select-String -Pattern '^(<{7} |={7}$|>{7} )' -SimpleMatch:$false)) {
+    # Split on `r?`n: the repository materializes .ps1 files with CRLF endings
+    # (.gitattributes), and a trailing `r would prevent '={7}$' from matching.
+    foreach ($marker in ($raw -split "`r`n|`n" | Select-String -Pattern '^(<{7} |={7}$|>{7} )' -SimpleMatch:$false)) {
         $problems += [pscustomobject]@{
             File    = $file.FullName
             Line    = $marker.LineNumber

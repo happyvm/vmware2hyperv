@@ -252,17 +252,53 @@ en mode continu). Options : timeout paramétrable, ou parallélisation des
 
 ## Récapitulatif
 
-| # | Fichier | Type | Gravité |
-|---|---------|------|---------|
-| T1 | 3 fichiers sans BOM | Bug encodage (PS 5.1) | Haute |
-| T2 | Test-ScriptParse.ps1 | Bug détection `=======` (CRLF) | Haute |
-| T3 | Invoke-SCVMMHostPatchBaseline.ps1 | Bug statut job SucceedWithInfo | Haute (à confirmer) |
-| T4 | Invoke-SCVMMHostPatchBaseline.ps1 | Bug groupe ambigu / sous-groupes | Haute |
-| T5 | Invoke-SCVMMHostPatchBaseline.ps1 | Bug `$baseline` null (`-Confirm`) | Moyenne |
-| T6 | Test-HyperVNodeReadiness.ps1 | Bug portée GUID (StrictMode) | Moyenne |
-| H1 | Test-HyperVNodeReadiness.ps1 | Échappement LDAP incomplet | Moyenne |
-| H2 | Test-VeeamFlows.ps1 | EAP SilentlyContinue global | Moyenne |
-| H3 | Test-HyperVNodeReadiness.ps1 | Log inaccessible = plantage | Moyenne |
-| H4 | New-SCVMMContentLibrary.ps1 | ACE bootstrap vs credential distant | Moyenne |
-| P1-P4 | Readiness / PatchBaseline / VeeamFlows | Performance (séquentiel, catalogue, log) | Moyenne |
-| P4+ | (divers) | Qualité mineure | Basse |
+| # | Fichier | Type | Gravité | Statut |
+|---|---------|------|---------|--------|
+| T1 | 3 fichiers sans BOM | Bug encodage (PS 5.1) | Haute | Corrigé |
+| T2 | Test-ScriptParse.ps1 | Bug détection `=======` (CRLF) | Haute | Corrigé |
+| T3 | Invoke-SCVMMHostPatchBaseline.ps1 | Bug statut job SucceedWithInfo | Haute (à confirmer) | Corrigé |
+| T4 | Invoke-SCVMMHostPatchBaseline.ps1 | Bug groupe ambigu / sous-groupes | Haute | Corrigé |
+| T5 | Invoke-SCVMMHostPatchBaseline.ps1 | Bug `$baseline` null (`-Confirm`) | Moyenne | Corrigé |
+| T6 | Test-HyperVNodeReadiness.ps1 | Bug portée GUID (StrictMode) | Moyenne | Corrigé |
+| H1 | Test-HyperVNodeReadiness.ps1 | Échappement LDAP incomplet | Moyenne | Corrigé |
+| H2 | Test-VeeamFlows.ps1 | EAP SilentlyContinue global | Moyenne | Corrigé |
+| H3 | Test-HyperVNodeReadiness.ps1 | Log inaccessible = plantage | Moyenne | Corrigé |
+| H4 | New-SCVMMContentLibrary.ps1 | ACE bootstrap vs credential distant | Moyenne | Corrigé |
+| P1-P4 | Readiness / PatchBaseline / VeeamFlows | Performance (séquentiel, catalogue, log) | Moyenne | Corrigé |
+| P4+ | (divers) | Qualité mineure | Basse | Corrigé |
+
+---
+
+## Résolution — 2026-07-15
+
+Tous les points ci-dessus ont été corrigés le jour même sur la branche
+d'analyse. Détails d'implémentation notables :
+
+- **T1** : BOM UTF-8 ajouté aux 3 fichiers. Les fichiers de
+  `powershell-migration/` et `tests/` présentent le même défaut (24 fichiers
+  non-ASCII sans BOM) mais sont **hors périmètre** de cette passe — à traiter
+  dans une passe dédiée.
+- **T3** : `Wait-SCJobCompletion` accepte `Completed` et `SucceedWithInfo`
+  (ce dernier journalise un `Write-Warning` avec `ErrorInfo`).
+- **T4** : rejet explicite des groupes homonymes multiples ; les hôtes des
+  sous-groupes sont inclus via `AllChildHosts` (repli sur l'ancien filtre par
+  `VMHostGroup.ID` si la propriété est absente).
+- **P1 (section M)** : nouveaux helpers `New-PortEndpoint` /
+  `Invoke-PortEndpointChecks` — tous les `BeginConnect` d'un même lot
+  démarrent en parallèle et partagent une seule fenêtre de timeout (un DC
+  injoignable coûte ~2 s au lieu de 16 s). Couvert par 5 nouveaux tests
+  Pester.
+- **P1 (sections I/J)** : comparaison LUN inter-nœuds en un seul
+  `Invoke-Command` fan-out (parallélisme WinRM natif, wrapper par nœud pour
+  distinguer « zéro disque » d'« échec de requête ») ; hotfix + état de la
+  feature Failover-Clustering regroupés en un seul aller-retour par nœud ;
+  une seule session CIM par nœud (au lieu de deux connexions). La cohérence
+  des correctifs compare désormais les **listes** de `HotFixID`, plus les
+  simples comptages.
+- **H3/P2** : `Write-ReadinessLog` écrit via un `StreamWriter` unique
+  (AutoFlush), résilient — un chemin de log non inscriptible dégrade en
+  sortie console avec un unique avertissement au lieu d'avorter le run.
+
+Validation : `Test-ScriptParse` propre, PSScriptAnalyzer **0 finding**
+(3 avant), Pester **47/47** (42 existants + 5 nouveaux), test fonctionnel de
+la détection de marqueurs de conflit CRLF.

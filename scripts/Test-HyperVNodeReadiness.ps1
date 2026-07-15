@@ -89,6 +89,11 @@ $ErrorActionPreference = 'Stop'
 
 $script:Results = [System.Collections.Generic.List[pscustomobject]]::new()
 
+# Lazily opened log writer (single handle instead of one Add-Content
+# open/close per line) and its one-time failure warning flag.
+$script:LogWriter      = $null
+$script:LogWriteWarned = $false
+
 # Cache for read-only local CIM instances that several sections query repeatedly.
 $script:CimCache = @{}
 function Get-CachedCimInstance {
@@ -114,7 +119,26 @@ function Write-ReadinessLog {
         default   { '[ INFO ]' }
     }
     $line = "$ts $prefix $Message"
-    Add-Content -Path $script:LogFile -Value $line -Encoding UTF8
+    # Resilient file logging: an unwritable log path (read-only CWD, dropped
+    # network share) must degrade to console-only output, not abort the run —
+    # under $ErrorActionPreference = 'Stop' every Add-Result would otherwise
+    # throw, including the ones inside Invoke-CheckSection's catch blocks.
+    try {
+        if ($null -eq $script:LogWriter) {
+            $logPath = $script:LogFile
+            if (-not [System.IO.Path]::IsPathRooted($logPath)) {
+                $logPath = Join-Path (Get-Location).ProviderPath $logPath
+            }
+            $script:LogWriter = [System.IO.StreamWriter]::new($logPath, $true, [System.Text.UTF8Encoding]::new($true))
+            $script:LogWriter.AutoFlush = $true
+        }
+        $script:LogWriter.WriteLine($line)
+    } catch {
+        if (-not $script:LogWriteWarned) {
+            $script:LogWriteWarned = $true
+            Write-Warning "Log file '$($script:LogFile)' is not writable ($($_.Exception.Message)) — continuing with console output only."
+        }
+    }
     $color = switch ($Level) {
         'OK'      { 'Green' }
         'WARN'    { 'Yellow' }
@@ -356,7 +380,7 @@ function Test-OSCompatibility {
     if ($isDatacenter) {
         Add-Result $cat 'OS edition' 'PASS' "Datacenter — full Hyper-V + S2D support"
     } elseif ($isStandard) {
-        if ($StorageType -eq 'S2D') {
+        if ($script:StorageType -eq 'S2D') {
             Add-Result $cat 'OS edition' 'FAIL' "Standard edition detected — Storage Spaces Direct (S2D) requires Datacenter edition"
         } else {
             Add-Result $cat 'OS edition' 'PASS' "Standard — note: limited to 2 running Hyper-V VMs (Datacenter recommended for production)"
@@ -388,6 +412,7 @@ function Test-OSCompatibility {
     }
 
     # Windows Update — last successful search
+    $wu = $null
     try {
         $wu        = New-Object -ComObject Microsoft.Update.AutoUpdate
         $lastSearch = $wu.Results.LastSearchSuccessDate
@@ -400,6 +425,10 @@ function Test-OSCompatibility {
         }
     } catch {
         Add-Result $cat 'Windows Update last search' 'SKIP' 'COM object unavailable (Server Core or non-interactive context)'
+    } finally {
+        if ($null -ne $wu) {
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wu)
+        }
     }
 
     # PowerShell execution policy
@@ -596,11 +625,11 @@ function Test-HardwareRequirements {
 
     # RAM — 4 GB minimum, 32 GB+ for production Hyper-V, 64 GB+ recommended for S2D
     $ramGB     = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
-    $ramWarnGB = if ($StorageType -eq 'S2D') { 64 } else { 32 }
+    $ramWarnGB = if ($script:StorageType -eq 'S2D') { 64 } else { 32 }
     if ($ramGB -lt 4) {
         Add-Result $cat 'RAM (minimum 4 GB)' 'FAIL' "${ramGB} GB installed — minimum 4 GB required"
     } elseif ($ramGB -lt $ramWarnGB) {
-        Add-Result $cat 'RAM (minimum 4 GB)' 'WARN' "${ramGB} GB installed — ${ramWarnGB} GB+ recommended for production $StorageType"
+        Add-Result $cat 'RAM (minimum 4 GB)' 'WARN' "${ramGB} GB installed — ${ramWarnGB} GB+ recommended for production $script:StorageType"
     } else {
         Add-Result $cat 'RAM (minimum 4 GB)' 'PASS' "${ramGB} GB installed"
     }
@@ -645,7 +674,7 @@ function Test-HardwareRequirements {
                 Add-Result $cat "Feature: $feat" $level "State: $($f.InstallState)"
             }
         }
-        if ($StorageType -eq 'S2D') {
+        if ($script:StorageType -eq 'S2D') {
             $dataDedup = Get-WindowsFeature -Name 'FS-Data-Deduplication' -ErrorAction SilentlyContinue
             if ($dataDedup) {
                 $level = if ($dataDedup.InstallState -eq 'Installed') { 'PASS' } else { 'INFO' }
@@ -766,9 +795,9 @@ function Test-NetworkConfiguration {
     }
 
     # S2D requires RDMA NICs — minimum 2 dedicated 10 GbE+ for SMB Direct
-    $minNics = if ($StorageType -eq 'S2D') { 4 } else { 2 }
+    $minNics = if ($script:StorageType -eq 'S2D') { 4 } else { 2 }
     $nicLevel= if ($adapterCount -ge $minNics) { 'PASS' } elseif ($adapterCount -ge 2) { 'WARN' } else { 'FAIL' }
-    Add-Result $cat "NIC count (minimum $minNics for $StorageType)" $nicLevel "$adapterCount active NIC(s)"
+    Add-Result $cat "NIC count (minimum $minNics for $script:StorageType)" $nicLevel "$adapterCount active NIC(s)"
 
     foreach ($nic in $adapters) {
         $role = Get-NetworkAdapterRole -Adapter $nic -RoleMap $roleMap
@@ -866,7 +895,7 @@ function Test-NetworkConfiguration {
         $s2dStorageNames = @($adapters | Where-Object { (Get-NetworkAdapterRole -Adapter $_ -RoleMap $roleMap) -eq 'S2DStorage' } | Select-Object -ExpandProperty Name)
 
         if ($roleMap.Count -gt 0) {
-            if ($StorageType -eq 'S2D') {
+            if ($script:StorageType -eq 'S2D') {
                 $s2dRdma = @($rdmaAdapters | Where-Object { $_.Name -in $s2dStorageNames })
                 if ($s2dRdma.Count -ge 2) {
                     Add-Result $cat 'RDMA adapters (S2DStorage role)' 'PASS' "$($s2dRdma.Count) S2DStorage RDMA-enabled NIC(s): $($s2dRdma.Name -join ', ')"
@@ -887,7 +916,7 @@ function Test-NetworkConfiguration {
                     Add-Result $cat "NIC '$($rdmaNic.Name)' RDMA" 'SKIP' 'RDMA enabled, but NIC is not mapped to a role; verify this is S2DStorage or RDMA LiveMigration traffic'
                 }
             }
-        } elseif ($StorageType -eq 'S2D') {
+        } elseif ($script:StorageType -eq 'S2D') {
             if ($rdmaAdapters.Count -ge 2) {
                 Add-Result $cat 'RDMA adapters (S2D SMB Direct)' 'PASS' "$($rdmaAdapters.Count) RDMA-enabled NIC(s): $($rdmaAdapters.Name -join ', ')"
             } elseif ($rdmaAdapters.Count -eq 1) {
@@ -904,7 +933,7 @@ function Test-NetworkConfiguration {
     }
 
     # SMB Direct (required for S2D maximum performance)
-    if ($StorageType -eq 'S2D') {
+    if ($script:StorageType -eq 'S2D') {
         try {
             $smbDirect = (Get-SmbServerConfiguration -ErrorAction Stop).EnableSMBDirect
             $level = if ($smbDirect) { 'PASS' } else { 'WARN' }
@@ -1548,7 +1577,7 @@ function Test-FirewallRules {
     }
 
     # S2D-specific: SMB storage traffic ports
-    if ($StorageType -eq 'S2D' -and $null -ne $allFwRules) {
+    if ($script:StorageType -eq 'S2D' -and $null -ne $allFwRules) {
         $smbRules = @($allFwRules | Where-Object { $_.DisplayGroup -match 'File and Printer Sharing' -and $_.Direction -eq 'Inbound' })
         if ($smbRules.Count -gt 0) {
             $enabled = ($smbRules | Where-Object { $_.Enabled -eq 'True' }).Count
@@ -1575,7 +1604,7 @@ function Test-FirewallRules {
 #region ── I. Storage ────────────────────────────────────────────────────────
 
 function Test-Storage {
-    Section "I. Storage ($StorageType)"
+    Section "I. Storage ($script:StorageType)"
     $cat = 'Storage'
 
     # System drive — applies to both SAN and S2D
@@ -1601,7 +1630,7 @@ function Test-Storage {
         }
     }
 
-    if ($StorageType -eq 'SAN') {
+    if ($script:StorageType -eq 'SAN') {
         # ── SAN ────────────────────────────────────────────────────────────────
 
         $sanBusTypes = switch ($script:SanTransport) {
@@ -1796,8 +1825,11 @@ function Test-Storage {
             # included so Invoke-Command results can be compared as one dataset.
             $compareNodes = @(@($env:COMPUTERNAME) + @($script:ClusterNodes) | Where-Object { $_ } | Select-Object -Unique)
             if ($compareNodes.Count -gt 1) {
+                # The scriptblock returns a single wrapper object per node so a
+                # node that legitimately has zero non-OS disks can still be told
+                # apart from a node whose query failed.
                 $lunScript = {
-                    Get-Disk | Where-Object { -not $_.IsSystem -and -not $_.IsBoot } | ForEach-Object {
+                    $disks = @(Get-Disk | Where-Object { -not $_.IsSystem -and -not $_.IsBoot } | ForEach-Object {
                         [pscustomobject]@{
                             Number = $_.Number
                             FriendlyName = $_.FriendlyName
@@ -1809,22 +1841,54 @@ function Test-Storage {
                             IsOffline = $_.IsOffline
                             IsReadOnly = $_.IsReadOnly
                         }
+                    })
+                    [pscustomobject]@{ Disks = $disks }
+                }
+
+                $nodeLuns = @()
+                $addNodeLuns = {
+                    param([string]$NodeName, [object[]]$Disks)
+                    foreach ($lun in @($Disks)) {
+                        if ($null -eq $lun) { continue }
+                        $id = if ($lun.UniqueId) { $lun.UniqueId } elseif ($lun.SerialNumber) { $lun.SerialNumber } else { "$($lun.FriendlyName)|$($lun.Size)|$($lun.BusType)" }
+                        [pscustomobject]@{ Node = $NodeName; LunId = [string]$id; Disk = $lun }
                     }
                 }
-                $nodeLuns = @()
-                foreach ($node in $compareNodes) {
+
+                $localNodeNames  = @($compareNodes | Where-Object { $_ -ieq $env:COMPUTERNAME -or $_ -ieq 'localhost' })
+                $remoteNodeNames = @($compareNodes | Where-Object { $localNodeNames -notcontains $_ })
+
+                foreach ($localName in $localNodeNames) {
                     try {
-                        $nodeResult = if ($node -ieq $env:COMPUTERNAME -or $node -ieq 'localhost') {
-                            & $lunScript
-                        } else {
-                            Invoke-Command -ComputerName $node -ScriptBlock $lunScript -ErrorAction Stop
-                        }
-                        foreach ($lun in @($nodeResult)) {
-                            $id = if ($lun.UniqueId) { $lun.UniqueId } elseif ($lun.SerialNumber) { $lun.SerialNumber } else { "$($lun.FriendlyName)|$($lun.Size)|$($lun.BusType)" }
-                            $nodeLuns += [pscustomobject]@{ Node = $node; LunId = [string]$id; Disk = $lun }
-                        }
+                        $localWrapper = & $lunScript
+                        $nodeLuns += @(& $addNodeLuns $localName $localWrapper.Disks)
                     } catch {
-                        Add-Result $cat "SAN: LUN visibility query $node" 'WARN' "Invoke-Command/Get-Disk failed: $_"
+                        Add-Result $cat "SAN: LUN visibility query $localName" 'WARN' "Get-Disk failed: $_"
+                    }
+                }
+
+                # Single fan-out call: Invoke-Command runs the remote nodes in
+                # parallel (native ThrottleLimit) instead of one sequential
+                # WinRM round trip per node.
+                if ($remoteNodeNames.Count -gt 0) {
+                    $remoteErrors  = @()
+                    $remoteResults = @(Invoke-Command -ComputerName $remoteNodeNames -ScriptBlock $lunScript -ErrorAction SilentlyContinue -ErrorVariable remoteErrors)
+                    $respondedNodes = @()
+                    foreach ($wrapper in $remoteResults) {
+                        $nodeName = [string]$wrapper.PSComputerName
+                        $respondedNodes += $nodeName
+                        $nodeLuns += @(& $addNodeLuns $nodeName $wrapper.Disks)
+                    }
+                    foreach ($node in $remoteNodeNames) {
+                        if ($respondedNodes -notcontains $node) {
+                            $nodeError = $remoteErrors | Where-Object {
+                                $originProperty = $_.PSObject.Properties['OriginInfo']
+                                ($originProperty -and $originProperty.Value -and [string]$originProperty.Value.PSComputerName -ieq $node) -or
+                                [string]$_.TargetObject -ieq $node
+                            } | Select-Object -First 1
+                            $errorText = if ($nodeError) { $nodeError.Exception.Message } else { 'no result returned' }
+                            Add-Result $cat "SAN: LUN visibility query $node" 'WARN' "Invoke-Command/Get-Disk failed: $errorText"
+                        }
                     }
                 }
 
@@ -1955,7 +2019,7 @@ function Test-ClusterReadiness {
     Add-Result $cat 'Cluster node count' 'INFO' "$nodeCount node(s): $($clusterNodeSet -join ', ')"
 
     # S2D minimum 2 nodes
-    if ($StorageType -eq 'S2D' -and $nodeCount -lt 2) {
+    if ($script:StorageType -eq 'S2D' -and $nodeCount -lt 2) {
         Add-Result $cat 'S2D: Minimum 2 nodes' 'FAIL' "S2D requires at least 2 nodes — specify -ClusterNodes"
     }
 
@@ -1971,10 +2035,10 @@ function Test-ClusterReadiness {
     Add-Result $cat 'Quorum recommendation' $qLevel $quorumRec
 
     # Witness connectivity
-    if ($WitnessShare -ne '') {
-        $accessible = Test-Path $WitnessShare -ErrorAction SilentlyContinue
+    if ($script:WitnessShare -ne '') {
+        $accessible = Test-Path -LiteralPath $script:WitnessShare -ErrorAction SilentlyContinue
         $level      = if ($accessible) { 'PASS' } else { 'FAIL' }
-        Add-Result $cat "File share witness: $WitnessShare" $level $(if ($accessible) { 'Accessible' } else { "Cannot access UNC path — verify share permissions and network connectivity" })
+        Add-Result $cat "File share witness: $script:WitnessShare" $level $(if ($accessible) { 'Accessible' } else { "Cannot access UNC path — verify share permissions and network connectivity" })
     } elseif ($nodeCount -eq 2 -or ($nodeCount % 2 -eq 0)) {
         Add-Result $cat 'File share witness' 'WARN' "Node count ($nodeCount) requires a witness — specify -WitnessShare to validate"
     }
@@ -1993,9 +2057,13 @@ function Test-ClusterReadiness {
         }
         Add-Result $cat "Node ${node}: reachable" 'PASS' 'Ping OK'
 
+        $nodeCimSession = $null
         try {
-            $rOS = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $node -ErrorAction Stop
-            $rCS = Get-CimInstance -ClassName Win32_ComputerSystem  -ComputerName $node -ErrorAction Stop
+            # One CIM session per node: both classes are queried over a single
+            # WinRM connection instead of two.
+            $nodeCimSession = New-CimSession -ComputerName $node -ErrorAction Stop
+            $rOS = Get-CimInstance -ClassName Win32_OperatingSystem -CimSession $nodeCimSession -ErrorAction Stop
+            $rCS = Get-CimInstance -ClassName Win32_ComputerSystem  -CimSession $nodeCimSession -ErrorAction Stop
             $nodeOsVersions[$node] = $rOS.Version
 
             Add-Result $cat "Node ${node}: OS" 'INFO' "$($rOS.Caption) build $($rOS.BuildNumber)"
@@ -2007,6 +2075,10 @@ function Test-ClusterReadiness {
             }
         } catch {
             Add-Result $cat "Node ${node}: WMI/CIM" 'WARN' "Remote CIM unavailable: $_ — ensure WinRM is running"
+        } finally {
+            if ($null -ne $nodeCimSession) {
+                $nodeCimSession | Remove-CimSession -ErrorAction SilentlyContinue
+            }
         }
     }
 
@@ -2026,52 +2098,66 @@ function Test-ClusterReadiness {
         Add-Result $cat 'OS version consistency (all nodes)' 'FAIL' "Version mismatch: $nodeList — all nodes must run the same Windows Server build"
     }
 
-    # Hotfix / patch level consistency — Microsoft requires all nodes at same patch level
-    $nodeHotfixCounts = @{ $localNode = (Get-HotFix -ErrorAction SilentlyContinue | Measure-Object).Count }
-    foreach ($node in $Nodes) {
-        try {
-            $remoteHfCount = Invoke-Command -ComputerName $node -ScriptBlock {
-                (Get-HotFix -ErrorAction SilentlyContinue | Measure-Object).Count
-            } -ErrorAction Stop
-            $nodeHotfixCounts[$node] = $remoteHfCount
+    # Hotfix / patch level consistency and Failover-Clustering feature state.
+    # One Invoke-Command per node (instead of two) halves the WinRM round trips,
+    # and comparing the actual HotFixID sets — not just their counts — catches
+    # nodes with the same number of KBs but different patch content.
+    $remoteInfoScript = {
+        $hotfixIds = @(Get-HotFix -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HotFixID)
+        $featureState = try {
+            Import-Module ServerManager -ErrorAction Stop
+            [string](Get-WindowsFeature -Name 'Failover-Clustering' -ErrorAction Stop).InstallState
         } catch {
-            Add-Result $cat "Node ${node}: hotfix count" 'SKIP' "Remote query failed: $_"
+            "query failed: $($_.Exception.Message)"
         }
-    }
-    $distinctHfCounts = @($nodeHotfixCounts.Values | Select-Object -Unique)
-    if ($distinctHfCounts.Count -le 1) {
-        Add-Result $cat 'Hotfix/patch level consistency' 'PASS' "All nodes report ~$($distinctHfCounts[0]) KBs installed"
-    } else {
-        $hfList = ($nodeHotfixCounts.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)KBs" }) -join ', '
-        Add-Result $cat 'Hotfix/patch level consistency' 'WARN' "Unequal KB counts: $hfList — inconsistent patch levels can cause unexpected cluster behavior; align via WSUS or Windows Update before finalizing cluster"
+        [pscustomobject]@{
+            HotfixIds               = $hotfixIds
+            FailoverClusteringState = $featureState
+        }
     }
 
-    # Failover-Clustering feature on remote nodes
+    $nodeHotfixIds = @{ $localNode = @(Get-HotFix -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HotFixID) }
     foreach ($node in $Nodes) {
         try {
-            $state = Invoke-Command -ComputerName $node -ScriptBlock {
-                Import-Module ServerManager; (Get-WindowsFeature 'Failover-Clustering').InstallState
-            } -ErrorAction Stop
-            $level = if ($state -eq 'Installed') { 'PASS' } else { 'WARN' }
+            $remoteInfo = Invoke-Command -ComputerName $node -ScriptBlock $remoteInfoScript -ErrorAction Stop
+            $nodeHotfixIds[$node] = @($remoteInfo.HotfixIds)
+
+            $state = $remoteInfo.FailoverClusteringState
+            $level = if ($state -eq 'Installed') { 'PASS' } elseif ($state -like 'query failed:*') { 'SKIP' } else { 'WARN' }
             Add-Result $cat "Node ${node}: Failover-Clustering feature" $level "State: $state"
         } catch {
-            Add-Result $cat "Node ${node}: Failover-Clustering feature" 'SKIP' "Remote query failed: $_"
+            Add-Result $cat "Node ${node}: hotfix/feature query" 'SKIP' "Remote query failed: $_"
         }
+    }
+
+    $allHotfixIds = @($nodeHotfixIds.Values | ForEach-Object { $_ } | Sort-Object -Unique)
+    $inconsistentNodes = @()
+    foreach ($entry in $nodeHotfixIds.GetEnumerator()) {
+        $missing = @($allHotfixIds | Where-Object { $_ -notin $entry.Value })
+        if ($missing.Count -gt 0) {
+            $missingPreview = ($missing | Select-Object -First 5) -join ', '
+            $inconsistentNodes += "$($entry.Key) missing $($missing.Count) KB(s) ($missingPreview$(if ($missing.Count -gt 5) { ', …' }))"
+        }
+    }
+    if ($inconsistentNodes.Count -eq 0) {
+        Add-Result $cat 'Hotfix/patch level consistency' 'PASS' "All measured nodes report the same $($allHotfixIds.Count) KB(s)"
+    } else {
+        Add-Result $cat 'Hotfix/patch level consistency' 'WARN' "$($inconsistentNodes -join '; ') — inconsistent patch levels can cause unexpected cluster behavior; align via WSUS or Windows Update before finalizing cluster"
     }
 
     # Network segregation
     $activeNics = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })
-    $minNics    = if ($StorageType -eq 'S2D') { 4 } else { 3 }
+    $minNics    = if ($script:StorageType -eq 'S2D') { 4 } else { 3 }
     if ($activeNics.Count -ge $minNics) {
-        Add-Result $cat "Network segregation ($($activeNics.Count) NICs)" 'PASS' "Enough NICs for management / cluster heartbeat / live migration$(if ($StorageType -eq 'S2D') { ' / S2D storage' })"
+        Add-Result $cat "Network segregation ($($activeNics.Count) NICs)" 'PASS' "Enough NICs for management / cluster heartbeat / live migration$(if ($script:StorageType -eq 'S2D') { ' / S2D storage' })"
     } elseif ($activeNics.Count -ge 2) {
-        Add-Result $cat "Network segregation ($($activeNics.Count) NICs)" 'WARN' "Microsoft recommends $minNics+ separate networks for $StorageType"
+        Add-Result $cat "Network segregation ($($activeNics.Count) NICs)" 'WARN' "Microsoft recommends $minNics+ separate networks for $script:StorageType"
     } else {
         Add-Result $cat "Network segregation ($($activeNics.Count) NIC)" 'FAIL' "Cannot segregate cluster traffic with only 1 NIC"
     }
 
     # Test-Cluster
-    if (-not $SkipClusterValidation) {
+    if (-not $script:SkipClusterValidation) {
         if (Get-Module -Name FailoverClusters -ListAvailable -ErrorAction SilentlyContinue) {
             Import-Module FailoverClusters -ErrorAction SilentlyContinue
             try {
@@ -2102,19 +2188,31 @@ function Test-ServiceAccountPermissions {
     Section 'K. Service Account & OU Permissions'
     $cat = 'ServiceAccount'
 
-    if ($ServiceAccount -eq '') {
+    if ($script:ServiceAccount -eq '') {
         Add-Result $cat 'Service account check' 'SKIP' 'No -ServiceAccount specified — skipping section K'
         return
     }
 
+    # Schema GUIDs used by the ACL checks (K.3/K.4). Declared at function scope:
+    # they were previously declared inside the K.3 try block, so an early ACL
+    # read failure left them undefined when K.4 ran (StrictMode error masked by
+    # a misleading catch message).
+    # computer class:          bf967a86-0de6-11d0-a285-00aa003049e2
+    # dnsNode class:           e0fa1e8b-9b45-11d0-afdd-00c04fd930c9
+    # All objects (null guid): 00000000-0000-0000-0000-000000000000
+    $computerClassGuid = [Guid]'bf967a86-0de6-11d0-a285-00aa003049e2'
+    $dnsNodeClassGuid  = [Guid]'e0fa1e8b-9b45-11d0-afdd-00c04fd930c9'
+    $nullGuid          = [Guid]::Empty
+
     # Normalize sAMAccountName (strip domain prefix if present)
-    $samName = $ServiceAccount -replace '^.*\\', ''
-    Add-Result $cat 'Service account' 'INFO' "Checking: $ServiceAccount (samAccountName: $samName)"
+    $samName = $script:ServiceAccount -replace '^.*\\', ''
+    Add-Result $cat 'Service account' 'INFO' "Checking: $script:ServiceAccount (samAccountName: $samName)"
 
     # ── K.1 Account exists and is enabled ────────────────────────────────────
     $acctEntry = $null
     try {
-        $searcher = [adsisearcher]"(&(objectCategory=person)(objectClass=user)(samAccountName=$samName))"
+        $samNameEscaped = ConvertTo-LdapEscapedFilterValue -Value $samName
+        $searcher = [adsisearcher]"(&(objectCategory=person)(objectClass=user)(samAccountName=$samNameEscaped))"
         $searcher.PropertiesToLoad.AddRange([string[]]@('distinguishedname', 'useraccountcontrol', 'memberof', 'mail', 'objectsid'))
         $acctEntry = $searcher.FindOne()
     } catch {
@@ -2191,17 +2289,17 @@ function Test-ServiceAccountPermissions {
     }
 
     # ── K.3 OU permissions ────────────────────────────────────────────────────
-    if ($ClusterOU -eq '') {
+    if ($script:ClusterOU -eq '') {
         Add-Result $cat 'OU permission check' 'SKIP' 'No -ClusterOU specified — specify the OU DN where CNO/VCOs will be created'
     } else {
         # Verify OU exists
         try {
-            $ouEntry = [System.DirectoryServices.DirectoryEntry]"LDAP://$ClusterOU"
+            $ouEntry = [System.DirectoryServices.DirectoryEntry]"LDAP://$script:ClusterOU"
             $ouName  = $ouEntry.Name
             if (-not $ouName) { throw "OU entry empty" }
-            Add-Result $cat 'Target OU exists' 'PASS' "OU: $ClusterOU"
+            Add-Result $cat 'Target OU exists' 'PASS' "OU: $script:ClusterOU"
         } catch {
-            Add-Result $cat 'Target OU exists' 'FAIL' "Cannot bind to OU '$ClusterOU': $_ — verify the DN is correct"
+            Add-Result $cat 'Target OU exists' 'FAIL' "Cannot bind to OU '$script:ClusterOU': $_ — verify the DN is correct"
             # Cannot test ACLs without a valid OU
             return
         }
@@ -2210,7 +2308,7 @@ function Test-ServiceAccountPermissions {
         # The 'Protect object from accidental deletion' checkbox adds an explicit
         # Deny ACE for Delete/DeleteTree to Everyone (S-1-1-0) on the OU itself.
         try {
-            $ouDE  = [System.DirectoryServices.DirectoryEntry]"LDAP://$ClusterOU"
+            $ouDE  = [System.DirectoryServices.DirectoryEntry]"LDAP://$script:ClusterOU"
             $ouACL = $ouDE.psbase.ObjectSecurity
             $denyDeleteAll = @($ouACL.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) |
                 Where-Object {
@@ -2220,7 +2318,7 @@ function Test-ServiceAccountPermissions {
                     $_.IdentityReference.Value -eq 'S-1-1-0'  # Everyone
                 })
             if ($denyDeleteAll.Count -gt 0) {
-                Add-Result $cat 'OU accidental deletion protection' 'WARN' "'Protect object from accidental deletion' appears ENABLED (Deny Delete/DeleteTree for Everyone on $ClusterOU) — cluster VCO cleanup will fail; uncheck it in ADUC > OU Properties > Object tab if VCO lifecycle management is required"
+                Add-Result $cat 'OU accidental deletion protection' 'WARN' "'Protect object from accidental deletion' appears ENABLED (Deny Delete/DeleteTree for Everyone on $script:ClusterOU) — cluster VCO cleanup will fail; uncheck it in ADUC > OU Properties > Object tab if VCO lifecycle management is required"
             } else {
                 Add-Result $cat 'OU accidental deletion protection' 'PASS' 'No Deny Delete ACE for Everyone detected on the OU — VCO cleanup is not blocked by accidental-deletion protection'
             }
@@ -2232,14 +2330,6 @@ function Test-ServiceAccountPermissions {
         try {
             $adSecurity  = $ouEntry.psbase.ObjectSecurity
             $accessRules = $adSecurity.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
-
-            # Schema GUIDs
-            # computer class:          bf967a86-0de6-11d0-a285-00aa003049e2
-            # dnsNode class:           e0fa1e8b-9b45-11d0-afdd-00c04fd930c9
-            # All objects (null guid): 00000000-0000-0000-0000-000000000000
-            $computerClassGuid = [Guid]'bf967a86-0de6-11d0-a285-00aa003049e2'
-            $dnsNodeClassGuid  = [Guid]'e0fa1e8b-9b45-11d0-afdd-00c04fd930c9'
-            $nullGuid          = [Guid]::Empty
 
             $canCreateComputer  = $false
             $canWriteComputer   = $false
@@ -2274,7 +2364,7 @@ function Test-ServiceAccountPermissions {
             }
 
             if ($hasGenericAll) {
-                Add-Result $cat 'OU permission: Full Control' 'PASS' "Account has GenericAll (Full Control) on $ClusterOU"
+                Add-Result $cat 'OU permission: Full Control' 'PASS' "Account has GenericAll (Full Control) on $script:ClusterOU"
             } else {
                 $createLevel = if ($canCreateComputer) { 'PASS' } else { 'FAIL' }
                 $writeLevel  = if ($canWriteComputer)  { 'PASS' } else { 'WARN' }
@@ -2283,14 +2373,14 @@ function Test-ServiceAccountPermissions {
                     if ($canCreateComputer) {
                         "CreateChild (computer class) allowed — cluster can register CNO and VCOs"
                     } else {
-                        "MISSING — run: dsacls '$ClusterOU' /I:T /G '${ServiceAccount}:CC;computer' and restart check"
+                        "MISSING — run: dsacls '$script:ClusterOU' /I:T /G '${script:ServiceAccount}:CC;computer' and restart check"
                     }
                 )
                 Add-Result $cat 'OU permission: Write All Properties on computer objects' $writeLevel $(
                     if ($canWriteComputer) {
                         "WriteProperty on descendant computer objects allowed"
                     } else {
-                        "Not detected — may be inherited via group; if issues arise: dsacls '$ClusterOU' /I:S /G '${ServiceAccount}:WP;;computer'"
+                        "Not detected — may be inherited via group; if issues arise: dsacls '$script:ClusterOU' /I:S /G '${script:ServiceAccount}:WP;;computer'"
                     }
                 )
             }
@@ -2355,9 +2445,10 @@ function Test-ServiceAccountPermissions {
     }
 
     # ── K.5 Prestaged CNO check ───────────────────────────────────────────────
-    if ($ClusterName -ne '') {
+    if ($script:ClusterName -ne '') {
         try {
-            $cnoSearcher = [adsisearcher]"(&(objectCategory=computer)(name=$ClusterName))"
+            $clusterNameEscaped = ConvertTo-LdapEscapedFilterValue -Value $script:ClusterName
+            $cnoSearcher = [adsisearcher]"(&(objectCategory=computer)(name=$clusterNameEscaped))"
             $cnoSearcher.PropertiesToLoad.AddRange([string[]]@('distinguishedname', 'useraccountcontrol', 'objectsid'))
             $cnoResult = $cnoSearcher.FindOne()
 
@@ -2365,26 +2456,26 @@ function Test-ServiceAccountPermissions {
                 $cnoDN  = $cnoResult.Properties['distinguishedname'][0]
                 $cnoUAC = [int]$cnoResult.Properties['useraccountcontrol'][0]
                 $cnoDisabled = ($cnoUAC -band 0x0002) -ne 0
-                Add-Result $cat "Prestaged CNO '$ClusterName' found" 'INFO' "DN: $cnoDN"
+                Add-Result $cat "Prestaged CNO '$script:ClusterName' found" 'INFO' "DN: $cnoDN"
 
                 if ($cnoDisabled) {
-                    Add-Result $cat "Prestaged CNO '$ClusterName' is disabled" 'PASS' "Account is disabled — correct for a prestaged CNO (cluster will enable it)"
+                    Add-Result $cat "Prestaged CNO '$script:ClusterName' is disabled" 'PASS' "Account is disabled — correct for a prestaged CNO (cluster will enable it)"
                 } else {
-                    Add-Result $cat "Prestaged CNO '$ClusterName' disabled state" 'WARN' "CNO account is enabled — for a prestaged CNO it should be disabled until the cluster is created"
+                    Add-Result $cat "Prestaged CNO '$script:ClusterName' disabled state" 'WARN' "CNO account is enabled — for a prestaged CNO it should be disabled until the cluster is created"
                 }
 
                 # Verify CNO is in the expected OU
-                if ($ClusterOU -ne '' -and $cnoDN -notlike "*$ClusterOU") {
-                    Add-Result $cat "Prestaged CNO in correct OU" 'WARN' "CNO is in '$cnoDN' but expected under '$ClusterOU'"
-                } elseif ($ClusterOU -ne '') {
-                    Add-Result $cat "Prestaged CNO in correct OU" 'PASS' "CNO is under $ClusterOU"
+                if ($script:ClusterOU -ne '' -and $cnoDN -notlike "*$script:ClusterOU") {
+                    Add-Result $cat "Prestaged CNO in correct OU" 'WARN' "CNO is in '$cnoDN' but expected under '$script:ClusterOU'"
+                } elseif ($script:ClusterOU -ne '') {
+                    Add-Result $cat "Prestaged CNO in correct OU" 'PASS' "CNO is under $script:ClusterOU"
                 }
 
                 # CNO must have Full Control over VCOs in the same OU — remind operator
-                Add-Result $cat "Prestaged CNO: permissions on VCOs" 'WARN' "Manual check required: CNO computer account ($ClusterName`$) must have Full Control over any prestaged VCO accounts in $ClusterOU — run: dsacls '$ClusterOU' /I:S /G '$ClusterName`$:GA;;computer'"
+                Add-Result $cat "Prestaged CNO: permissions on VCOs" 'WARN' "Manual check required: CNO computer account ($script:ClusterName`$) must have Full Control over any prestaged VCO accounts in $script:ClusterOU — run: dsacls '$script:ClusterOU' /I:S /G '$script:ClusterName`$:GA;;computer'"
 
             } else {
-                Add-Result $cat "Prestaged CNO '$ClusterName'" 'INFO' "Not found in AD — cluster will create the CNO automatically (requires CreateChild permission on target OU)"
+                Add-Result $cat "Prestaged CNO '$script:ClusterName'" 'INFO' "Not found in AD — cluster will create the CNO automatically (requires CreateChild permission on target OU)"
             }
         } catch {
             Add-Result $cat "Prestaged CNO check" 'WARN' "ADSI query failed: $_"
@@ -2401,6 +2492,11 @@ function Test-EventLogHealth {
     $cat  = 'EventLog'
     $since = (Get-Date).AddHours(-24)
 
+    # Cap every query: without -MaxEvents, a noisy server materializes thousands
+    # of event objects only to display the first 3. Counts at the cap render as
+    # "500+".
+    $maxEvents = 500
+
     # Logs and source patterns to check
     $checks = @(
         @{ Log = 'System';      Level = 1; Label = 'System critical errors' }
@@ -2415,8 +2511,9 @@ function Test-EventLogHealth {
                 Level     = $chk.Level
                 StartTime = $since
             }
-            $events = @(Get-WinEvent -FilterHashtable $filter -ErrorAction Stop)
+            $events = @(Get-WinEvent -FilterHashtable $filter -MaxEvents $maxEvents -ErrorAction Stop)
             $count  = $events.Count
+            $countText = if ($count -ge $maxEvents) { "$maxEvents+" } else { "$count" }
             $limit  = if ($chk.ContainsKey('Limit')) { $chk.Limit } else { 1 }
             if ($count -ge $limit) {
                 $top = ($events | Select-Object -First 3 | ForEach-Object {
@@ -2425,7 +2522,7 @@ function Test-EventLogHealth {
                     "$($_.TimeCreated.ToString('HH:mm')) [$($_.Id)] $($_.ProviderName): $snippet"
                 }) -join ' | '
                 $level = if ($chk.Level -eq 1) { 'FAIL' } else { 'WARN' }
-                Add-Result $cat "$($chk.Label) (last 24h)" $level "$count event(s) — $top"
+                Add-Result $cat "$($chk.Label) (last 24h)" $level "$countText event(s) — $top"
             } else {
                 Add-Result $cat "$($chk.Label) (last 24h)" 'PASS' "None (0 events)"
             }
@@ -2445,12 +2542,12 @@ function Test-EventLogHealth {
             ProviderName = @('disk', 'storahci', 'volmgr', 'Ntfs', 'stornvme')
             Level        = @(1, 2)
             StartTime    = $since
-        } -ErrorAction Stop)
+        } -MaxEvents $maxEvents -ErrorAction Stop)
         if ($diskEvents.Count -gt 0) {
             $top = ($diskEvents | Select-Object -First 3 | ForEach-Object {
                 "$($_.TimeCreated.ToString('HH:mm')) [$($_.Id)] $($_.ProviderName)"
             }) -join ', '
-            Add-Result $cat 'Disk/storage driver errors (last 24h)' 'FAIL' "$($diskEvents.Count) event(s): $top — investigate before joining cluster"
+            Add-Result $cat 'Disk/storage driver errors (last 24h)' 'FAIL' "$(if ($diskEvents.Count -ge $maxEvents) { "$maxEvents+" } else { $diskEvents.Count }) event(s): $top — investigate before joining cluster"
         } else {
             Add-Result $cat 'Disk/storage driver errors (last 24h)' 'PASS' 'None'
         }
@@ -2469,9 +2566,9 @@ function Test-EventLogHealth {
             ProviderName = @('e1i65x64', 'mlx4_bus', 'mlx5_bus', 'iWARP', 'ndis', 'Tcpip')
             Level        = @(1, 2)
             StartTime    = $since
-        } -ErrorAction Stop)
+        } -MaxEvents $maxEvents -ErrorAction Stop)
         if ($netEvents.Count -gt 0) {
-            Add-Result $cat 'Network driver errors (last 24h)' 'WARN' "$($netEvents.Count) event(s) — NIC resets or drops may affect cluster heartbeat"
+            Add-Result $cat 'Network driver errors (last 24h)' 'WARN' "$(if ($netEvents.Count -ge $maxEvents) { "$maxEvents+" } else { $netEvents.Count }) event(s) — NIC resets or drops may affect cluster heartbeat"
         } else {
             Add-Result $cat 'Network driver errors (last 24h)' 'PASS' 'None'
         }
@@ -2489,9 +2586,9 @@ function Test-EventLogHealth {
             LogName   = 'Microsoft-Windows-Hyper-V-VMMS-Admin'
             Level     = @(1, 2)
             StartTime = $since
-        } -ErrorAction Stop)
+        } -MaxEvents $maxEvents -ErrorAction Stop)
         if ($hvEvents.Count -gt 0) {
-            Add-Result $cat 'Hyper-V VMMS errors (last 24h)' 'WARN' "$($hvEvents.Count) error(s) in Hyper-V-VMMS-Admin"
+            Add-Result $cat 'Hyper-V VMMS errors (last 24h)' 'WARN' "$(if ($hvEvents.Count -ge $maxEvents) { "$maxEvents+" } else { $hvEvents.Count }) error(s) in Hyper-V-VMMS-Admin"
         } else {
             Add-Result $cat 'Hyper-V VMMS errors (last 24h)' 'PASS' 'None'
         }
@@ -2509,9 +2606,9 @@ function Test-EventLogHealth {
             LogName   = 'Microsoft-Windows-FailoverClustering/Operational'
             Level     = @(1, 2)
             StartTime = $since
-        } -ErrorAction Stop)
+        } -MaxEvents $maxEvents -ErrorAction Stop)
         if ($fcEvents.Count -gt 0) {
-            Add-Result $cat 'Failover Clustering errors (last 24h)' 'WARN' "$($fcEvents.Count) error(s) in FailoverClustering/Operational"
+            Add-Result $cat 'Failover Clustering errors (last 24h)' 'WARN' "$(if ($fcEvents.Count -ge $maxEvents) { "$maxEvents+" } else { $fcEvents.Count }) error(s) in FailoverClustering/Operational"
         } else {
             Add-Result $cat 'Failover Clustering errors (last 24h)' 'PASS' 'None'
         }
@@ -2549,6 +2646,7 @@ function Test-TcpPort {
 
 function Test-UdpPort {
     param([string]$Target, [int]$Port, [byte[]]$Payload, [int]$TimeoutMs = 2000)
+    $udp = $null
     try {
         $udp = [System.Net.Sockets.UdpClient]::new()
         $udp.Client.ReceiveTimeout = $TimeoutMs
@@ -2558,56 +2656,105 @@ function Test-UdpPort {
         # IPEndPoint, which always throws and made every UDP probe report closed.
         $ep  = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
         [void]$udp.Receive([ref]$ep)
-        $udp.Close()
         return $true
-    } catch [System.Net.Sockets.SocketException] {
-        # ICMP port unreachable = host replied (port closed but host reachable)
-        if ($_.Exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::ConnectionReset) {
-            return $false
-        }
+    } catch {
+        # Timeout, ICMP port-unreachable (ConnectionReset) and DNS failures all
+        # count as closed/unreachable.
         return $false
-    } catch { return $false }
+    } finally {
+        # Close in finally: the socket previously leaked on every failure path.
+        if ($udp) { try { $udp.Close() } catch { Write-Verbose "UDP socket close failed: $($_.Exception.Message)" } }
+    }
+}
+
+function New-PortEndpoint {
+    param([string]$Target, [int]$Port, [string]$Service, [string]$Scope,
+          [ValidateSet('TCP','UDP')][string]$Proto = 'TCP',
+          [byte[]]$UdpPayload, [switch]$Optional)
+    if ([string]::IsNullOrEmpty($Target)) { return $null }
+    [pscustomobject]@{
+        Target     = $Target
+        Port       = $Port
+        Service    = $Service
+        Scope      = $Scope
+        Proto      = $Proto
+        UdpPayload = $UdpPayload
+        Optional   = [bool]$Optional
+    }
+}
+
+function Invoke-PortEndpointChecks {
+    param([object[]]$Endpoints, [string]$Category, [int]$TimeoutMs = 2000)
+
+    # Start every TCP connection attempt up front so the whole batch shares one
+    # timeout window: previously each closed/filtered port cost its full
+    # timeout sequentially (an unreachable DC = 8 ports x 2 s = 16 s).
+    $probes = @()
+    foreach ($endpoint in @($Endpoints)) {
+        if ($null -eq $endpoint) { continue }
+        $probe = [pscustomobject]@{ Endpoint = $endpoint; Client = $null; Async = $null; Ok = $false }
+        if ($endpoint.Proto -eq 'TCP') {
+            $probe.Client = [System.Net.Sockets.TcpClient]::new()
+            try {
+                $probe.Async = $probe.Client.BeginConnect($endpoint.Target, $endpoint.Port, $null, $null)
+            } catch {
+                # Synchronous failure (e.g. DNS resolution) — probe stays failed.
+                try { $probe.Client.Close() } catch { Write-Verbose "TCP socket close failed: $($_.Exception.Message)" }
+                $probe.Client = $null
+            }
+        }
+        $probes += $probe
+    }
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    foreach ($probe in $probes) {
+        $endpoint = $probe.Endpoint
+        if ($endpoint.Proto -eq 'UDP') {
+            $probe.Ok = Test-UdpPort -Target $endpoint.Target -Port $endpoint.Port -Payload $endpoint.UdpPayload -TimeoutMs $TimeoutMs
+        } elseif ($null -ne $probe.Client) {
+            $remainingMs = [int][Math]::Max(0, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            if ($probe.Async.AsyncWaitHandle.WaitOne($remainingMs, $false)) {
+                try {
+                    # EndConnect surfaces a refused connection (RST) that
+                    # completed within the timeout as an exception.
+                    $probe.Client.EndConnect($probe.Async)
+                    $probe.Ok = $probe.Client.Connected
+                } catch { $probe.Ok = $false }
+            }
+            try { $probe.Client.Close() } catch { Write-Verbose "TCP socket close failed: $($_.Exception.Message)" }
+        }
+
+        $label = "$($endpoint.Scope) → $($endpoint.Target):$($endpoint.Port)/$($endpoint.Proto) ($($endpoint.Service))"
+        if ($probe.Ok) {
+            Add-Result $Category $label 'PASS' 'Open'
+        } elseif ($endpoint.Optional) {
+            Add-Result $Category $label 'INFO' 'Closed/unreachable (optional port)'
+        } else {
+            Add-Result $Category $label 'FAIL' 'Closed or filtered — verify firewall rules'
+        }
+    }
 }
 
 function Test-PortConnectivity {
     Section 'M. Network Port Connectivity'
     $cat = 'Ports'
 
-    function Test-PortEndpoint {
-        param([string]$Target, [int]$Port, [string]$Service, [string]$Scope,
-              [ValidateSet('TCP','UDP')][string]$Proto = 'TCP',
-              [byte[]]$UdpPayload, [switch]$Optional)
-        if ($Target -eq '' -or $null -eq $Target) { return }
-        $label = "$Scope → ${Target}:${Port}/${Proto} ($Service)"
-        $ok = if ($Proto -eq 'UDP') {
-            Test-UdpPort -Target $Target -Port $Port -Payload $UdpPayload
-        } else {
-            Test-TcpPort -Target $Target -Port $Port
-        }
-        if ($ok) {
-            Add-Result $cat $label 'PASS' 'Open'
-        } elseif ($Optional) {
-            Add-Result $cat $label 'INFO' 'Closed/unreachable (optional port)'
-        } else {
-            Add-Result $cat $label 'FAIL' 'Closed or filtered — verify firewall rules'
-        }
-    }
-
     # ── M.1 Domain Controllers ────────────────────────────────────────────────
     if ($script:DomainControllers -and $script:DomainControllers.Count -gt 0) {
-        foreach ($dc in $script:DomainControllers) {
-            Test-PortEndpoint $dc  53  'DNS'             "DC"
-            Test-PortEndpoint $dc  88  'Kerberos'        "DC"
-            Test-PortEndpoint $dc 135  'RPC EPM'         "DC"
-            Test-PortEndpoint $dc 389  'LDAP'            "DC"
-            Test-PortEndpoint $dc 445  'SMB/Netlogon'    "DC"
-            Test-PortEndpoint $dc 636  'LDAPS'           "DC" -Optional
-            Test-PortEndpoint $dc 3268 'Global Catalog'  "DC"
-            Test-PortEndpoint $dc 3269 'GC SSL'          "DC" -Optional
+        $ntpPayload = [byte[]]::new(48); $ntpPayload[0] = 0x1b
+        $dcEndpoints = foreach ($dc in $script:DomainControllers) {
+            New-PortEndpoint $dc  53  'DNS'             "DC"
+            New-PortEndpoint $dc  88  'Kerberos'        "DC"
+            New-PortEndpoint $dc 135  'RPC EPM'         "DC"
+            New-PortEndpoint $dc 389  'LDAP'            "DC"
+            New-PortEndpoint $dc 445  'SMB/Netlogon'    "DC"
+            New-PortEndpoint $dc 636  'LDAPS'           "DC" -Optional
+            New-PortEndpoint $dc 3268 'Global Catalog'  "DC"
+            New-PortEndpoint $dc 3269 'GC SSL'          "DC" -Optional
             # NTP via UDP on each DC
-            $ntpPayload    = [byte[]]::new(48); $ntpPayload[0] = 0x1b
-            Test-PortEndpoint $dc 123  'NTP'             "DC" -Proto UDP -UdpPayload $ntpPayload -Optional
+            New-PortEndpoint $dc 123  'NTP'             "DC" -Proto UDP -UdpPayload $ntpPayload -Optional
         }
+        Invoke-PortEndpointChecks -Endpoints $dcEndpoints -Category $cat
     } else {
         Add-Result $cat 'DC port checks' 'SKIP' 'No domain controllers configured or discovered'
     }
@@ -2615,21 +2762,24 @@ function Test-PortConnectivity {
     # ── M.2 NTP server (dedicated, if specified) ──────────────────────────────
     if ($script:NtpServer -and $script:NtpServer -ne '') {
         $ntpPayload = [byte[]]::new(48); $ntpPayload[0] = 0x1b
-        Test-PortEndpoint $script:NtpServer 123 'NTP' "NTP" -Proto UDP -UdpPayload $ntpPayload
+        Invoke-PortEndpointChecks -Category $cat -Endpoints @(
+            New-PortEndpoint $script:NtpServer 123 'NTP' "NTP" -Proto UDP -UdpPayload $ntpPayload
+        )
     }
 
     # ── M.3 Other cluster nodes ───────────────────────────────────────────────
     $remoteNodes = @($script:ClusterNodes | Where-Object { $_ -ne $env:COMPUTERNAME -and $_ -ne '' })
     if ($remoteNodes.Count -gt 0) {
-        foreach ($node in $remoteNodes) {
-            Test-PortEndpoint $node  135  'RPC EPM'             "Node"
-            Test-PortEndpoint $node  445  'SMB (CSV/Cluster)'   "Node"
-            Test-PortEndpoint $node 3343  'Cluster Service'      "Node"
-            Test-PortEndpoint $node 5985  'WinRM HTTP'           "Node"
-            Test-PortEndpoint $node 5986  'WinRM HTTPS'          "Node" -Optional
-            Test-PortEndpoint $node 6600  'Live Migration'        "Node"
-            Test-PortEndpoint $node 2179  'Hyper-V VMConnect'    "Node" -Optional
+        $nodeEndpoints = foreach ($node in $remoteNodes) {
+            New-PortEndpoint $node  135  'RPC EPM'             "Node"
+            New-PortEndpoint $node  445  'SMB (CSV/Cluster)'   "Node"
+            New-PortEndpoint $node 3343  'Cluster Service'      "Node"
+            New-PortEndpoint $node 5985  'WinRM HTTP'           "Node"
+            New-PortEndpoint $node 5986  'WinRM HTTPS'          "Node" -Optional
+            New-PortEndpoint $node 6600  'Live Migration'        "Node"
+            New-PortEndpoint $node 2179  'Hyper-V VMConnect'    "Node" -Optional
         }
+        Invoke-PortEndpointChecks -Endpoints $nodeEndpoints -Category $cat
     } else {
         Add-Result $cat 'Cluster node port checks' 'SKIP' 'No remote cluster nodes specified (single-node mode or -ClusterNodes empty)'
     }
@@ -2639,8 +2789,10 @@ function Test-PortConnectivity {
         # Extract server from \\server\share
         if ($script:WitnessShare -match '^\\\\([^\\]+)') {
             $witnessServer = $Matches[1]
-            Test-PortEndpoint $witnessServer 445 'SMB (witness share)' "Witness"
-            Test-PortEndpoint $witnessServer 135 'RPC EPM (DFS)'       "Witness" -Optional
+            Invoke-PortEndpointChecks -Category $cat -Endpoints @(
+                New-PortEndpoint $witnessServer 445 'SMB (witness share)' "Witness"
+                New-PortEndpoint $witnessServer 135 'RPC EPM (DFS)'       "Witness" -Optional
+            )
         } else {
             Add-Result $cat 'Witness server port check' 'SKIP' "Cannot parse server from '$($script:WitnessShare)'"
         }
@@ -2648,18 +2800,21 @@ function Test-PortConnectivity {
 
     # ── M.5 iSCSI targets (SAN only) ─────────────────────────────────────────
     if ($script:StorageType -eq 'SAN' -and $script:IscsiTargets -and $script:IscsiTargets.Count -gt 0) {
-        foreach ($target in $script:IscsiTargets) {
-            Test-PortEndpoint $target 3260 'iSCSI' "iSCSI"
+        $iscsiEndpoints = foreach ($target in $script:IscsiTargets) {
+            New-PortEndpoint $target 3260 'iSCSI' "iSCSI"
         }
+        Invoke-PortEndpointChecks -Endpoints $iscsiEndpoints -Category $cat
     } elseif ($script:StorageType -eq 'SAN' -and (-not $script:IscsiTargets -or $script:IscsiTargets.Count -eq 0)) {
         Add-Result $cat 'iSCSI target port checks' 'SKIP' 'No iSCSI targets specified (add IscsiTargets to hyperv-check.psd1)'
     }
 
     # ── M.6 SCVMM server (optional) ───────────────────────────────────────────
     if ($script:ScvmmServer -and $script:ScvmmServer -ne '') {
-        Test-PortEndpoint $script:ScvmmServer 8100 'SCVMM Agent'  "SCVMM"
-        Test-PortEndpoint $script:ScvmmServer  445 'SMB'          "SCVMM" -Optional
-        Test-PortEndpoint $script:ScvmmServer 5985 'WinRM HTTP'   "SCVMM" -Optional
+        Invoke-PortEndpointChecks -Category $cat -Endpoints @(
+            New-PortEndpoint $script:ScvmmServer 8100 'SCVMM Agent'  "SCVMM"
+            New-PortEndpoint $script:ScvmmServer  445 'SMB'          "SCVMM" -Optional
+            New-PortEndpoint $script:ScvmmServer 5985 'WinRM HTTP'   "SCVMM" -Optional
+        )
     }
 
     # ── M.7 Self-checks (services that must listen locally) ───────────────────
@@ -2739,8 +2894,8 @@ td{padding:7px 12px;border-bottom:1px solid #e0e0e0;font-size:.9em}
 </style></head><body>
 <h1>Hyper-V Node Readiness Report</h1>
 <p><strong>Host:</strong> $env:COMPUTERNAME &nbsp;|&nbsp;
-<strong>Mode:</strong> $Mode &nbsp;|&nbsp;
-<strong>Storage:</strong> $StorageType &nbsp;|&nbsp;
+<strong>Mode:</strong> $script:Mode &nbsp;|&nbsp;
+<strong>Storage:</strong> $script:StorageType &nbsp;|&nbsp;
 <strong>Date:</strong> $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</p>
 <p><span class="badge pass">PASS: $passCount</span>&nbsp;
 <span class="badge warn">WARN: $warnCount</span>&nbsp;
@@ -2801,9 +2956,13 @@ if ($runCluster) {
     Invoke-CheckSection 'Cluster'           { Test-ClusterReadiness -Nodes $script:ClusterNodes }
 }
 
-# Section K: service account / OU — runs whenever configured
-if ($script:ServiceAccount -ne '' -or $script:ClusterOU -ne '') {
+# Section K: service account / OU. The section needs ServiceAccount (the ACL
+# checks resolve that account's SIDs); ClusterOU/ClusterName alone are not
+# enough, so make that explicit instead of entering the section only to skip.
+if ($script:ServiceAccount -ne '') {
     Invoke-CheckSection 'ServiceAccount'    { Test-ServiceAccountPermissions }
+} elseif ($script:ClusterOU -ne '' -or $script:ClusterName -ne '') {
+    Add-Result 'ServiceAccount' 'Service account & OU checks' 'SKIP' 'ClusterOU/ClusterName configured but ServiceAccount is empty — section K requires ServiceAccount'
 }
 
 # Section L: event log health (always for PreNode and Both)
@@ -2817,7 +2976,12 @@ Invoke-CheckSection 'Ports'                 { Test-PortConnectivity }
 $failCount = Write-Summary
 
 if ($script:HtmlReportPath -ne '') {
-    Write-HtmlReport -Path $HtmlReportPath
+    Write-HtmlReport -Path $script:HtmlReportPath
+}
+
+if ($null -ne $script:LogWriter) {
+    $script:LogWriter.Close()
+    $script:LogWriter = $null
 }
 
 exit $(if ($failCount -gt 0) { 1 } else { 0 })

@@ -50,15 +50,17 @@
     FQDN or IP of the SQL server (optional)
 
 .PARAMETER ExportCSV
-    Path to the CSV export file (optional)
+    Path to the CSV export file (optional). The first cycle overwrites any
+    existing file; in continuous mode, later cycles append their rows.
 
 .PARAMETER ContinuousIntervalMinutes
     Interval in minutes to rerun tests continuously (e.g., 2).
     If not specified, the script runs only once.
 
-.PARAMETER ContinuousIntervalMinutes
-    Intervalle en minutes pour relancer les tests en continu (ex: 2).
-    Si non renseigne, le script ne fait qu'un seul passage.
+.PARAMETER ProbeTimeoutMs
+    TCP connection timeout per test in milliseconds (default 2000).
+    Lower it on well-connected networks to speed up runs where many
+    flows are expected to be blocked.
 
 .EXAMPLE
     # Interactive: the script asks the right questions for the selected role
@@ -96,11 +98,15 @@ param(
     [Parameter(Mandatory=$false)] [string[]] $ESXiHosts,
     [Parameter(Mandatory=$false)] [string]   $SQLServer,
     [Parameter(Mandatory=$false)] [string]   $ExportCSV,
-    [Parameter(Mandatory=$false)] [ValidateRange(1,1440)] [int] $ContinuousIntervalMinutes
+    [Parameter(Mandatory=$false)] [ValidateRange(1,1440)] [int] $ContinuousIntervalMinutes,
+    [Parameter(Mandatory=$false)] [ValidateRange(100,60000)] [int] $ProbeTimeoutMs = 2000
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'SilentlyContinue'
+# 'Stop' (not 'SilentlyContinue'): the network probes already have their own
+# try/catch blocks; a global suppression would also hide real script failures
+# and turn them into misleading network diagnostics.
+$ErrorActionPreference = 'Stop'
 $InformationPreference = 'Continue'
 
 $script:Results    = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -326,7 +332,7 @@ function Test-Flow {
         $tcp = New-Object System.Net.Sockets.TcpClient
         $sw  = [System.Diagnostics.Stopwatch]::StartNew()
         $ar  = $tcp.BeginConnect($Destination, $Port, $null, $null)
-        $ok  = $ar.AsyncWaitHandle.WaitOne(2000, $false)
+        $ok  = $ar.AsyncWaitHandle.WaitOne($script:ProbeTimeoutMs, $false)
         $sw.Stop()
         if ($ok) {
             # EndConnect completes the async connect and surfaces a refused
@@ -698,4 +704,6 @@ if ($ContinuousIntervalMinutes) {
     Invoke-TestCycle -CycleNumber 1
 }
 
-exit $script:FailCount
+# Normalized exit code (0 = all flows open, 1 = at least one failure): a raw
+# failure count would be truncated modulo 256 on some hosts (e.g. 256 -> 0).
+exit $(if ($script:FailCount -gt 0) { 1 } else { 0 })
