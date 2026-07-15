@@ -154,17 +154,35 @@ function Start-SCVMMHostMigration {
             throw "Destination host '$TargetHostName' not found in SCVMM."
         }
 
-        $job = Move-SCVirtualMachine -VM $vm -VMHost $targetHost -UseLAN -RunAsynchronously
-        if (-not $job) {
+        # Move-SCVirtualMachine returns the VirtualMachine object, NOT the SCVMM
+        # job — reading .ID off that return value yields the VM GUID, which never
+        # matches a Get-SCJob ID and silently disabled job-state monitoring.
+        # Capture the real job via -JobVariable (VMM common parameter) with a
+        # fallback to the VM's MostRecentTask.
+        $scvmmMoveJob = $null
+        $moveCommand = Get-Command -Name Move-SCVirtualMachine -ErrorAction SilentlyContinue | Select-Object -First 1
+        $supportsJobVariable = $moveCommand -and $moveCommand.Parameters.ContainsKey('JobVariable')
+
+        if ($supportsJobVariable) {
+            $movedVm = Move-SCVirtualMachine -VM $vm -VMHost $targetHost -UseLAN -RunAsynchronously -JobVariable scvmmMoveJob
+        } else {
+            $movedVm = Move-SCVirtualMachine -VM $vm -VMHost $targetHost -UseLAN -RunAsynchronously
+        }
+
+        if (-not $scvmmMoveJob -and $movedVm -and $movedVm.PSObject.Properties['MostRecentTask'] -and $movedVm.MostRecentTask) {
+            $scvmmMoveJob = $movedVm.MostRecentTask
+        }
+
+        if (-not $scvmmMoveJob) {
             return $null
         }
 
         [pscustomobject]@{
-            ID           = [string]$job.ID
-            Name         = [string]$job.Name
-            Status       = [string]$job.Status
-            StatusString = [string]$job.StatusString
-            ErrorInfo    = [string]$job.ErrorInfo
+            ID           = if ($scvmmMoveJob.PSObject.Properties['ID']) { [string]$scvmmMoveJob.ID } else { $null }
+            Name         = if ($scvmmMoveJob.PSObject.Properties['Name']) { [string]$scvmmMoveJob.Name } else { $null }
+            Status       = if ($scvmmMoveJob.PSObject.Properties['Status']) { [string]$scvmmMoveJob.Status } else { $null }
+            StatusString = if ($scvmmMoveJob.PSObject.Properties['StatusString']) { [string]$scvmmMoveJob.StatusString } else { $null }
+            ErrorInfo    = if ($scvmmMoveJob.PSObject.Properties['ErrorInfo']) { [string]$scvmmMoveJob.ErrorInfo } else { $null }
         }
     } -ArgumentList @($Name, $ServerName, $DestinationHost)
 }
@@ -195,17 +213,28 @@ function Get-SCVMMHostMigrationJobState {
         param($VmmServerName, $ScvmmJobId)
 
         $server = Get-SCVMMServer -ComputerName $VmmServerName
-        $job = Get-SCJob -VMMServer $server | Where-Object { [string]$_.ID -eq $ScvmmJobId } | Select-Object -First 1
+
+        # Targeted lookup first: enumerating every SCVMM job with a bare
+        # Get-SCJob is expensive on a busy VMM server.
+        $job = $null
+        try {
+            $job = Get-SCJob -ID $ScvmmJobId -VMMServer $server -ErrorAction Stop | Select-Object -First 1
+        } catch {
+            Write-Verbose "Get-SCJob -ID lookup failed, falling back to enumeration: $($_.Exception.Message)"
+        }
+        if (-not $job) {
+            $job = Get-SCJob -VMMServer $server | Where-Object { [string]$_.ID -eq $ScvmmJobId } | Select-Object -First 1
+        }
         if (-not $job) {
             return $null
         }
 
         [pscustomobject]@{
-            ID           = [string]$job.ID
-            Name         = [string]$job.Name
-            Status       = [string]$job.Status
-            StatusString = [string]$job.StatusString
-            ErrorInfo    = [string]$job.ErrorInfo
+            ID           = if ($job.PSObject.Properties['ID']) { [string]$job.ID } else { $null }
+            Name         = if ($job.PSObject.Properties['Name']) { [string]$job.Name } else { $null }
+            Status       = if ($job.PSObject.Properties['Status']) { [string]$job.Status } else { $null }
+            StatusString = if ($job.PSObject.Properties['StatusString']) { [string]$job.StatusString } else { $null }
+            ErrorInfo    = if ($job.PSObject.Properties['ErrorInfo']) { [string]$job.ErrorInfo } else { $null }
         }
     } -ArgumentList @($ServerName, $JobId)
 }

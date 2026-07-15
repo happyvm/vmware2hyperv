@@ -810,16 +810,28 @@ function Test-NetworkConfiguration {
             Add-Result $cat "NIC '$($nic.Name)' static IP" 'INFO' "IP $addr/$prefix; no mapped role requiring static-IP enforcement"
         }
 
-        # Link speed
-        $speedGbps = [math]::Round($nic.LinkSpeed / 1000000000, 0)
-        if ($role -eq 'S2DStorage' -and $speedGbps -lt 10) {
-            Add-Result $cat "NIC '$($nic.Name)' link speed" 'FAIL' "${speedGbps} Gbps — S2D storage requires minimum 10 GbE (25 GbE+ recommended)"
-        } elseif ($role -in @('iSCSI', 'LiveMigration') -and $speedGbps -lt 10) {
-            Add-Result $cat "NIC '$($nic.Name)' link speed" 'WARN' "${speedGbps} Gbps — $role traffic usually benefits from dedicated 10 GbE+"
-        } elseif ($speedGbps -lt 1) {
-            Add-Result $cat "NIC '$($nic.Name)' link speed" 'WARN' "${speedGbps} Gbps — low speed for Hyper-V host traffic"
+        # Link speed. Use the numeric Speed property (bits/s): LinkSpeed on
+        # Get-NetAdapter objects is a formatted display STRING ("10 Gbps") and
+        # dividing it throws under $ErrorActionPreference = 'Stop', aborting the
+        # rest of the Network section at the first NIC.
+        $speedBps = $null
+        foreach ($speedProperty in @('Speed', 'ReceiveLinkSpeed', 'TransmitLinkSpeed')) {
+            $property = $nic.PSObject.Properties[$speedProperty]
+            if ($property -and $property.Value) { $speedBps = [double]$property.Value; break }
+        }
+        if ($null -eq $speedBps) {
+            Add-Result $cat "NIC '$($nic.Name)' link speed" 'INFO' 'Numeric link speed unavailable on this adapter'
         } else {
-            Add-Result $cat "NIC '$($nic.Name)' link speed" 'INFO' "${speedGbps} Gbps"
+            $speedGbps = [math]::Round($speedBps / 1000000000, 0)
+            if ($role -eq 'S2DStorage' -and $speedGbps -lt 10) {
+                Add-Result $cat "NIC '$($nic.Name)' link speed" 'FAIL' "${speedGbps} Gbps — S2D storage requires minimum 10 GbE (25 GbE+ recommended)"
+            } elseif ($role -in @('iSCSI', 'LiveMigration') -and $speedGbps -lt 10) {
+                Add-Result $cat "NIC '$($nic.Name)' link speed" 'WARN' "${speedGbps} Gbps — $role traffic usually benefits from dedicated 10 GbE+"
+            } elseif ($speedGbps -lt 1) {
+                Add-Result $cat "NIC '$($nic.Name)' link speed" 'WARN' "${speedGbps} Gbps — low speed for Hyper-V host traffic"
+            } else {
+                Add-Result $cat "NIC '$($nic.Name)' link speed" 'INFO' "${speedGbps} Gbps"
+            }
         }
 
         # DNS servers and default gateway are required only on management NICs.
@@ -930,6 +942,9 @@ function Test-NetworkConfiguration {
     # DNS suffix
     $dnsSuffix    = (Get-DnsClientGlobalSetting).SuffixSearchList
     $domainSuffix = (Get-CachedCimInstance 'Win32_ComputerSystem').Domain
+    # 'WORKGROUP' is the placeholder domain of a non-domain-joined machine, not
+    # a resolvable DNS suffix — counting it produced a misleading PASS.
+    if ($domainSuffix -eq 'WORKGROUP') { $domainSuffix = $null }
     $allSuffixes  = (@($dnsSuffix) + @($domainSuffix) | Select-Object -Unique | Where-Object { $_ }) -join ', '
     if ($allSuffixes) {
         Add-Result $cat 'DNS suffix search list' 'PASS' $allSuffixes
@@ -1460,8 +1475,12 @@ function Test-TimeSync {
             } else {
                 Add-Result $cat 'Time offset vs DC (Kerberos limit: 300s)' 'FAIL' "${offsetSec}s — exceeds limit — cluster Kerberos authentication will fail"
             }
+        } elseif ($offsetLine) {
+            Add-Result $cat 'Time offset' 'INFO' ([string]$offsetLine).Trim()
         } else {
-            Add-Result $cat 'Time offset' 'INFO' ($offsetLine.Trim())
+            # $offsetLine is $null when no line matched: calling .Trim() on it
+            # threw and was mis-reported as "w32tm /query /status failed".
+            Add-Result $cat 'Time offset' 'WARN' 'No offset line found in w32tm /query /status output — verify time sync manually'
         }
     } catch {
         Add-Result $cat 'Time offset' 'WARN' "w32tm /query /status failed: $_"
@@ -1993,7 +2012,15 @@ function Test-ClusterReadiness {
 
     $distinctVersions = @($nodeOsVersions.Values | Select-Object -Unique)
     if ($distinctVersions.Count -eq 1) {
-        Add-Result $cat 'OS version consistency (all nodes)' 'PASS' "All nodes: $($distinctVersions[0])"
+        # Only claim "all nodes" when every node was actually measured: a node
+        # whose remote CIM query failed is absent from $nodeOsVersions and must
+        # not silently count as consistent.
+        $unmeasuredNodes = @($clusterNodeSet | Where-Object { -not $nodeOsVersions.ContainsKey($_) })
+        if ($unmeasuredNodes.Count -gt 0) {
+            Add-Result $cat 'OS version consistency (all nodes)' 'WARN' "Measured node(s) agree on $($distinctVersions[0]), but $($unmeasuredNodes.Count) node(s) could not be queried: $($unmeasuredNodes -join ', ')"
+        } else {
+            Add-Result $cat 'OS version consistency (all nodes)' 'PASS' "All nodes: $($distinctVersions[0])"
+        }
     } elseif ($distinctVersions.Count -gt 1) {
         $nodeList = ($nodeOsVersions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', '
         Add-Result $cat 'OS version consistency (all nodes)' 'FAIL' "Version mismatch: $nodeList — all nodes must run the same Windows Server build"
@@ -2527,7 +2554,9 @@ function Test-UdpPort {
         $udp.Client.ReceiveTimeout = $TimeoutMs
         $udp.Connect($Target, $Port)
         [void]$udp.Send($Payload, $Payload.Length)
-        $ep  = [System.Net.IPEndPoint]([System.Net.IPAddress]::Any, 0)
+        # ::new(), not a cast: [IPEndPoint](addr, port) casts an object ARRAY to
+        # IPEndPoint, which always throws and made every UDP probe report closed.
+        $ep  = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
         [void]$udp.Receive([ref]$ep)
         $udp.Close()
         return $true

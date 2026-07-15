@@ -57,14 +57,15 @@ call :DetectHypervisor
 call :Log "Hyperviseur detecte (manufacturer): %MANU%"
 call :Log "Modele detecte: %MODEL%"
 
-echo %MANU% | find /i "VMware" >nul
+REM Expansion retardee: un manufacturer contenant & ou () casserait l'echo en %expansion%.
+echo(!MANU!| find /i "VMware" >nul
 if not errorlevel 1 (
     call :Log "Environnement VMware detecte. Aucune action."
     set "SCRIPT_EXIT_CODE=0"
     goto :EndScript
 )
 
-echo %MANU% | find /i "Microsoft" >nul
+echo(!MANU!| find /i "Microsoft" >nul
 if errorlevel 1 (
     call :Log "Hyperviseur inconnu. Aucune action."
     set "SCRIPT_EXIT_CODE=0"

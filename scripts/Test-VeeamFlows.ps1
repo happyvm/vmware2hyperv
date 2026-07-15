@@ -321,12 +321,18 @@ function Test-Flow {
     $status  = "ERROR"
     $latency = "--"
 
+    $tcp = $null
     try {
         $tcp = New-Object System.Net.Sockets.TcpClient
         $sw  = [System.Diagnostics.Stopwatch]::StartNew()
         $ar  = $tcp.BeginConnect($Destination, $Port, $null, $null)
         $ok  = $ar.AsyncWaitHandle.WaitOne(2000, $false)
         $sw.Stop()
+        if ($ok) {
+            # EndConnect completes the async connect and surfaces a refused
+            # connection (RST) that finished within the timeout as an exception.
+            try { $tcp.EndConnect($ar) } catch { Write-Verbose "EndConnect: $($_.Exception.Message)" }
+        }
         if ($ok -and $tcp.Connected) {
             $status  = "PASS"
             $latency = "{0} ms" -f [int]$sw.ElapsedMilliseconds
@@ -335,9 +341,11 @@ function Test-Flow {
             $status = "FAIL"
             $script:FailCount++
         }
-        $tcp.Close()
     } catch {
         $script:FailCount++
+    } finally {
+        # Close in finally: an exception (e.g. DNS failure) previously leaked the socket.
+        if ($tcp) { try { $tcp.Close() } catch { Write-Verbose "TCP close: $($_.Exception.Message)" } }
     }
 
     $color = switch ($status) { "PASS"{"Green"} "FAIL"{"Red"} default{"DarkYellow"} }
@@ -634,7 +642,11 @@ function Invoke-TestCycle {
 
     if ($ExportCSV) {
         try {
-            $script:Results | Export-Csv -Path $ExportCSV -NoTypeInformation -Encoding UTF8
+            # Append from the second cycle onwards: overwriting on every cycle in
+            # continuous mode kept only the last run (rows carry a Timestamp).
+            $exportParameters = @{ Path = $ExportCSV; NoTypeInformation = $true; Encoding = 'UTF8' }
+            if ($CycleNumber -gt 1) { $exportParameters['Append'] = $true }
+            $script:Results | Export-Csv @exportParameters
             Write-FlowOutput ("  Report exported: {0}" -f $ExportCSV) -ForegroundColor Cyan
             Write-FlowOutput ""
         } catch {
