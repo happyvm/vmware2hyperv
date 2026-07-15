@@ -184,3 +184,31 @@ Describe 'Wait-SCJobBatch' {
         $script:PollCount     | Should -BeGreaterOrEqual 2
     }
 }
+
+Describe 'Live migration remediation planning' {
+    It 'detects non-clustered hosts as not ready for Live Migration remediation' {
+        $result = Test-VMHostLiveMigrationReadiness -VMHost ([pscustomobject]@{ Name = 'hv01'; Status = 'OK'; AgentStatus = 'UpToDate' })
+        $result.Ready | Should -BeFalse
+        $result.Issues -join '; ' | Should -Match 'hors cluster'
+    }
+
+    It 'allows hosts from different clusters in the same parallel batch but limits each cluster to two hosts' {
+        $hosts = @(
+            [pscustomobject]@{ Name = 'a1'; ClusterName = 'A'; TotalMemory = 100 }
+            [pscustomobject]@{ Name = 'a2'; ClusterName = 'A'; TotalMemory = 100 }
+            [pscustomobject]@{ Name = 'a3'; ClusterName = 'A'; TotalMemory = 100 }
+            [pscustomobject]@{ Name = 'b1'; ClusterName = 'B'; TotalMemory = 100 }
+            [pscustomobject]@{ Name = 'b2'; ClusterName = 'B'; TotalMemory = 100 }
+        )
+
+        $batches = @(New-ClusterRemediationBatch -CandidateHosts $hosts -MaxParallelHostsPerCluster 2 -MinimumClusterAvailableResourcePercent 50)
+        @($batches[0] | Where-Object { $_.ClusterName -eq 'A' }) | Should -HaveCount 1
+        @($batches[0] | Where-Object { $_.ClusterName -eq 'B' }) | Should -HaveCount 1
+        @($batches | ForEach-Object { $_ } | ForEach-Object { $_.Name }) | Should -Contain 'a3'
+    }
+
+    It 'formats a Centreon-compatible summary with perfdata' {
+        Write-CentreonSummary -TargetedCount 3 -RemediatedCount 2 -FailureCount 1 |
+            Should -BeExactly 'CRITICAL - Hyper-V/SCVMM patching: targeted=3 remediated=2 failed=1 | targeted=3 remediated=2 failed=1'
+    }
+}
