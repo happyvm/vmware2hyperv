@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 #Requires -Modules VirtualMachineManager
 
@@ -16,6 +16,44 @@ Par défaut, la sélection existante est remplacée par une sélection minimale 
 
 Utiliser -AddOnly pour conserver les autres produits/classifications/langues déjà configurés.
 Utiliser d'abord -WhatIf pour vérifier la cible et la sélection.
+
+.PARAMETER VMMServer
+    Nom FQDN ou NetBIOS du serveur SCVMM qui référence le serveur WSUS.
+
+.PARAMETER WSUSServer
+    Nom du serveur WSUS à configurer lorsqu'un seul serveur ne peut pas être déduit automatiquement.
+
+.PARAMETER SCVMMVersion
+    Version de SCVMM dont les produits doivent être inclus : None, 2022, 2025 ou Both.
+
+.PARAMETER Languages
+    Codes de langue WSUS à conserver pour la synchronisation.
+
+.PARAMETER ExcludeDefender
+    N'ajoute pas Microsoft Defender Antivirus ni la classification Definition Updates.
+
+.PARAMETER AddOnly
+    Ajoute la sélection recommandée aux paramètres existants au lieu de les remplacer exactement.
+
+.PARAMETER NoSynchronization
+    Applique la configuration sans lancer de synchronisation WSUS depuis SCVMM.
+
+.PARAMETER ForceFullCatalogImport
+    Lance la synchronisation avec import complet du catalogue après application de la configuration.
+
+.EXAMPLE
+    .\Configure-SCVMMWSUS.ps1 `
+        -VMMServer 'scvmm01.contoso.local' `
+        -WSUSServer 'wsus01.contoso.local' `
+        -SCVMMVersion Both `
+        -WhatIf
+
+.EXAMPLE
+    .\Configure-SCVMMWSUS.ps1 `
+        -VMMServer 'scvmm01.contoso.local' `
+        -SCVMMVersion 2025 `
+        -AddOnly `
+        -ForceFullCatalogImport
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
@@ -137,7 +175,7 @@ else {
 }
 
 if ($updateServers.Count -eq 0) {
-    throw 'Aucun serveur WSUS intégré à SCVMM n’a été trouvé.'
+    throw "Aucun serveur WSUS intégré à SCVMM n'a été trouvé."
 }
 
 if ($updateServers.Count -gt 1) {
@@ -217,7 +255,8 @@ if ($AddOnly) {
 Write-Host ''
 Write-Host "Serveur VMM  : $VMMServer"
 Write-Host "Serveur WSUS : $($updateServer.ComputerName)"
-Write-Host "Mode         : $(if ($AddOnly) { 'Ajout/conservation' } else { 'Remplacement exact' })"
+$configurationMode = if ($AddOnly) { 'Ajout/conservation' } else { 'Remplacement exact' }
+Write-Host "Mode         : $configurationMode"
 Write-Host ''
 Write-Host 'Produits sélectionnés :'
 $products | ForEach-Object { Write-Host "  - $_" }
@@ -253,7 +292,8 @@ if ($PSCmdlet.ShouldProcess($target, $action)) {
         }
 
         Start-SCUpdateServerSynchronization @syncParameters | Out-Null
-        Write-Host "Synchronisation lancée$(if ($ForceFullCatalogImport) { ' avec import complet du catalogue' } else { '' })."
+        $catalogImportMode = if ($ForceFullCatalogImport) { ' avec import complet du catalogue' } else { '' }
+        Write-Host "Synchronisation lancée$catalogImportMode."
     }
     else {
         Write-Host 'Synchronisation non lancée (-NoSynchronization).'

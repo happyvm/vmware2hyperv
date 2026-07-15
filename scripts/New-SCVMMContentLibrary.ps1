@@ -1,34 +1,73 @@
-﻿#requires -Version 5.1
-#requires -RunAsAdministrator
-
+﻿#Requires -Version 5.1
+#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Cree un nouveau partage de bibliotheque SCVMM et recopie les permissions
-    NTFS et SMB d'une bibliotheque source.
+    Crée un nouveau partage de bibliothèque SCVMM et recopie les permissions
+    NTFS et SMB d'une bibliothèque source.
 
 .DESCRIPTION
     Le script :
       1. lit le partage SMB source et ses permissions ;
-      2. cree le dossier racine de destination ;
+      2. crée le dossier racine de destination ;
       3. copie la DACL NTFS de la racine source ;
-      4. cree les sous-dossiers ISO et Template ;
-      5. cree le partage SMB de destination ;
+      4. crée les sous-dossiers ISO et Template ;
+      5. crée le partage SMB de destination ;
       6. remplace ses permissions SMB par celles du partage source ;
-      7. ajoute le partage a la bibliotheque SCVMM ;
-      8. force un refresh de la bibliotheque.
+      7. ajoute le partage à la bibliothèque SCVMM ;
+      8. force un refresh de la bibliothèque.
 
-    Le script est idempotent : il peut etre relance. Si le partage SMB existe
-    deja, son chemin doit correspondre a DestinationLocalPath.
+    Le script est idempotent : il peut être relancé. Si le partage SMB existe
+    déjà, son chemin doit correspondre à DestinationLocalPath.
+
+.PARAMETER VMMServer
+    Nom FQDN ou NetBIOS du serveur SCVMM à utiliser pour l'enregistrement de la bibliothèque.
+
+.PARAMETER SourceLibraryShare
+    Chemin UNC de la bibliothèque source dont les permissions NTFS/SMB servent de référence.
+
+.PARAMETER DestinationLibraryServer
+    Nom FQDN ou NetBIOS du serveur de fichiers qui héberge la nouvelle bibliothèque.
+
+.PARAMETER DestinationLocalPath
+    Chemin local du dossier racine à créer ou valider sur le serveur de destination.
+
+.PARAMETER DestinationShareName
+    Nom du partage SMB à créer ou valider pour la bibliothèque de destination.
+
+.PARAMETER ChildFolders
+    Sous-dossiers à garantir sous la racine de destination après application de la DACL.
+
+.PARAMETER Description
+    Description appliquée au partage SMB et au partage de bibliothèque SCVMM.
+
+.PARAMETER CopyNtfsPermissions
+    Copie la DACL NTFS de la racine source vers la racine de destination lorsque la valeur est $true.
+
+.PARAMETER CopySmbPermissions
+    Remplace les permissions SMB de destination par celles du partage source lorsque la valeur est $true.
+
+.PARAMETER AddLibraryServerIfMissing
+    Ajoute le serveur de destination comme Library Server SCVMM s'il n'est pas encore déclaré.
+
+.PARAMETER SkipVMMRegistration
+    Prépare uniquement le dossier et le partage SMB, sans enregistrer le partage dans SCVMM.
+
+.PARAMETER ComputerCredential
+    Identifiants utilisés pour les connexions CIM/PowerShell Remoting vers les serveurs de fichiers.
+
+.PARAMETER LibraryServerCredential
+    Identifiants administrateur requis par SCVMM pour ajouter le serveur de bibliothèque si nécessaire.
 
 .NOTES
-    - A executer depuis un serveur disposant de la console/cmdlets SCVMM.
+    - À exécuter depuis un serveur disposant de la console/cmdlets SCVMM,
+      sauf lorsque -SkipVMMRegistration est utilisé.
     - Le compte courant doit administrer les serveurs de fichiers source et
       destination, sauf si ComputerCredential est fourni.
-    - La copie NTFS porte sur la DACL (droits et heritage), pas sur le
-      proprietaire ni sur la SACL d'audit.
+    - La copie NTFS porte sur la DACL (droits et héritage), pas sur le
+      propriétaire ni sur la SACL d'audit.
     - Cette version cible un serveur de fichiers Windows autonome. Pour une
-      bibliotheque hautement disponible/SOFS, la creation du partage doit etre
-      adaptee au ScopeName/role de cluster.
+      bibliothèque hautement disponible/SOFS, la création du partage doit être
+      adaptée au ScopeName/role de cluster.
 
 .EXAMPLE
     .\New-SCVMMContentLibrary.ps1 `
@@ -50,25 +89,25 @@
         -ComputerCredential $cred
 #>
 
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]$VMMServer,
 
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $true)]
     [ValidatePattern('^\\\\[^\\]+\\[^\\]+$')]
     [string]$SourceLibraryShare,
 
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]$DestinationLibraryServer,
 
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[A-Za-z]:\\')]
     [string]$DestinationLocalPath,
 
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[^\\/:*?"<>|]+$')]
     [string]$DestinationShareName,
 
@@ -76,7 +115,7 @@ param(
     [string[]]$ChildFolders = @('ISO', 'Template'),
 
     [ValidateNotNullOrEmpty()]
-    [string]$Description = 'Bibliotheque de contenu SCVMM',
+    [string]$Description = 'Bibliothèque de contenu SCVMM',
 
     [bool]$CopyNtfsPermissions = $true,
 
@@ -95,18 +134,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Write-Step {
-    param([Parameter(Mandatory)][string]$Message)
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Message)
     Write-Host "==> $Message" -ForegroundColor Cyan
 }
 
 function Split-UncSharePath {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory = $true)]
         [string]$Path
     )
 
     if ($Path -notmatch '^\\\\(?<Server>[^\\]+)\\(?<Share>[^\\]+)$') {
-        throw "Le chemin '$Path' doit designer la racine d'un partage UNC, par exemple \\serveur\partage."
+        throw "Le chemin '$Path' doit désigner la racine d'un partage UNC, par exemple \\serveur\partage."
     }
 
     [pscustomobject]@{
@@ -116,8 +157,9 @@ function Split-UncSharePath {
 }
 
 function New-ManagedCimSession {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory = $true)]
         [string]$ComputerName,
 
         [PSCredential]$Credential
@@ -136,11 +178,12 @@ function New-ManagedCimSession {
 }
 
 function Invoke-ManagedCommand {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory = $true)]
         [string]$ComputerName,
 
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory = $true)]
         [scriptblock]$ScriptBlock,
 
         [object[]]$ArgumentList = @(),
@@ -163,17 +206,18 @@ function Invoke-ManagedCommand {
 }
 
 function Sync-SmbShareAccess {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory = $true)]
         [Microsoft.Management.Infrastructure.CimSession]$SourceCimSession,
 
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory = $true)]
         [string]$SourceShareName,
 
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory = $true)]
         [Microsoft.Management.Infrastructure.CimSession]$DestinationCimSession,
 
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory = $true)]
         [string]$DestinationShareName
     )
 
@@ -244,7 +288,14 @@ $source = Split-UncSharePath -Path $SourceLibraryShare
 $destinationUnc = "\\{0}\{1}" -f $DestinationLibraryServer, $DestinationShareName
 
 if ($SourceLibraryShare.TrimEnd('\') -ieq $destinationUnc.TrimEnd('\')) {
-    throw 'La bibliotheque source et la bibliotheque de destination ne peuvent pas etre identiques.'
+    throw 'La bibliothèque source et la bibliothèque de destination ne peuvent pas être identiques.'
+}
+
+$target = "bibliothèque SCVMM '$destinationUnc' sur '$DestinationLibraryServer'"
+$action = 'Créer/valider le partage SMB, synchroniser les permissions et enregistrer dans SCVMM'
+
+if (-not $PSCmdlet.ShouldProcess($target, $action)) {
+    return
 }
 
 $sourceCim = $null
@@ -289,7 +340,7 @@ try {
             }
     }
 
-    Write-Step "Creation et preparation du dossier $DestinationLocalPath"
+    Write-Step "Création et préparation du dossier $DestinationLocalPath"
 
     Invoke-ManagedCommand `
         -ComputerName $DestinationLibraryServer `
@@ -318,7 +369,7 @@ try {
                 $destinationAcl = Get-Acl -LiteralPath $DestinationPath -ErrorAction Stop
                 $sections = [System.Security.AccessControl.AccessControlSections]::Access
 
-                # Remplace uniquement la DACL. Le proprietaire et la SACL restent
+                # Remplace uniquement la DACL. Le propriétaire et la SACL restent
                 # ceux du dossier de destination.
                 $destinationAcl.SetSecurityDescriptorSddlForm($SourceSddl, $sections)
                 Set-Acl `
@@ -327,8 +378,8 @@ try {
                     -ErrorAction Stop
             }
 
-            # Creation apres application de la DACL pour que les dossiers
-            # heritent des droits de la racine.
+            # Création après application de la DACL pour que les dossiers
+            # héritent des droits de la racine.
             foreach ($folder in $Folders) {
                 $childPath = Join-Path -Path $DestinationPath -ChildPath $folder
                 if (-not (Test-Path -LiteralPath $childPath -PathType Container)) {
@@ -337,7 +388,7 @@ try {
             }
         } | Out-Null
 
-    Write-Step "Creation ou validation du partage SMB $destinationUnc"
+    Write-Step "Création ou validation du partage SMB $destinationUnc"
 
     $destinationShare = Get-SmbShare `
         -CimSession $destinationCim `
@@ -346,10 +397,10 @@ try {
 
     if ($destinationShare) {
         if ($destinationShare.Path.TrimEnd('\') -ine $DestinationLocalPath.TrimEnd('\')) {
-            throw "Le partage '$DestinationShareName' existe deja mais pointe vers '$($destinationShare.Path)' au lieu de '$DestinationLocalPath'."
+            throw "Le partage '$DestinationShareName' existe déjà mais pointe vers '$($destinationShare.Path)' au lieu de '$DestinationLocalPath'."
         }
 
-        Write-Verbose "Le partage SMB '$DestinationShareName' existe deja."
+        Write-Verbose "Le partage SMB '$DestinationShareName' existe déjà."
     }
     else {
         $bootstrapAccount = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -380,11 +431,11 @@ try {
     }
 
     if (-not $SkipVMMRegistration) {
-        Write-Step "Connexion a SCVMM $VMMServer"
+        Write-Step "Connexion à SCVMM $VMMServer"
         Import-Module VirtualMachineManager -ErrorAction Stop
         $vmmConnection = Get-SCVMMServer -ComputerName $VMMServer -ErrorAction Stop
 
-        Write-Step "Verification du serveur de bibliotheque $DestinationLibraryServer"
+        Write-Step "Vérification du serveur de bibliothèque $DestinationLibraryServer"
         $libraryServer = Get-SCLibraryServer `
             -VMMServer $vmmConnection `
             -ComputerName $DestinationLibraryServer `
@@ -393,14 +444,13 @@ try {
         if (-not $libraryServer) {
             if (-not $AddLibraryServerIfMissing) {
                 throw @"
-Le serveur '$DestinationLibraryServer' n'est pas declare comme Library Server dans SCVMM.
+Le serveur '$DestinationLibraryServer' n'est pas déclaré comme Library Server dans SCVMM.
 Relancez avec -AddLibraryServerIfMissing, ou ajoutez-le d'abord dans la console SCVMM.
 "@
             }
 
             if (-not $LibraryServerCredential) {
-                $LibraryServerCredential = Get-Credential `
-                    -Message "Compte administrateur du serveur de bibliotheque $DestinationLibraryServer"
+                throw "Le serveur '$DestinationLibraryServer' doit être ajouté à SCVMM, mais -LibraryServerCredential n'a pas été fourni. Relancez avec -LibraryServerCredential pour rester compatible avec une exécution non interactive."
             }
 
             Write-Step "Ajout de $DestinationLibraryServer comme Library Server"
@@ -435,7 +485,7 @@ Relancez avec -AddLibraryServerIfMissing, ou ajoutez-le d'abord dans la console 
             Select-Object -First 1
 
         if (-not $libraryShare) {
-            Write-Step "Enregistrement de $destinationUnc dans la bibliotheque SCVMM"
+            Write-Step "Enregistrement de $destinationUnc dans la bibliothèque SCVMM"
 
             $addLibraryShareParameters = @{
                 VMMServer   = $vmmConnection
@@ -451,16 +501,16 @@ Relancez avec -AddLibraryServerIfMissing, ou ajoutez-le d'abord dans la console 
             $libraryShare = Add-SCLibraryShare @addLibraryShareParameters
         }
         else {
-            Write-Verbose "Le partage est deja enregistre dans SCVMM."
+            Write-Verbose "Le partage est déjà enregistré dans SCVMM."
         }
 
-        Write-Step 'Refresh de la bibliotheque SCVMM'
+        Write-Step 'Refresh de la bibliothèque SCVMM'
         Read-SCLibraryShare `
             -LibraryShare $libraryShare `
             -ErrorAction Stop | Out-Null
     }
 
-    Write-Step 'Controle final'
+    Write-Step 'Contrôle final'
 
     $finalShareAccess = Get-SmbShareAccess `
         -CimSession $destinationCim `
@@ -481,7 +531,7 @@ Relancez avec -AddLibraryServerIfMissing, ou ajoutez-le d'abord dans la console 
     }
 
     Write-Host ''
-    Write-Host 'Permissions SMB appliquees :' -ForegroundColor Green
+    Write-Host 'Permissions SMB appliquées :' -ForegroundColor Green
     $finalShareAccess |
         Sort-Object AccountName, AccessControlType |
         Format-Table AccountName, AccessControlType, AccessRight -AutoSize
