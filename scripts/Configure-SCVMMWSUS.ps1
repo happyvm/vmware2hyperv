@@ -4,42 +4,42 @@
 
 <#
 .SYNOPSIS
-Configure les produits, classifications et langues d'un serveur WSUS intégré à SCVMM.
+Configure the products, classifications, and languages of a WSUS server integrated with SCVMM.
 
 .DESCRIPTION
-La modification est effectuée via les cmdlets SCVMM, pas directement via la console/API WSUS.
-Par défaut, la sélection existante est remplacée par une sélection minimale destinée à :
-- Windows Server 2022 / Hyper-V : Microsoft Server operating system-21H2
-- Windows Server 2025 / Hyper-V : Microsoft Server operating system-24H2
-- SCVMM 2022 et/ou 2025, selon -SCVMMVersion
-- Microsoft Defender Antivirus, sauf avec -ExcludeDefender
+The change is applied through SCVMM cmdlets, not directly through the WSUS console/API.
+By default, the existing selection is replaced with a minimal baseline intended for:
+- Windows Server 2022 / Hyper-V: Microsoft Server operating system-21H2
+- Windows Server 2025 / Hyper-V: Microsoft Server operating system-24H2
+- SCVMM 2022 and/or 2025, depending on -SCVMMVersion
+- Microsoft Defender Antivirus, unless -ExcludeDefender is used
 
-Utiliser -AddOnly pour conserver les autres produits/classifications/langues déjà configurés.
-Utiliser d'abord -WhatIf pour vérifier la cible et la sélection.
+Use -AddOnly to keep other already configured products/classifications/languages.
+Use -WhatIf first to review the target and selection.
 
 .PARAMETER VMMServer
-    Nom FQDN ou NetBIOS du serveur SCVMM qui référence le serveur WSUS.
+    FQDN or NetBIOS name of the SCVMM server that references the WSUS server.
 
 .PARAMETER WSUSServer
-    Nom du serveur WSUS à configurer lorsqu'un seul serveur ne peut pas être déduit automatiquement.
+    Name of the WSUS server to configure when a single server cannot be inferred automatically.
 
 .PARAMETER SCVMMVersion
-    Version de SCVMM dont les produits doivent être inclus : None, 2022, 2025 ou Both.
+    SCVMM version whose products must be included: None, 2022, 2025, or Both.
 
 .PARAMETER Languages
-    Codes de langue WSUS à conserver pour la synchronisation.
+    WSUS language codes to keep for synchronization.
 
 .PARAMETER ExcludeDefender
-    N'ajoute pas Microsoft Defender Antivirus ni la classification Definition Updates.
+    Do not add Microsoft Defender Antivirus or the Definition Updates classification.
 
 .PARAMETER AddOnly
-    Ajoute la sélection recommandée aux paramètres existants au lieu de les remplacer exactement.
+    Add the recommended selection to existing settings instead of replacing them exactly.
 
 .PARAMETER NoSynchronization
-    Applique la configuration sans lancer de synchronisation WSUS depuis SCVMM.
+    Apply the configuration without starting WSUS synchronization from SCVMM.
 
 .PARAMETER ForceFullCatalogImport
-    Lance la synchronisation avec import complet du catalogue après application de la configuration.
+    Start synchronization with a full catalog import after applying the configuration.
 
 .EXAMPLE
     .\Configure-SCVMMWSUS.ps1 `
@@ -159,7 +159,7 @@ function Get-SCSettingValue {
 
 Import-Module VirtualMachineManager -ErrorAction Stop
 
-Write-Verbose "Connexion au serveur VMM '$VMMServer'."
+Write-Verbose "Connecting to VMM server '$VMMServer'."
 $vmmConnection = Get-SCVMMServer -ComputerName $VMMServer -SetAsDefault -ErrorAction Stop
 
 if ([string]::IsNullOrWhiteSpace($WSUSServer)) {
@@ -175,12 +175,12 @@ else {
 }
 
 if ($updateServers.Count -eq 0) {
-    throw "Aucun serveur WSUS intégré à SCVMM n'a été trouvé."
+    throw "No WSUS server integrated with SCVMM was found."
 }
 
 if ($updateServers.Count -gt 1) {
     $names = ($updateServers | ForEach-Object { $_.ComputerName }) -join ', '
-    throw "Plusieurs serveurs WSUS sont intégrés à SCVMM ($names). Relancez avec -WSUSServer <FQDN>."
+    throw "Multiple WSUS servers are integrated with SCVMM ($names). Run again with -WSUSServer <FQDN>."
 }
 
 $updateServer = $updateServers[0]
@@ -204,7 +204,7 @@ switch ($SCVMMVersion) {
         )
     }
     'None' {
-        # Aucun produit VMM ajouté : utile si WSUS ne sert qu'aux hôtes Hyper-V.
+        # No VMM product added: useful when WSUS is only used for Hyper-V hosts.
     }
 }
 
@@ -238,12 +238,12 @@ if ($AddOnly) {
         -CandidatePropertyNames @('UpdateLanguages', 'Languages')
 
     foreach ($setting in @(
-        @{ Name = 'produits';        Result = $currentProducts }
+        @{ Name = 'products';        Result = $currentProducts }
         @{ Name = 'classifications'; Result = $currentClassifications }
-        @{ Name = 'langues';         Result = $currentLanguages }
+        @{ Name = 'languages';         Result = $currentLanguages }
     )) {
         if (-not $setting.Result.Found) {
-            throw "Le mode -AddOnly ne peut pas lire les $($setting.Name) actuels dans l’objet SCVMM. Exécutez 'Get-SCUpdateServer | Format-List *' pour identifier les propriétés, ou relancez sans -AddOnly après validation avec -WhatIf."
+            throw "-AddOnly mode cannot read the current $($setting.Name) from the SCVMM object. Run 'Get-SCUpdateServer | Format-List *' to identify the properties, or run again without -AddOnly after validation with -WhatIf."
         }
     }
 
@@ -253,21 +253,21 @@ if ($AddOnly) {
 }
 
 Write-Host ''
-Write-Host "Serveur VMM  : $VMMServer"
-Write-Host "Serveur WSUS : $($updateServer.ComputerName)"
-$configurationMode = if ($AddOnly) { 'Ajout/conservation' } else { 'Remplacement exact' }
+Write-Host "VMM server  : $VMMServer"
+Write-Host "WSUS server : $($updateServer.ComputerName)"
+$configurationMode = if ($AddOnly) { 'Add/preserve' } else { 'Exact replacement' }
 Write-Host "Mode         : $configurationMode"
 Write-Host ''
-Write-Host 'Produits sélectionnés :'
+Write-Host 'Selected products:'
 $products | ForEach-Object { Write-Host "  - $_" }
-Write-Host 'Classifications sélectionnées :'
+Write-Host 'Selected classifications:'
 $classifications | ForEach-Object { Write-Host "  - $_" }
-Write-Host 'Langues sélectionnées :'
+Write-Host 'Selected languages:'
 $languageList | ForEach-Object { Write-Host "  - $_" }
 Write-Host ''
 
-$target = "WSUS '$($updateServer.ComputerName)' intégré à VMM '$VMMServer'"
-$action = 'Configurer produits, classifications et langues de synchronisation'
+$target = "WSUS '$($updateServer.ComputerName)' integrated with VMM '$VMMServer'"
+$action = 'Configure synchronization products, classifications, and languages'
 
 if ($PSCmdlet.ShouldProcess($target, $action)) {
     Set-SCUpdateServer `
@@ -278,7 +278,7 @@ if ($PSCmdlet.ShouldProcess($target, $action)) {
         -UpdateLanguages $languageList `
         -ErrorAction Stop | Out-Null
 
-    Write-Host 'Configuration SCVMM/WSUS appliquée.'
+    Write-Host 'SCVMM/WSUS configuration applied.'
 
     if (-not $NoSynchronization) {
         $syncParameters = @{
@@ -292,10 +292,10 @@ if ($PSCmdlet.ShouldProcess($target, $action)) {
         }
 
         Start-SCUpdateServerSynchronization @syncParameters | Out-Null
-        $catalogImportMode = if ($ForceFullCatalogImport) { ' avec import complet du catalogue' } else { '' }
-        Write-Host "Synchronisation lancée$catalogImportMode."
+        $catalogImportMode = if ($ForceFullCatalogImport) { ' with full catalog import' } else { '' }
+        Write-Host "Synchronization started$catalogImportMode."
     }
     else {
-        Write-Host 'Synchronisation non lancée (-NoSynchronization).'
+        Write-Host 'Synchronization not started (-NoSynchronization).'
     }
 }
