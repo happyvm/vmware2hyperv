@@ -83,8 +83,21 @@ se termine avec le code 1. En mode -ParallelRemediation, les jobs étant déjà 
 échecs individuels n'interrompent jamais les autres hôtes.
 
 .PARAMETER ParallelRemediation
-Autorise la remédiation de plusieurs hôtes en parallèle. Par défaut, le script traite un hôte à la fois
-pour préserver la capacité cluster pendant les Live Migrations.
+Autorise la remédiation de plusieurs hôtes en parallèle. Les hôtes de clusters différents peuvent être
+traités en même temps ; dans un même cluster, les lots respectent -MaxParallelHostsPerCluster et
+-MinimumClusterAvailableResourcePercent. Par défaut, le script traite un hôte à la fois pour préserver
+la capacité cluster pendant les Live Migrations.
+
+.PARAMETER MaxParallelHostsPerCluster
+Nombre maximal d’hôtes remédiés simultanément dans un même cluster lorsque -ParallelRemediation est actif.
+
+.PARAMETER MinimumClusterAvailableResourcePercent
+Pourcentage minimal de ressources du cluster qui doit rester disponible dans un lot parallèle. Le script
+utilise la mémoire hôte si elle est exposée par SCVMM, sinon le nombre de CPU, sinon un poids de 1 par hôte.
+
+.PARAMETER CentreonOutput
+Supprime la sortie de log console courante et émet une ligne finale compatible plugin Centreon/Nagios
+avec perfdata et code retour 0/1.
 
 .EXAMPLE
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Invoke-SCVMMHostPatchBaseline.ps1 `
@@ -166,7 +179,18 @@ param(
     [switch]$ContinueOnHostFailure,
 
     [Parameter()]
-    [switch]$ParallelRemediation
+    [switch]$ParallelRemediation,
+
+    [Parameter()]
+    [ValidateRange(1, 64)]
+    [int]$MaxParallelHostsPerCluster = 2,
+
+    [Parameter()]
+    [ValidateRange(0, 100)]
+    [int]$MinimumClusterAvailableResourcePercent = 50,
+
+    [Parameter()]
+    [switch]$CentreonOutput
 )
 
 Set-StrictMode -Version Latest
@@ -175,6 +199,7 @@ $ErrorActionPreference = 'Stop'
 $script:LogFilePath    = $LogFile
 $script:LogWriteWarned = $false
 $script:FailedHosts    = [ordered]@{}
+$script:CentreonOutputMode = [bool]$CentreonOutput
 
 function Write-PatchLog {
     [CmdletBinding()]
@@ -193,7 +218,9 @@ function Write-PatchLog {
         'ERROR' { 'Red' }
         default { 'Gray' }
     }
-    Write-Host $line -ForegroundColor $color
+    if (-not $script:CentreonOutputMode) {
+        Write-Host $line -ForegroundColor $color
+    }
 
     if ($script:LogFilePath) {
         # Journalisation résiliente : un chemin inaccessible dégrade en sortie
@@ -377,6 +404,159 @@ function Get-VMHostAliasSet {
     }
 
     return , $aliases
+}
+
+
+function Get-VMHostClusterName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$VMHost
+    )
+
+    foreach ($propertyName in @('HostCluster', 'VMHostCluster', 'Cluster', 'ClusterName')) {
+        $property = $VMHost.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+
+        if ($property.Value -is [string]) { return [string]$property.Value }
+        $nameProperty = $property.Value.PSObject.Properties['Name']
+        if ($null -ne $nameProperty -and -not [string]::IsNullOrWhiteSpace([string]$nameProperty.Value)) {
+            return [string]$nameProperty.Value
+        }
+    }
+
+    return '__Standalone__'
+}
+
+function Get-VMHostResourceWeight {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$VMHost
+    )
+
+    foreach ($propertyName in @('TotalMemory', 'Memory', 'PhysicalMemory', 'MemoryCapacity')) {
+        $property = $VMHost.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $null -ne $property.Value) {
+            $value = 0.0
+            if ([double]::TryParse([string]$property.Value, [ref]$value) -and $value -gt 0) { return $value }
+        }
+    }
+
+    foreach ($propertyName in @('CPUCount', 'LogicalProcessorCount', 'ProcessorCount')) {
+        $property = $VMHost.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $null -ne $property.Value) {
+            $value = 0.0
+            if ([double]::TryParse([string]$property.Value, [ref]$value) -and $value -gt 0) { return $value }
+        }
+    }
+
+    return 1.0
+}
+
+function Test-VMHostLiveMigrationReadiness {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$VMHost
+    )
+
+    $hostName = Get-ObjectName -InputObject $VMHost
+    $issues = @()
+
+    $clusterName = Get-VMHostClusterName -VMHost $VMHost
+    if ($clusterName -eq '__Standalone__') {
+        $issues += 'hôte hors cluster SCVMM : remédiation avec Live Migration non garantie'
+    }
+
+    foreach ($propertyName in @('OverallState', 'Status', 'HostState', 'ComputerState')) {
+        $property = $VMHost.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $null -ne $property.Value -and [string]$property.Value -match 'NeedsAttention|NotResponding|Unresponsive|Error|Failed') {
+            $issues += "état hôte défavorable ($propertyName=$($property.Value))"
+        }
+    }
+
+    foreach ($propertyName in @('AgentStatus', 'VMMServiceStatus')) {
+        $property = $VMHost.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $null -ne $property.Value -and [string]$property.Value -notmatch 'UpToDate|Responding|OK|Healthy|Running') {
+            $issues += "agent SCVMM non prêt ($propertyName=$($property.Value))"
+        }
+    }
+
+    foreach ($propertyName in @('MaintenanceHost', 'InMaintenanceMode', 'MaintenanceMode')) {
+        $property = $VMHost.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $property.Value -eq $true) {
+            $issues += 'hôte déjà en maintenance'
+        }
+    }
+
+    return [pscustomobject]@{
+        HostName    = $hostName
+        ClusterName = $clusterName
+        Ready       = ($issues.Count -eq 0)
+        Issues      = $issues
+    }
+}
+
+function New-ClusterRemediationBatch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$CandidateHosts,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 64)]
+        [int]$MaxParallelHostsPerCluster,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 100)]
+        [int]$MinimumClusterAvailableResourcePercent
+    )
+
+    $batches = @()
+    $clusterGroups = $CandidateHosts | Group-Object { Get-VMHostClusterName -VMHost $_ }
+    $remainingByCluster = @{}
+    foreach ($group in $clusterGroups) { $remainingByCluster[$group.Name] = @($group.Group) }
+
+    while (($remainingByCluster.Values | Where-Object { @($_).Count -gt 0 } | Measure-Object).Count -gt 0) {
+        $batch = @()
+        foreach ($clusterName in @($remainingByCluster.Keys)) {
+            $remaining = @($remainingByCluster[$clusterName])
+            if ($remaining.Count -eq 0) { continue }
+
+            $totalWeight = ($CandidateHosts | Where-Object { (Get-VMHostClusterName -VMHost $_) -eq $clusterName } | ForEach-Object { Get-VMHostResourceWeight -VMHost $_ } | Measure-Object -Sum).Sum
+            if (-not $totalWeight -or $totalWeight -le 0) { $totalWeight = [double]$remaining.Count }
+
+            $selected = @()
+            foreach ($hostItem in $remaining) {
+                if ($selected.Count -ge $MaxParallelHostsPerCluster) { break }
+                $selectedWeight = ($selected + @($hostItem) | ForEach-Object { Get-VMHostResourceWeight -VMHost $_ } | Measure-Object -Sum).Sum
+                $availablePercent = (($totalWeight - $selectedWeight) / $totalWeight) * 100
+                if ($availablePercent -ge $MinimumClusterAvailableResourcePercent) { $selected += $hostItem }
+            }
+
+            if ($selected.Count -eq 0) { $selected = @($remaining | Select-Object -First 1) }
+            $batch += $selected
+            $remainingByCluster[$clusterName] = @($remaining | Where-Object { $current = $_; -not @($selected | Where-Object { [object]::ReferenceEquals($_, $current) }) })
+        }
+        if ($batch.Count -eq 0) { break }
+        $batches += , @($batch)
+    }
+
+    return , $batches
+}
+
+function Write-CentreonSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][int]$TargetedCount,
+        [Parameter(Mandatory = $true)][int]$RemediatedCount,
+        [Parameter(Mandatory = $true)][int]$FailureCount
+    )
+
+    $state = if ($FailureCount -gt 0) { 'CRITICAL' } else { 'OK' }
+    $message = "$state - Hyper-V/SCVMM patching: targeted=$TargetedCount remediated=$RemediatedCount failed=$FailureCount | targeted=$TargetedCount remediated=$RemediatedCount failed=$FailureCount"
+    Write-Output $message
 }
 
 function Get-VMHostComplianceState {
@@ -617,60 +797,56 @@ if ($SkipRemediation) {
     Write-PatchLog 'Remédiation ignorée (-SkipRemediation).'
 }
 else {
-    $remediationJobs = @()
+    $candidateHosts = @()
     foreach ($hostItem in $hosts) {
         $hostName = Get-ObjectName -InputObject $hostItem
-
         if ($script:FailedHosts.Contains($hostName)) {
             Write-PatchLog "Remédiation ignorée pour $hostName (échec en amont)." -Level WARN
             continue
         }
 
-        if ($PSCmdlet.ShouldProcess("Hôte Hyper-V '$hostName'", 'Appliquer les correctifs via maintenance SCVMM et Live Migration')) {
-            Write-PatchLog "Remédiation : $hostName."
-            try {
-                $job = Start-SCUpdateRemediation `
-                    -VMHost $hostItem `
-                    -Baseline $baseline `
-                    -RunAsynchronously `
-                    -ErrorAction Stop
-            } catch {
-                Add-HostFailure -HostName $hostName -Reason "Échec du lancement de la remédiation : $($_.Exception.Message)"
-                # En parallèle, les jobs déjà lancés continuent côté SCVMM :
-                # abandonner ici les laisserait tourner sans surveillance.
-                if (-not $ContinueOnHostFailure -and -not $ParallelRemediation) {
-                    Write-PatchLog 'Arrêt du cycle (utilisez -ContinueOnHostFailure pour poursuivre malgré un hôte en échec).' -Level ERROR
-                    throw
-                }
-                continue
-            }
+        $readiness = Test-VMHostLiveMigrationReadiness -VMHost $hostItem
+        if (-not $readiness.Ready) {
+            Add-HostFailure -HostName $hostName -Reason "Pré-contrôle Live Migration en échec : $($readiness.Issues -join '; ')"
+            continue
+        }
 
-            if ($ParallelRemediation) {
-                $remediationJobs += [pscustomobject]@{ Name = $hostName; Job = $job; VMHost = $hostItem }
-            }
-            else {
+        $candidateHosts += $hostItem
+    }
+
+    $remediationBatches = if ($ParallelRemediation) {
+        @(New-ClusterRemediationBatch -CandidateHosts $candidateHosts -MaxParallelHostsPerCluster $MaxParallelHostsPerCluster -MinimumClusterAvailableResourcePercent $MinimumClusterAvailableResourcePercent)
+    } else {
+        @($candidateHosts | ForEach-Object { , @($_) })
+    }
+
+    foreach ($batch in $remediationBatches) {
+        $remediationJobs = @()
+        foreach ($hostItem in @($batch)) {
+            $hostName = Get-ObjectName -InputObject $hostItem
+            if ($PSCmdlet.ShouldProcess("Hôte Hyper-V '$hostName'", 'Appliquer les correctifs via maintenance SCVMM et Live Migration')) {
+                Write-PatchLog "Remédiation : $hostName."
                 try {
-                    Wait-SCJobCompletion -Job $job -TimeoutMinutes $RemediationTimeoutMinutes -Activity "Remédiation $hostName" -IntervalSeconds $PollIntervalSeconds | Out-Null
-                    Write-PatchLog "Remédiation terminée : $hostName."
-                    $remediatedHostItems += $hostItem
+                    $job = Start-SCUpdateRemediation `
+                        -VMHost $hostItem `
+                        -Baseline $baseline `
+                        -RunAsynchronously `
+                        -ErrorAction Stop
+                    $remediationJobs += [pscustomobject]@{ Name = $hostName; Job = $job; VMHost = $hostItem }
                 } catch {
-                    Add-HostFailure -HostName $hostName -Reason "Remédiation en échec : $($_.Exception.Message)"
-                    if (-not $ContinueOnHostFailure) {
-                        Write-PatchLog 'Arrêt du cycle (utilisez -ContinueOnHostFailure pour poursuivre malgré un hôte en échec).' -Level ERROR
-                        throw
-                    }
+                    Add-HostFailure -HostName $hostName -Reason "Échec du lancement de la remédiation : $($_.Exception.Message)"
+                    if (-not $ContinueOnHostFailure -and -not $ParallelRemediation) { throw }
                 }
             }
         }
-    }
 
-    if ($remediationJobs.Count -gt 0) {
         foreach ($remediationResult in Wait-SCJobBatch -Entries $remediationJobs -TimeoutMinutes $RemediationTimeoutMinutes -Activity 'Remédiation' -IntervalSeconds $PollIntervalSeconds) {
             if ($remediationResult.Succeeded) {
                 Write-PatchLog "Remédiation terminée : $($remediationResult.Name)."
                 $remediatedHostItems += @($remediationJobs | Where-Object { $_.Name -eq $remediationResult.Name } | ForEach-Object { $_.VMHost })
             } else {
                 Add-HostFailure -HostName $remediationResult.Name -Reason "Remédiation en échec : $($remediationResult.Detail)"
+                if (-not $ContinueOnHostFailure -and -not $ParallelRemediation) { throw "Remédiation en échec : $($remediationResult.Name)" }
             }
         }
     }
@@ -714,6 +890,10 @@ else {
 # ── Bilan et code de sortie ───────────────────────────────────────────────────
 $failureCount = $script:FailedHosts.Count
 Write-PatchLog "Cycle patching Hyper-V/SCVMM terminé : $($hosts.Count) hôte(s) ciblé(s), $($remediatedHostItems.Count) remédié(s), $failureCount en échec."
+
+if ($CentreonOutput) {
+    Write-CentreonSummary -TargetedCount $hosts.Count -RemediatedCount $remediatedHostItems.Count -FailureCount $failureCount
+}
 
 if ($failureCount -gt 0) {
     foreach ($failure in $script:FailedHosts.GetEnumerator()) {
