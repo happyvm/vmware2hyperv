@@ -337,6 +337,59 @@ Describe 'New-ClusterRemediationBatch' {
     }
 }
 
+Describe 'ConvertTo-MemoryMegabytes' {
+    It 'converts byte values (VMM TotalMemory) to megabytes' {
+        # 128 GB in bytes -> 131072 MB
+        ConvertTo-MemoryMegabytes -Value 137438953472 | Should -Be 131072
+    }
+    It 'passes through megabyte values (VMM AvailableMemory)' {
+        ConvertTo-MemoryMegabytes -Value 65536 | Should -Be 65536
+    }
+    It 'keeps zero as zero (fully loaded host)' {
+        ConvertTo-MemoryMegabytes -Value 0 | Should -Be 0
+    }
+    It 'returns -1 for null or unparseable values' {
+        ConvertTo-MemoryMegabytes -Value $null    | Should -Be -1
+        ConvertTo-MemoryMegabytes -Value 'oops'   | Should -Be -1
+        ConvertTo-MemoryMegabytes -Value -5       | Should -Be -1
+    }
+}
+
+Describe 'Get-ClusterLiveCapacityPercent' {
+    It 'computes the live available-memory percentage across active nodes' {
+        # Two 128 GB nodes (bytes) with 96 GB and 32 GB available (MB) -> 50%.
+        $members = @(
+            [pscustomobject]@{ Name = 'a1'; TotalMemory = 137438953472; AvailableMemory = 98304 }
+            [pscustomobject]@{ Name = 'a2'; TotalMemory = 137438953472; AvailableMemory = 32768 }
+        )
+        Get-ClusterLiveCapacityPercent -ClusterHosts $members | Should -Be 50
+    }
+    It 'excludes the batch hosts and non-contributing nodes from the measure' {
+        $members = @(
+            [pscustomobject]@{ Name = 'a1'; TotalMemory = 137438953472; AvailableMemory = 98304 }
+            [pscustomobject]@{ Name = 'a2'; TotalMemory = 137438953472; AvailableMemory = 0 }
+            [pscustomobject]@{ Name = 'a3'; TotalMemory = 137438953472; AvailableMemory = 131072; MaintenanceHost = $true }
+        )
+        # a2 excluded (in the batch), a3 excluded (maintenance): only a1 counts -> 75%.
+        Get-ClusterLiveCapacityPercent -ClusterHosts $members -ExcludedHostNames @('a2') | Should -Be 75
+    }
+    It 'returns $null when the memory is not readable or no node contributes' {
+        Get-ClusterLiveCapacityPercent -ClusterHosts @([pscustomobject]@{ Name = 'a1'; TotalMemory = $null; AvailableMemory = 100 }) | Should -BeNullOrEmpty
+        Get-ClusterLiveCapacityPercent -ClusterHosts @() | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Test-VMHostInMaintenance' {
+    It 'detects any of the maintenance flags' {
+        Test-VMHostInMaintenance -VMHost ([pscustomobject]@{ Name = 'hv01'; MaintenanceHost = $true })    | Should -BeTrue
+        Test-VMHostInMaintenance -VMHost ([pscustomobject]@{ Name = 'hv01'; InMaintenanceMode = $true })  | Should -BeTrue
+    }
+    It 'reports false for a normal host' {
+        Test-VMHostInMaintenance -VMHost ([pscustomobject]@{ Name = 'hv01'; MaintenanceHost = $false }) | Should -BeFalse
+        Test-VMHostInMaintenance -VMHost ([pscustomobject]@{ Name = 'hv01' })                            | Should -BeFalse
+    }
+}
+
 Describe 'Centreon output' {
     It 'maps failure and warning counts to the plugin state' {
         Get-CentreonState -FailureCount 1 -WarningCount 0 | Should -BeExactly 'CRITICAL'

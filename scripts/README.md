@@ -243,6 +243,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Invoke-SCVMMH
 | `-MaxParallelHostsPerCluster` | No | Maximum simultaneous hosts per cluster in parallel mode (default 2) |
 | `-MinimumClusterAvailableResourcePercent` | No | Minimum share of the whole cluster's capacity (all active members known to VMM) that must stay available during a batch (default 50). When the threshold cannot be met even with one host (single-node cluster), the script proceeds host by host with a warning |
 | `-DismountIso` | No | Automatically eject ISO/host-drive media attached to running VMs before remediating their host — the classic Live Migration blocker. Without it, attached media are only reported as warnings |
+| `-RemediationRetryCount` | No | Extra attempts (default 0, max 5) for hosts whose remediation failed. Live Migration failures are often transient: failed hosts are retried one by one at the end of the cycle, after fresh pre-checks; recovered hosts leave the failure list and join the final compliance re-scan |
 | `-CentreonOutput` | No | Suppress console logs and emit a final Nagios/Centreon plugin line with perfdata; exit codes switch to plugin convention (see below) |
 
 ### Live Migration pre-checks
@@ -253,6 +254,16 @@ unreachable/degraded host, VMM agent not ready, host already in maintenance mode
 Non-blocking findings are logged as warnings: non-clustered host (VMs go to saved state,
 no Live Migration), running non-highly-available VMs, and DVD media attached to running
 VMs (fixable automatically with `-DismountIso`).
+
+Two extra guard rails run during remediation:
+
+- before each batch (sequential mode included), the cluster's **live** available memory
+  (`AvailableMemory`/`TotalMemory` of the remaining active nodes) is measured and a warning
+  is raised when it falls below `-MinimumClusterAvailableResourcePercent` — static batch
+  planning cannot see load changes or hosts left in maintenance by a previous batch;
+- at the end of the cycle, any targeted host still in maintenance mode (failed or timed-out
+  remediation job) is reported explicitly: a host forgotten in maintenance silently removes
+  cluster capacity.
 
 ### Centreon integration
 

@@ -27,6 +27,13 @@ Pré-contrôles Live Migration (sur données hôtes rafraîchies, juste avant la
   disponibles, média ISO/lecteur hôte attaché à une VM en cours d'exécution — le bloqueur
   classique de Live Migration, éjectable automatiquement avec -DismountIso.
 
+Garde-fous supplémentaires pendant la remédiation :
+- avant chaque lot (mode séquentiel compris), la mémoire RÉELLEMENT disponible du cluster
+  (AvailableMemory/TotalMemory des nœuds actifs, hors hôtes du lot) est mesurée : sous le
+  seuil -MinimumClusterAvailableResourcePercent, un avertissement explicite est émis ;
+- en fin de cycle, tout hôte ciblé resté en mode maintenance (job en échec ou timeout) est
+  signalé : un hôte oublié en maintenance ampute silencieusement la capacité du cluster.
+
 Toutes les étapes sont journalisées avec horodatage sur la console et, si -LogFile est fourni,
 dans un fichier — indispensable pour diagnostiquer une exécution planifiée.
 
@@ -110,6 +117,14 @@ le script avance hôte par hôte en le signalant par un avertissement.
 Éjecte automatiquement les médias (ISO/lecteur hôte) attachés aux lecteurs DVD des VM en cours
 d'exécution avant la remédiation de leur hôte — bloqueur classique de Live Migration. Sans ce
 commutateur, les médias attachés sont seulement signalés en avertissement. Sans effet en -WhatIf.
+
+.PARAMETER RemediationRetryCount
+Nombre de tentatives supplémentaires pour les hôtes dont la remédiation a échoué (défaut : 0).
+Les échecs de Live Migration sont souvent transitoires (pic de charge, verrou VM) : les hôtes
+en échec sont relancés UN PAR UN à la fin du cycle, après un nouveau pré-contrôle Live
+Migration sur données rafraîchies. Un hôte récupéré est retiré des échecs et inclus dans le
+re-scan de conformité final. Sans objet quand la première tentative a arrêté le cycle
+(mode séquentiel strict sans -ContinueOnHostFailure).
 
 .PARAMETER CentreonOutput
 Supprime la sortie de log console courante et émet une ligne finale compatible plugin Centreon/Nagios
@@ -209,6 +224,10 @@ param(
 
     [Parameter()]
     [switch]$DismountIso,
+
+    [Parameter()]
+    [ValidateRange(0, 5)]
+    [int]$RemediationRetryCount = 0,
 
     [Parameter()]
     [switch]$CentreonOutput
@@ -546,11 +565,8 @@ function Test-VMHostLiveMigrationReadiness {
         }
     }
 
-    foreach ($propertyName in @('MaintenanceHost', 'InMaintenanceMode', 'MaintenanceMode')) {
-        $property = $VMHost.PSObject.Properties[$propertyName]
-        if ($null -ne $property -and $property.Value -eq $true) {
-            $issues += 'hôte déjà en maintenance'
-        }
+    if (Test-VMHostInMaintenance -VMHost $VMHost) {
+        $issues += 'hôte déjà en maintenance'
     }
 
     # Inspection des VM en cours d'exécution (défensive : une inspection
@@ -619,6 +635,21 @@ function Test-VMHostLiveMigrationReadiness {
     }
 }
 
+function Test-VMHostInMaintenance {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$VMHost
+    )
+
+    foreach ($propertyName in @('MaintenanceHost', 'InMaintenanceMode', 'MaintenanceMode')) {
+        $property = $VMHost.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $property.Value -eq $true) { return $true }
+    }
+
+    return $false
+}
+
 function Test-VMHostContributesCapacity {
     [CmdletBinding()]
     param(
@@ -634,12 +665,86 @@ function Test-VMHostContributesCapacity {
         return $false
     }
 
-    foreach ($propertyName in @('MaintenanceHost', 'InMaintenanceMode', 'MaintenanceMode')) {
-        $property = $VMHost.PSObject.Properties[$propertyName]
-        if ($null -ne $property -and $property.Value -eq $true) { return $false }
+    return -not (Test-VMHostInMaintenance -VMHost $VMHost)
+}
+
+function ConvertTo-MemoryMegabytes {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
+
+    # VMM expose TotalMemory en octets mais AvailableMemory en mégaoctets.
+    # Heuristique : une valeur > 1e8 est en octets (aucun hôte n'expose plus de
+    # 100 To en Mo, et le moindre hôte dépasse 1e8 octets). Retourne -1 quand la
+    # valeur est illisible, pour que l'appelant dégrade proprement ; 0 reste 0
+    # (un hôte saturé n'a légitimement plus de mémoire disponible).
+    if ($null -eq $Value) { return [double]-1 }
+
+    $numeric = 0.0
+    if (-not [double]::TryParse([string]$Value, [ref]$numeric)) { return [double]-1 }
+    if ($numeric -lt 0) { return [double]-1 }
+
+    if ($numeric -gt 1e8) {
+        return [math]::Round($numeric / 1MB, 0)
+    }
+    return [math]::Round($numeric, 0)
+}
+
+function Get-ClusterLiveCapacityPercent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$ClusterHosts,
+
+        [string[]]$ExcludedHostNames = @()
+    )
+
+    # Pourcentage de mémoire RÉELLEMENT disponible sur les nœuds actifs du
+    # cluster (hors hôtes exclus, typiquement ceux du lot en cours de
+    # lancement). Contrairement à la planification statique par poids, cette
+    # mesure reflète la charge courante. Retourne $null quand la mémoire n'est
+    # pas lisible via VMM.
+    $excluded = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $ExcludedHostNames) {
+        if (-not [string]::IsNullOrWhiteSpace($name)) { [void]$excluded.Add($name) }
     }
 
-    return $true
+    $totalMB = 0.0
+    $availableMB = 0.0
+    $countedHosts = 0
+
+    foreach ($clusterHost in @($ClusterHosts)) {
+        if ($null -eq $clusterHost) { continue }
+
+        $isExcluded = $false
+        foreach ($alias in (Get-VMHostAliasSet -VMHost $clusterHost)) {
+            if ($excluded.Contains($alias)) { $isExcluded = $true; break }
+        }
+        if ($isExcluded) { continue }
+        if (-not (Test-VMHostContributesCapacity -VMHost $clusterHost)) { continue }
+
+        $hostTotalMB = ConvertTo-MemoryMegabytes -Value $(
+            $property = $clusterHost.PSObject.Properties['TotalMemory']
+            if ($null -ne $property) { $property.Value } else { $null }
+        )
+        $hostAvailableMB = ConvertTo-MemoryMegabytes -Value $(
+            $property = $clusterHost.PSObject.Properties['AvailableMemory']
+            if ($null -ne $property) { $property.Value } else { $null }
+        )
+
+        if ($hostTotalMB -le 0 -or $hostAvailableMB -lt 0) { return $null }
+
+        $totalMB += $hostTotalMB
+        $availableMB += $hostAvailableMB
+        $countedHosts++
+    }
+
+    if ($countedHosts -eq 0 -or $totalMB -le 0) { return $null }
+
+    return [math]::Round(($availableMB / $totalMB) * 100, 1)
 }
 
 function New-ClusterRemediationBatch {
@@ -1071,9 +1176,46 @@ else {
         @($candidateHosts | ForEach-Object { , @($_) })
     }
 
+    # Hôtes candidats à une nouvelle tentative (-RemediationRetryCount) : seuls
+    # les échecs de remédiation proprement dits sont rejouables — pas les
+    # échecs de scan ni de pré-contrôle.
+    $retryCandidates = [ordered]@{}
+
+    $batchIndex = 0
+    $batchCount = @($remediationBatches | Where-Object { @($_).Count -gt 0 }).Count
     foreach ($batch in $remediationBatches) {
+        $batchHosts = @($batch)
+        if ($batchHosts.Count -eq 0) { continue }
+        $batchIndex++
+        $batchNames = @($batchHosts | ForEach-Object { Get-ObjectName -InputObject $_ })
+        Write-PatchLog "Lot $batchIndex/$batchCount : $($batchNames -join ', ')."
+
+        # Contrôle de capacité sur données LIVE juste avant le lancement : la
+        # planification statique date du début de la phase — un lot précédent a
+        # pu laisser un hôte en maintenance, ou la charge des VM a évolué. La
+        # mesure utilise AvailableMemory/TotalMemory des nœuds actifs restants.
+        if (-not $WhatIfPreference) {
+            try {
+                $liveHosts = @(Get-SCVMHost -VMMServer $vmmConnection -ErrorAction Stop)
+                $batchClusterNames = @($batchHosts | ForEach-Object { Get-VMHostClusterName -VMHost $_ } | Where-Object { $_ -ne '__Standalone__' } | Select-Object -Unique)
+                foreach ($batchClusterName in $batchClusterNames) {
+                    $clusterMembers = @($liveHosts | Where-Object { (Get-VMHostClusterName -VMHost $_) -eq $batchClusterName })
+                    $livePercent = Get-ClusterLiveCapacityPercent -ClusterHosts $clusterMembers -ExcludedHostNames $batchNames
+                    if ($null -eq $livePercent) {
+                        Write-Verbose "[$batchClusterName] Mémoire cluster illisible via VMM — contrôle live ignoré pour ce lot."
+                    } elseif ($livePercent -lt $MinimumClusterAvailableResourcePercent) {
+                        Write-PatchLog "[$batchClusterName] Mémoire réellement disponible avant le lot : $livePercent% < seuil $MinimumClusterAvailableResourcePercent% — les Live Migrations risquent d'échouer ou de dégrader les VM." -Level WARN
+                    } else {
+                        Write-PatchLog "[$batchClusterName] Mémoire disponible avant le lot : $livePercent%."
+                    }
+                }
+            } catch {
+                Write-Verbose "Contrôle de capacité live impossible : $($_.Exception.Message)"
+            }
+        }
+
         $remediationJobs = @()
-        foreach ($hostItem in @($batch)) {
+        foreach ($hostItem in $batchHosts) {
             $hostName = Get-ObjectName -InputObject $hostItem
             if ($PSCmdlet.ShouldProcess("Hôte Hyper-V '$hostName'", 'Appliquer les correctifs via maintenance SCVMM et Live Migration')) {
                 Write-PatchLog "Remédiation : $hostName."
@@ -1087,6 +1229,7 @@ else {
                 } catch {
                     Add-HostFailure -HostName $hostName -Reason "Échec du lancement de la remédiation : $($_.Exception.Message)"
                     if (-not $ContinueOnHostFailure -and -not $ParallelRemediation) { throw }
+                    $retryCandidates[$hostName] = $hostItem
                 }
             }
         }
@@ -1098,7 +1241,84 @@ else {
             } else {
                 Add-HostFailure -HostName $remediationResult.Name -Reason "Remédiation en échec : $($remediationResult.Detail)"
                 if (-not $ContinueOnHostFailure -and -not $ParallelRemediation) { throw "Remédiation en échec : $($remediationResult.Name)" }
+                $failedEntry = $remediationJobs | Where-Object { $_.Name -eq $remediationResult.Name } | Select-Object -First 1
+                if ($null -ne $failedEntry) { $retryCandidates[$remediationResult.Name] = $failedEntry.VMHost }
             }
+        }
+    }
+
+    # ── Nouvelles tentatives (-RemediationRetryCount) ─────────────────────────
+    # Un par un (jamais en parallèle : un cluster qui vient d'échouer ne doit
+    # pas être re-sollicité en rafale), avec pré-contrôle Live Migration
+    # rejoué sur données rafraîchies. Les hôtes ont déjà été confirmés
+    # (ShouldProcess) lors de la première tentative.
+    if ($RemediationRetryCount -gt 0 -and $retryCandidates.Count -gt 0) {
+        for ($retryAttempt = 1; ($retryAttempt -le $RemediationRetryCount) -and ($retryCandidates.Count -gt 0); $retryAttempt++) {
+            Write-PatchLog "Nouvelle tentative de remédiation $retryAttempt/$RemediationRetryCount pour $($retryCandidates.Count) hôte(s) : $(@($retryCandidates.Keys) -join ', ')."
+            $currentRound = $retryCandidates
+            $retryCandidates = [ordered]@{}
+
+            $retryRefreshedByAlias = @{}
+            try {
+                foreach ($refreshedHost in @(Get-SCVMHost -VMMServer $vmmConnection -ErrorAction Stop)) {
+                    foreach ($alias in (Get-VMHostAliasSet -VMHost $refreshedHost)) {
+                        if (-not $retryRefreshedByAlias.ContainsKey($alias)) { $retryRefreshedByAlias[$alias] = $refreshedHost }
+                    }
+                }
+            } catch {
+                Write-Verbose "Rafraîchissement des hôtes impossible pour la tentative $retryAttempt : $($_.Exception.Message)"
+            }
+
+            foreach ($retryEntry in $currentRound.GetEnumerator()) {
+                $hostName = [string]$retryEntry.Key
+                $hostItem = if ($retryRefreshedByAlias.ContainsKey($hostName)) { $retryRefreshedByAlias[$hostName] } else { $retryEntry.Value }
+
+                $readiness = Test-VMHostLiveMigrationReadiness -VMHost $hostItem -DismountIso:($DismountIso -and -not $WhatIfPreference)
+                foreach ($fixedItem in $readiness.Fixed)      { Write-PatchLog "[$hostName] $fixedItem" }
+                foreach ($warningItem in $readiness.Warnings) { Write-PatchLog "[$hostName] $warningItem" -Level WARN }
+                if (-not $readiness.Ready) {
+                    Write-PatchLog "[$hostName] Nouvelle tentative abandonnée — pré-contrôle bloquant : $($readiness.Issues -join '; ')." -Level WARN
+                    continue
+                }
+
+                Write-PatchLog "Remédiation (tentative $($retryAttempt + 1)) : $hostName."
+                try {
+                    $job = Start-SCUpdateRemediation `
+                        -VMHost $hostItem `
+                        -Baseline $baseline `
+                        -RunAsynchronously `
+                        -ErrorAction Stop
+                    Wait-SCJobCompletion -Job $job -TimeoutMinutes $RemediationTimeoutMinutes -Activity "Remédiation $hostName (tentative $($retryAttempt + 1))" -IntervalSeconds $PollIntervalSeconds | Out-Null
+                    $script:FailedHosts.Remove($hostName)
+                    $remediatedHostItems += $hostItem
+                    Write-PatchLog "Remédiation réussie pour $hostName à la tentative $($retryAttempt + 1)."
+                } catch {
+                    Write-PatchLog "[$hostName] Tentative $($retryAttempt + 1) en échec : $($_.Exception.Message)" -Level WARN
+                    if ($retryAttempt -lt $RemediationRetryCount) { $retryCandidates[$hostName] = $hostItem }
+                }
+            }
+        }
+    }
+
+    # Filet de sécurité : un hôte resté en mode maintenance après le cycle (job
+    # en échec ou timeout) ampute silencieusement la capacité du cluster —
+    # signalé explicitement pour action manuelle.
+    if (-not $WhatIfPreference) {
+        try {
+            $targetedNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($hostItem in $hosts) { [void]$targetedNameSet.Add((Get-ObjectName -InputObject $hostItem)) }
+
+            foreach ($postCycleHost in @(Get-SCVMHost -VMMServer $vmmConnection -ErrorAction Stop)) {
+                $isTargeted = $false
+                foreach ($alias in (Get-VMHostAliasSet -VMHost $postCycleHost)) {
+                    if ($targetedNameSet.Contains($alias)) { $isTargeted = $true; break }
+                }
+                if ($isTargeted -and (Test-VMHostInMaintenance -VMHost $postCycleHost)) {
+                    Write-PatchLog "[$(Get-ObjectName -InputObject $postCycleHost)] Hôte encore en mode MAINTENANCE après le cycle — sortez-le manuellement (console VMM ou Stop-SCVMHostMaintenanceMode) pour restaurer la capacité du cluster." -Level WARN
+                }
+            }
+        } catch {
+            Write-Verbose "Contrôle post-cycle du mode maintenance impossible : $($_.Exception.Message)"
         }
     }
 
