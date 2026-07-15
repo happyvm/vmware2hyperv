@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Shut down VMware VMs and trigger Veeam backups for a migration batch.
 
@@ -109,7 +109,26 @@ function Disconnect-VmNetworkAdapters {
     }
 
     # @(): a single connected adapter is a scalar and .Count on it throws under StrictMode.
-    $connectedAdapters = @($networkAdapters | Where-Object { $_.Connected })
+    # PowerCLI adapter objects differ by version; some expose Connected only on
+    # ExtensionData.Connectable. Guard property access so StrictMode does not
+    # turn a disconnected/older adapter shape into a hard failure.
+    $connectedAdapters = @($networkAdapters | Where-Object {
+        if ($_.PSObject.Properties['Connected']) {
+            return [bool]$_.Connected
+        }
+
+        if (
+            $_.PSObject.Properties['ExtensionData'] -and $_.ExtensionData -and
+            $_.ExtensionData.PSObject.Properties['Connectable'] -and $_.ExtensionData.Connectable -and
+            $_.ExtensionData.Connectable.PSObject.Properties['Connected']
+        ) {
+            return [bool]$_.ExtensionData.Connectable.Connected
+        }
+
+        $availableProperties = @($_.PSObject.Properties.Name | Sort-Object) -join ', '
+        Write-Verbose "PowerCLI debug: adapter for VM '$VmName' has no direct Connected property and no ExtensionData.Connectable.Connected value. Available properties: $availableProperties"
+        return $false
+    })
     if (-not $connectedAdapters) {
         Write-MigrationLog "All NICs are already disconnected on VM $VmName." -Level INFO -LogFile $LogFile
         return

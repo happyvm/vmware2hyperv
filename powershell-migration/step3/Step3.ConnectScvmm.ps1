@@ -293,21 +293,37 @@ function Get-SCVMMVmRuntimeState {
             }
         }
 
+        function Get-ObjectPropertyValue {
+            param($InputObject, [string]$PropertyName, [string]$Context = 'object')
+            if (-not $InputObject) {
+                Write-Verbose "SCVMM debug: $Context is null while reading '$PropertyName'."
+                return $null
+            }
+
+            $property = $InputObject.PSObject.Properties[$PropertyName]
+            if ($property) { return $property.Value }
+
+            $availableProperties = @($InputObject.PSObject.Properties.Name | Sort-Object) -join ', '
+            Write-Verbose "SCVMM debug: property '$PropertyName' is missing on $Context ($($InputObject.GetType().FullName)). Available properties: $availableProperties"
+            return $null
+        }
+
+        $vmHost = Get-ObjectPropertyValue -InputObject $vm -PropertyName 'VMHost' -Context 'VM runtime state'
         $hostNameCandidates = @(
-            [string]$vm.HostName,
-            [string]$vm.VMHostName,
-            [string]$vm.VMHost.ComputerName,
-            [string]$vm.VMHost.Name,
-            [string]$vm.HostComputerName,
-            [string]$vm.Host
-        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            (Get-ObjectPropertyValue -InputObject $vm -PropertyName 'HostName' -Context 'VM runtime state'),
+            (Get-ObjectPropertyValue -InputObject $vm -PropertyName 'VMHostName' -Context 'VM runtime state'),
+            (Get-ObjectPropertyValue -InputObject $vmHost -PropertyName 'ComputerName' -Context 'VM host runtime state'),
+            (Get-ObjectPropertyValue -InputObject $vmHost -PropertyName 'Name' -Context 'VM host runtime state'),
+            (Get-ObjectPropertyValue -InputObject $vm -PropertyName 'HostComputerName' -Context 'VM runtime state'),
+            (Get-ObjectPropertyValue -InputObject $vm -PropertyName 'Host' -Context 'VM runtime state')
+        ) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
         [pscustomobject]@{
-            Name              = [string]$vm.Name
-            IsHighlyAvailable = [bool]$vm.IsHighlyAvailable
+            Name              = [string](Get-ObjectPropertyValue -InputObject $vm -PropertyName 'Name' -Context 'VM runtime state')
+            IsHighlyAvailable = [bool](Get-ObjectPropertyValue -InputObject $vm -PropertyName 'IsHighlyAvailable' -Context 'VM runtime state')
             HostName          = $hostNameCandidates | Select-Object -First 1
-            Status            = [string]$vm.Status
-            StatusString      = [string]$vm.StatusString
+            Status            = [string](Get-ObjectPropertyValue -InputObject $vm -PropertyName 'Status' -Context 'VM runtime state')
+            StatusString      = [string](Get-ObjectPropertyValue -InputObject $vm -PropertyName 'StatusString' -Context 'VM runtime state')
         }
     } -ArgumentList @($Name, $ServerName, [bool]$Refresh)
 }

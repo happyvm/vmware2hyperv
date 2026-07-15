@@ -27,6 +27,22 @@
 
 Set-StrictMode -Version Latest
 
+
+function Get-ScvmmObjectPropertyValue {
+    param($InputObject, [string]$PropertyName, [string]$Context = 'SCVMM object')
+    if (-not $InputObject) {
+        Write-Verbose "SCVMM debug: $Context is null while reading '$PropertyName'."
+        return $null
+    }
+
+    $property = $InputObject.PSObject.Properties[$PropertyName]
+    if ($property) { return $property.Value }
+
+    $availableProperties = @($InputObject.PSObject.Properties.Name | Sort-Object) -join ', '
+    Write-Verbose "SCVMM debug: property '$PropertyName' is missing on $Context ($($InputObject.GetType().FullName)). Available properties: $availableProperties"
+    return $null
+}
+
 # ---------------------------------------------------------------------------
 # Set-VmNetworkConfiguration — configure VM network adapters and Integration Services
 # ---------------------------------------------------------------------------
@@ -296,9 +312,9 @@ function Set-VmNetworkConfiguration {
         for ($adapterIndex = 0; $adapterIndex -lt $networkAdapters.Count; $adapterIndex++) {
             $networkAdapter = $networkAdapters[$adapterIndex]
 
-            $adapterMac = ConvertTo-NormalizedMacAddress -Value ([string]$networkAdapter.MACAddressString)
+            $adapterMac = ConvertTo-NormalizedMacAddress -Value ([string](Get-ScvmmObjectPropertyValue -InputObject $networkAdapter -PropertyName 'MACAddressString' -Context "target adapter #$($adapterIndex + 1)"))
             if (-not $adapterMac) {
-                $adapterMac = ConvertTo-NormalizedMacAddress -Value ([string]$networkAdapter.MACAddress)
+                $adapterMac = ConvertTo-NormalizedMacAddress -Value ([string](Get-ScvmmObjectPropertyValue -InputObject $networkAdapter -PropertyName 'MACAddress' -Context "target adapter #$($adapterIndex + 1)"))
             }
 
             if (-not $adapterMac -or (Test-IsZeroMacAddress -Value $adapterMac)) {
@@ -444,9 +460,9 @@ function Set-VmNetworkConfiguration {
                 PortClassification    = $portClass
             }
 
-            $targetAdapterMac = ConvertTo-NormalizedMacAddress -Value ([string]$networkAdapter.MACAddressString)
+            $targetAdapterMac = ConvertTo-NormalizedMacAddress -Value ([string](Get-ScvmmObjectPropertyValue -InputObject $networkAdapter -PropertyName 'MACAddressString' -Context "target adapter #$($adapterIndex + 1)"))
             if (-not $targetAdapterMac) {
-                $targetAdapterMac = ConvertTo-NormalizedMacAddress -Value ([string]$networkAdapter.MACAddress)
+                $targetAdapterMac = ConvertTo-NormalizedMacAddress -Value ([string](Get-ScvmmObjectPropertyValue -InputObject $networkAdapter -PropertyName 'MACAddress' -Context "target adapter #$($adapterIndex + 1)"))
             }
 
             if ((Test-IsZeroMacAddress -Value $targetAdapterMac) -and $selectedSourceAdapter) {
