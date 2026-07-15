@@ -21,6 +21,8 @@ Le script attend les installateurs Integration Services dans :
 
 ## Prérequis
 
+- Le fichier `install-integration-services.bat` est volontairement livré avec des fins de ligne **Windows CRLF** et un contenu compatible ASCII/UTF-8, afin de rester lisible et exécutable correctement sur Windows Server 2016.
+- Si le script est copié depuis Linux/macOS, conserver ces fins de ligne (`unix2dos install-integration-services.bat` si nécessaire) avant de le lancer sur Windows.
 - Exécuter le script en **Administrateur**.
 - Lancer le script **après** la migration et le premier boot sur Hyper‑V.
 - Préparer les binaires Integration Services dans les chemins ci‑dessus.
