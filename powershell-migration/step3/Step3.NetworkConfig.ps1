@@ -259,24 +259,28 @@ function Set-VmNetworkConfiguration {
 
             if (-not [string]::IsNullOrWhiteSpace($mappingNetworkName) -and -not $networkMappingsBySourceNetworkName.ContainsKey($mappingNetworkName)) {
                 $lookupKey = $mappingNetworkName.Trim().ToLowerInvariant()
-                $matchingByName = if ($inventoryCache.VMNetworksByLookupName.ContainsKey($lookupKey)) {
+                # Outer @(): assigning an if/else expression can unwrap a single match to a scalar
+                # PSCustomObject, and .Count on that scalar throws under StrictMode.
+                $matchingByName = @(if ($inventoryCache.VMNetworksByLookupName.ContainsKey($lookupKey)) {
                     @($inventoryCache.VMNetworksByLookupName[$lookupKey])
                 } else {
                     @($allVMNetworks | Where-Object { $_.Name -eq $mappingNetworkName -or $_.Description -eq $mappingNetworkName })
-                }
+                })
                 if (-not $matchingByName) {
                     $matchingByName = @($allVMNetworks | Where-Object { $_.Name -like "*$mappingNetworkName*" -or $_.Description -like "*$mappingNetworkName*" })
                 }
                 if ($matchingByName.Count -gt 0) {
                     $selectedByName = $matchingByName | Select-Object -First 1
-                    $matchingSubnetByName = if ($selectedByName.ID -and $inventoryCache.VMSubnetsByVmNetworkId.ContainsKey([string]$selectedByName.ID)) {
+                    # Keep this as an array even when SCVMM returns exactly one subnet; otherwise
+                    # the ambiguity check's .Count can fail under StrictMode.
+                    $matchingSubnetByName = @(if ($selectedByName.ID -and $inventoryCache.VMSubnetsByVmNetworkId.ContainsKey([string]$selectedByName.ID)) {
                         @($inventoryCache.VMSubnetsByVmNetworkId[[string]$selectedByName.ID])
                     } else {
                         @($allVMSubnets | Where-Object {
                             ($_.VMNetwork -and $_.VMNetwork.ID -eq $selectedByName.ID) -or
                             ($_.VMNetworkName -and $_.VMNetworkName -eq $selectedByName.Name)
                         })
-                    }
+                    })
                     if ($matchingSubnetByName.Count -gt 0) {
                         $networkMappingsBySourceNetworkName[$mappingNetworkName] = [pscustomobject]@{
                             VMNetwork               = $selectedByName
