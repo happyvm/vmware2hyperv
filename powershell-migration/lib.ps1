@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Shared function library for the VMware → Hyper-V migration toolkit.
 
@@ -86,6 +86,74 @@ function Get-MigrationConfigValue {
 
     if ($null -eq $current) { return $Default }
     return $current
+}
+
+
+
+# ---------------------------------------------------------------------------
+# IPv4 validation helpers shared by step4 and step5.
+# ---------------------------------------------------------------------------
+function Test-ValidIPv4Address {
+    param([AllowNull()][object]$Address)
+    $text = if ($null -eq $Address) { '' } else { ([string]$Address).Trim() }
+    if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+    $parsed = [System.Net.IPAddress]::None
+    if (-not [System.Net.IPAddress]::TryParse($text, [ref]$parsed)) { return $false }
+    return $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+}
+
+function Test-ApipaIPv4Address {
+    param([AllowNull()][object]$Address)
+    $text = if ($null -eq $Address) { '' } else { ([string]$Address).Trim() }
+    return (Test-ValidIPv4Address -Address $text) -and $text.StartsWith('169.254.')
+}
+
+function Normalize-IPv4AddressList {
+    param([AllowNull()][object[]]$Addresses)
+    $valid = @()
+    $diagnostic = @()
+    foreach ($address in @($Addresses)) {
+        $text = if ($null -eq $address) { '' } else { ([string]$address).Trim() }
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        if (Test-ValidIPv4Address -Address $text) {
+            $diagnostic += $text
+            if (-not (Test-ApipaIPv4Address -Address $text)) { $valid += $text }
+        }
+    }
+    [pscustomobject]@{
+        RoutableIPv4 = @($valid | Select-Object -Unique)
+        DiagnosticIPv4 = @($diagnostic | Select-Object -Unique)
+    }
+}
+
+function Test-ExpectedIPv4Address {
+    param(
+        [AllowNull()][string]$ExpectedIP,
+        [AllowNull()][object[]]$CurrentIPs,
+        [bool]$RequireExpectedIp = $false,
+        [bool]$ExpectedIpInvalid = $false,
+        [bool]$ExpectedIpValidationSkipped = $false
+    )
+    $current = Normalize-IPv4AddressList -Addresses $CurrentIPs
+    $expected = if ($null -eq $ExpectedIP) { '' } else { $ExpectedIP.Trim() }
+    if ($ExpectedIpValidationSkipped) {
+        return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); ComparableIPs=@($current.RoutableIPv4); IPMatches=$true; IPValidationStatus='ValidationSkipped'; IPValidationDetails='expected IP validation skipped' }
+    }
+    if ([string]::IsNullOrWhiteSpace($expected)) {
+        $details = 'expected IP missing from extract-ip.csv'
+        return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); ComparableIPs=@($current.RoutableIPv4); IPMatches=(-not $RequireExpectedIp); IPValidationStatus=($(if ($RequireExpectedIp) {'MissingExpectedIP'} else {'ValidationSkipped'})); IPValidationDetails=$details }
+    }
+    if ($ExpectedIpInvalid -or -not (Test-ValidIPv4Address -Address $expected)) {
+        return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); ComparableIPs=@($current.RoutableIPv4); IPMatches=$false; IPValidationStatus='InvalidExpectedIP'; IPValidationDetails="invalid expected IPv4 address: $expected" }
+    }
+    if ($current.RoutableIPv4.Count -eq 0) {
+        $detected = if ($current.DiagnosticIPv4.Count) { $current.DiagnosticIPv4 -join ', ' } else { 'none' }
+        return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); ComparableIPs=@($current.RoutableIPv4); IPMatches=$false; IPValidationStatus='NoGuestIPReported'; IPValidationDetails="expected $expected, detected $detected" }
+    }
+    if (@($current.RoutableIPv4) -contains $expected) {
+        return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); ComparableIPs=@($current.RoutableIPv4); IPMatches=$true; IPValidationStatus='Matched'; IPValidationDetails="expected $expected detected" }
+    }
+    return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); ComparableIPs=@($current.RoutableIPv4); IPMatches=$false; IPValidationStatus='Mismatch'; IPValidationDetails="unexpected IP: expected $expected, detected $($current.DiagnosticIPv4 -join ', ')" }
 }
 
 # ---------------------------------------------------------------------------

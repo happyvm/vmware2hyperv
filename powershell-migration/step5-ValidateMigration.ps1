@@ -159,6 +159,9 @@ function Get-HyperVVmInventory {
             # value must be passed through -ArgumentList.
             param($Names, $BackupTag, $VmmServerName)
 
+            function Test-ValidIPv4Address { param([AllowNull()][object]$Address) $text = if ($null -eq $Address) { '' } else { ([string]$Address).Trim() }; if ([string]::IsNullOrWhiteSpace($text)) { return $false }; $parsed = [System.Net.IPAddress]::None; if (-not [System.Net.IPAddress]::TryParse($text, [ref]$parsed)) { return $false }; return $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork }
+            function Normalize-IPv4AddressList { param([AllowNull()][object[]]$Addresses) $diagnostic = @(); foreach ($address in @($Addresses)) { $text = if ($null -eq $address) { '' } else { ([string]$address).Trim() }; if ([string]::IsNullOrWhiteSpace($text)) { continue }; if (Test-ValidIPv4Address -Address $text) { $diagnostic += $text } }; [pscustomobject]@{ DiagnosticIPv4=@($diagnostic | Select-Object -Unique) } }
+
             $server = Get-SCVMMServer -ComputerName $VmmServerName
             $nameLookup = @{}
             foreach ($n in $Names) { $nameLookup[$n.ToLowerInvariant()] = $n }
@@ -199,9 +202,8 @@ function Get-HyperVVmInventory {
                     [string]$_.ConnectionState -match 'Connected|Connecté|OK|On'
                 }).Count -gt 0
 
-                $ips = @($adapters | ForEach-Object { $_.IPv4Addresses } |
-                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-                    Select-Object -Unique)
+                $ipNormalization = Normalize-IPv4AddressList -Addresses @($adapters | ForEach-Object { $_.IPv4Addresses })
+                $ips = @($ipNormalization.DiagnosticIPv4)
 
                 # Property guard: IntegrationServicesState is not exposed by every
                 # SCVMM version, and this scriptblock can run under StrictMode locally.

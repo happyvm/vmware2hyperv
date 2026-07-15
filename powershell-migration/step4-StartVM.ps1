@@ -40,6 +40,10 @@
     Maximum polling iterations. Default: 0 (unlimited — loop until every VM is
     compliant or the script is interrupted).
 
+.PARAMETER RequireExpectedIp
+    Strict expected-IP mode. Missing extract-ip.csv, missing VM entries, or invalid
+    expected IPv4 values are treated as non-compliant configuration errors.
+
 .PARAMETER WinRmRetryDelaySeconds
     Delay between WinRM retries in seconds. Default: 15.
 
@@ -51,6 +55,9 @@
 
 .EXAMPLE
     .\step4-StartVM.ps1 -Tag HypMig-lot-118 -IntegrationMaxIterations 20
+
+.EXAMPLE
+    .\step4-StartVM.ps1 -Tag HypMig-lot-118 -RequireExpectedIp -IntegrationMaxIterations 20
 
 .NOTES
     Part of the vmware2hyperv migration toolkit.
@@ -66,7 +73,8 @@ param (
     [int]$IntegrationPollIntervalSeconds = 30,
     [int]$IntegrationMaxIterations = 0,
     [int]$WinRmRetryDelaySeconds = 15,
-    [int]$WinRmMaxAttempts = 20
+    [int]$WinRmMaxAttempts = 20,
+    [switch]$RequireExpectedIp
 )
 
 Set-StrictMode -Version Latest
@@ -99,35 +107,49 @@ Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindow
 function Get-ExpectedIpMap {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+        [string]$LogFile
     )
 
     $rows = Import-Csv -Path $Path -Delimiter ";"
     $map = @{}
 
     foreach ($row in $rows) {
-        $vmName = Get-FirstPropertyValue -InputObject $row -PropertyNames @(
+        $vmNameRaw = Get-FirstPropertyValue -InputObject $row -PropertyNames @(
             'VMName', 'VmName', 'Name', 'NomVM'
         )
-        $ip = Get-FirstPropertyValue -InputObject $row -PropertyNames @(
+        $ipRaw = Get-FirstPropertyValue -InputObject $row -PropertyNames @(
             'ExpectedIP', 'ExpectedIp', 'IPAttendue', 'TargetIP', 'TargetIp', 'IP', 'IPAddress', 'IpAddress'
         )
 
-        if ([string]::IsNullOrWhiteSpace($vmName) -or [string]::IsNullOrWhiteSpace($ip)) {
+        $vmName = if ($null -eq $vmNameRaw) { '' } else { ([string]$vmNameRaw).Trim() }
+        $ip = if ($null -eq $ipRaw) { '' } else { ([string]$ipRaw).Trim() }
+        if ([string]::IsNullOrWhiteSpace($vmName) -or [string]::IsNullOrWhiteSpace($ip)) { continue }
+
+        $key = $vmName.ToLowerInvariant()
+        if (-not (Test-ValidIPv4Address -Address $ip)) {
+            Write-MigrationLog "Invalid expected IPv4 in CSV '$Path' for VM '$vmName': '$ip'." -Level WARNING -LogFile $LogFile
+            $map[$key] = [pscustomobject]@{ ExpectedIP = $ip; IsValid = $false }
             continue
         }
 
-        $map[$vmName.ToLowerInvariant()] = $ip
+        $map[$key] = [pscustomobject]@{ ExpectedIP = $ip; IsValid = $true }
     }
 
     return $map
 }
 
+$skipExpectedIpValidation = $false
 if (Test-Path -Path $ExtractIpCsvFile) {
-    $expectedIpMap = Get-ExpectedIpMap -Path $ExtractIpCsvFile
+    $expectedIpMap = Get-ExpectedIpMap -Path $ExtractIpCsvFile -LogFile $LogFile
 } else {
+    if ($RequireExpectedIp) {
+        Write-MigrationLog "Extract IP CSV not found ($ExtractIpCsvFile) and -RequireExpectedIp was specified." -Level ERROR -LogFile $LogFile
+        exit 1
+    }
     Write-MigrationLog "Extract IP CSV not found ($ExtractIpCsvFile) — skipping expected-IP validation." -Level WARNING -LogFile $LogFile
     $expectedIpMap = @{}
+    $skipExpectedIpValidation = $true
 }
 
 function Get-SCVMMVmInventory {
@@ -139,6 +161,10 @@ function Get-SCVMMVmInventory {
         [string[]]$VMNames,
 
         [hashtable]$ExpectedIpMap = @{},
+
+        [bool]$RequireExpectedIp = $false,
+
+        [bool]$SkipExpectedIpValidation = $false,
 
         [string]$ExpectedBackupTag,
 
@@ -160,7 +186,7 @@ function Get-SCVMMVmInventory {
 
     return @(
         Invoke-SCVMMCommand -ScriptBlock {
-            param($VmmServerName, $Names, $IpMap, $BackupTag, $ForceRefresh, $InventoryThreshold)
+            param($VmmServerName, $Names, $IpMap, $RequireIp, $SkipIpValidation, $BackupTag, $ForceRefresh, $InventoryThreshold)
 
             # Property-guarded read: not every SCVMM version exposes the same VM
             # properties (VirtualMachineState, GuestAgentStatus...), and in local
@@ -179,6 +205,11 @@ function Get-SCVMMVmInventory {
                 Write-Verbose "SCVMM debug: property '$PropertyName' is missing on $Context ($($Vm.GetType().FullName)). Available properties: $availableProperties"
                 return ''
             }
+
+            function Test-ValidIPv4Address { param([AllowNull()][object]$Address) $text = if ($null -eq $Address) { '' } else { ([string]$Address).Trim() }; if ([string]::IsNullOrWhiteSpace($text)) { return $false }; $parsed = [System.Net.IPAddress]::None; if (-not [System.Net.IPAddress]::TryParse($text, [ref]$parsed)) { return $false }; return $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork }
+            function Test-ApipaIPv4Address { param([AllowNull()][object]$Address) $text = if ($null -eq $Address) { '' } else { ([string]$Address).Trim() }; return (Test-ValidIPv4Address -Address $text) -and $text.StartsWith('169.254.') }
+            function Normalize-IPv4AddressList { param([AllowNull()][object[]]$Addresses) $valid = @(); $diagnostic = @(); foreach ($address in @($Addresses)) { $text = if ($null -eq $address) { '' } else { ([string]$address).Trim() }; if ([string]::IsNullOrWhiteSpace($text)) { continue }; if (Test-ValidIPv4Address -Address $text) { $diagnostic += $text; if (-not (Test-ApipaIPv4Address -Address $text)) { $valid += $text } } }; [pscustomobject]@{ RoutableIPv4=@($valid | Select-Object -Unique); DiagnosticIPv4=@($diagnostic | Select-Object -Unique) } }
+            function Test-ExpectedIPv4Address { param([AllowNull()][string]$ExpectedIP,[AllowNull()][object[]]$CurrentIPs,[bool]$RequireExpectedIp=$false,[bool]$ExpectedIpInvalid=$false,[bool]$ExpectedIpValidationSkipped=$false) $current = Normalize-IPv4AddressList -Addresses $CurrentIPs; $expected = if ($null -eq $ExpectedIP) { '' } else { $ExpectedIP.Trim() }; if ($ExpectedIpValidationSkipped) { return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); IPMatches=$true; IPValidationStatus='ValidationSkipped'; IPValidationDetails='expected IP validation skipped' } }; if ([string]::IsNullOrWhiteSpace($expected)) { $status = if ($RequireExpectedIp) { 'MissingExpectedIP' } else { 'ValidationSkipped' }; return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); IPMatches=(-not $RequireExpectedIp); IPValidationStatus=$status; IPValidationDetails='expected IP missing from extract-ip.csv' } }; if ($ExpectedIpInvalid -or -not (Test-ValidIPv4Address -Address $expected)) { return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); IPMatches=$false; IPValidationStatus='InvalidExpectedIP'; IPValidationDetails="invalid expected IPv4 address: $expected" } }; if ($current.RoutableIPv4.Count -eq 0) { $detected = if ($current.DiagnosticIPv4.Count) { $current.DiagnosticIPv4 -join ', ' } else { 'none' }; return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); IPMatches=$false; IPValidationStatus='NoGuestIPReported'; IPValidationDetails="expected $expected, detected $detected" } }; if (@($current.RoutableIPv4) -contains $expected) { return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); IPMatches=$true; IPValidationStatus='Matched'; IPValidationDetails="expected $expected detected" } }; return [pscustomobject]@{ ExpectedIP=$expected; CurrentIPs=@($current.DiagnosticIPv4); IPMatches=$false; IPValidationStatus='Mismatch'; IPValidationDetails="unexpected IP: expected $expected, detected $($current.DiagnosticIPv4 -join ', ')" } }
 
             function Get-IntegrationStatusSummary {
                 param($Vm)
@@ -266,7 +297,10 @@ function Get-SCVMMVmInventory {
                         IntegrationDetails      = 'VM not found'
                         NetworkConnected        = $false
                         CurrentIPs              = @()
+                        ExpectedIP              = $null
                         IPMatches               = $false
+                        IPValidationStatus      = 'NoGuestIPReported'
+                        IPValidationDetails     = 'VM not found'
                         HighAvailabilityEnabled = $false
                         CurrentTag              = $null
                         BackupTagPresent        = $false
@@ -322,10 +356,13 @@ function Get-SCVMMVmInventory {
                 ) | Select-Object -Unique
 
                 $expectedIp = $null
+                $expectedIpInvalid = $false
                 if ($IpMap -and $IpMap.ContainsKey($name.ToLowerInvariant())) {
-                    $expectedIp = [string]$IpMap[$name.ToLowerInvariant()]
+                    $entry = $IpMap[$name.ToLowerInvariant()]
+                    $expectedIp = [string]$entry.ExpectedIP
+                    $expectedIpInvalid = -not [bool]$entry.IsValid
                 }
-                $ipMatches = if ([string]::IsNullOrWhiteSpace($expectedIp)) { $true } else { $allIps -contains $expectedIp }
+                $ipValidation = Test-ExpectedIPv4Address -ExpectedIP $expectedIp -CurrentIPs $allIps -RequireExpectedIp $RequireIp -ExpectedIpInvalid $expectedIpInvalid -ExpectedIpValidationSkipped $SkipIpValidation
 
                 $highAvailabilityEnabled = [bool]$vm.IsHighlyAvailable
 
@@ -347,14 +384,17 @@ function Get-SCVMMVmInventory {
                     IntegrationReady        = [bool]$integrationStatus.Ready
                     IntegrationDetails      = [string]$integrationStatus.Summary
                     NetworkConnected        = [bool]$networkConnected
-                    CurrentIPs              = @($allIps)
-                    IPMatches               = [bool]$ipMatches
+                    CurrentIPs              = @($ipValidation.CurrentIPs)
+                    ExpectedIP              = [string]$ipValidation.ExpectedIP
+                    IPMatches               = [bool]$ipValidation.IPMatches
+                    IPValidationStatus      = [string]$ipValidation.IPValidationStatus
+                    IPValidationDetails     = [string]$ipValidation.IPValidationDetails
                     HighAvailabilityEnabled = [bool]$highAvailabilityEnabled
                     CurrentTag              = $currentTag
                     BackupTagPresent        = [bool]$backupTagPresent
                 }
             }
-        } -ArgumentList @($ServerName, $names, $ExpectedIpMap, $ExpectedBackupTag, [bool]$ForceRefresh, $BatchInventoryThreshold)
+        } -ArgumentList @($ServerName, $names, $ExpectedIpMap, [bool]$RequireExpectedIp, [bool]$SkipExpectedIpValidation, $ExpectedBackupTag, [bool]$ForceRefresh, $BatchInventoryThreshold)
     )
 }
 
@@ -507,7 +547,7 @@ function Get-ComplianceIssues {
     $issues = @()
     if (-not $VmItem.Started) { $issues += 'not started' }
     if (-not $VmItem.NetworkConnected) { $issues += 'NIC not connected' }
-    if (-not $VmItem.IPMatches) { $issues += 'unexpected IP' }
+    if (-not $VmItem.IPMatches) { $issues += $VmItem.IPValidationDetails }
     if (-not $VmItem.IntegrationReady) { $issues += 'Integration Services not OK' }
     if (-not $VmItem.HighAvailabilityEnabled) { $issues += 'HA not enabled' }
     if (-not $VmItem.BackupTagPresent) { $issues += 'backup tag missing' }
@@ -943,7 +983,7 @@ $localWinRmScriptPath = [string](Get-MigrationConfigValue -Config $Config -Path 
 $remoteWinRmScriptPath = [string](Get-MigrationConfigValue -Config $Config -Path 'RemoteActions.WinRm.RemoveVmwareToolsScriptRemotePath' -Default '')
 $expectedBackupTag = [string](Get-MigrationConfigValue -Config $Config -Path 'Tags.BackupTag' -Default '')
 
-$initialSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames ($targetRows.VMName) -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag -ForceRefresh -BatchInventoryThreshold $inventoryBatchThreshold
+$initialSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames ($targetRows.VMName) -ExpectedIpMap $expectedIpMap -RequireExpectedIp:$RequireExpectedIp -SkipExpectedIpValidation:$skipExpectedIpValidation -ExpectedBackupTag $expectedBackupTag -ForceRefresh -BatchInventoryThreshold $inventoryBatchThreshold
 $initialSnapshotByName = @{}
 foreach ($snapshot in $initialSnapshots) {
     $initialSnapshotByName[[string]$snapshot.VMName] = $snapshot
@@ -974,7 +1014,10 @@ $vmInventory = @(foreach ($row in $targetRows) {
             IntegrationDetails      = 'VM not found'
             NetworkConnected        = $false
             CurrentIPs              = @()
+            ExpectedIP              = $null
             IPMatches               = $false
+            IPValidationStatus      = 'NoGuestIPReported'
+            IPValidationDetails     = 'VM not found'
             HighAvailabilityEnabled = $false
             CurrentTag              = $null
             BackupTagPresent        = $false
@@ -996,7 +1039,11 @@ $vmInventory = @(foreach ($row in $targetRows) {
         IntegrationDetails      = if ($snapshot.Exists) { [string]$snapshot.IntegrationDetails } else { 'VM not found' }
         NetworkConnected        = [bool]$snapshot.NetworkConnected
         CurrentIPs              = @($snapshot.CurrentIPs)
+        ExpectedIP              = $snapshot.ExpectedIP
         IPMatches               = [bool]$snapshot.IPMatches
+        IPValidationStatus      = [string]$snapshot.IPValidationStatus
+        IPValidationDetails     = [string]$snapshot.IPValidationDetails
+        LastForcedIpRefresh     = 0
         HighAvailabilityEnabled = [bool]$snapshot.HighAvailabilityEnabled
         CurrentTag              = $snapshot.CurrentTag
         BackupTagPresent        = [bool]$snapshot.BackupTagPresent
@@ -1081,7 +1128,26 @@ while ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $
     )
 
     if ($namesToRefresh) {
-        $refreshedSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames $namesToRefresh -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag -BatchInventoryThreshold $inventoryBatchThreshold
+        $refreshedSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames $namesToRefresh -ExpectedIpMap $expectedIpMap -RequireExpectedIp:$RequireExpectedIp -SkipExpectedIpValidation:$skipExpectedIpValidation -ExpectedBackupTag $expectedBackupTag -BatchInventoryThreshold $inventoryBatchThreshold
+
+        # SCVMM can keep guest IPs cached. Keep the normal inventory cheap on every
+        # poll, then force-refresh only VMs still non-compliant specifically because
+        # of a resolvable guest-IP state, and only every 5 polling iterations. Static
+        # configuration errors (missing/invalid expected IP) are not force-refreshed.
+        if (($iteration % 5) -eq 0) {
+            $ipNamesToForceRefresh = @(
+                $vmInventory |
+                    Where-Object {
+                        $_.VmFound -and -not $_.DisplayCompleted -and -not $_.IPMatches -and
+                        $_.IPValidationStatus -in @('Mismatch', 'NoGuestIPReported')
+                    } |
+                    Select-Object -ExpandProperty VMName
+            )
+            if ($ipNamesToForceRefresh) {
+                $forcedIpSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames $ipNamesToForceRefresh -ExpectedIpMap $expectedIpMap -RequireExpectedIp:$RequireExpectedIp -SkipExpectedIpValidation:$skipExpectedIpValidation -ExpectedBackupTag $expectedBackupTag -ForceRefresh -BatchInventoryThreshold $inventoryBatchThreshold
+                $refreshedSnapshots = @($refreshedSnapshots) + @($forcedIpSnapshots)
+            }
+        }
         $snapshotByName = @{}
         foreach ($snapshot in $refreshedSnapshots) {
             $snapshotByName[[string]$snapshot.VMName] = $snapshot
@@ -1113,7 +1179,10 @@ while ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $
             $vmItem.IntegrationDetails = [string]$snapshot.IntegrationDetails
             $vmItem.NetworkConnected = [bool]$snapshot.NetworkConnected
             $vmItem.CurrentIPs = @($snapshot.CurrentIPs)
+            $vmItem.ExpectedIP = $snapshot.ExpectedIP
             $vmItem.IPMatches = [bool]$snapshot.IPMatches
+            $vmItem.IPValidationStatus = [string]$snapshot.IPValidationStatus
+            $vmItem.IPValidationDetails = [string]$snapshot.IPValidationDetails
             $vmItem.HighAvailabilityEnabled = [bool]$snapshot.HighAvailabilityEnabled
             $vmItem.CurrentTag = $snapshot.CurrentTag
             $vmItem.BackupTagPresent = [bool]$snapshot.BackupTagPresent
@@ -1172,8 +1241,11 @@ $results = foreach ($vmItem in $vmInventory) {
         VmFound                   = $vmItem.VmFound
         Started                   = $vmItem.Started
         NetworkConnected          = $vmItem.NetworkConnected
+        ExpectedIP                = $vmItem.ExpectedIP
         CurrentIPs                = ($vmItem.CurrentIPs -join ',')
         IPMatches                 = $vmItem.IPMatches
+        IPValidationStatus        = $vmItem.IPValidationStatus
+        IPValidationDetails       = $vmItem.IPValidationDetails
         IntegrationReady          = $vmItem.IntegrationReady
         IntegrationServicesStatus = $vmItem.IntegrationDetails
         HighAvailabilityEnabled   = $vmItem.HighAvailabilityEnabled
