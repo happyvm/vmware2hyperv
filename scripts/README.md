@@ -129,3 +129,101 @@ DNS resolution is tested for all target endpoints regardless of role.
 ### Output
 
 Results are printed to the console with status (`OK`, `FAIL`), port, and measured latency for successful connections. Use `-ExportCSV` to save results for audit purposes.
+
+---
+
+## Configure-SCVMMWSUS.ps1
+
+**Purpose:** Configure the products, classifications, and languages synchronized by a WSUS server integrated with SCVMM.
+
+Use this script from an administrative shell on a server that has the SCVMM PowerShell module installed. By default, it replaces the existing WSUS selection with the recommended Hyper-V / SCVMM baseline; use `-AddOnly` to keep existing selections and add the recommended ones.
+
+### Requirements
+
+- Windows PowerShell 5.1
+- Administrator shell
+- SCVMM PowerShell module (`VirtualMachineManager`)
+- A WSUS server already integrated with SCVMM
+
+### Usage
+
+```powershell
+# Review the intended WSUS selection first
+.\Configure-SCVMMWSUS.ps1 `
+    -VMMServer scvmm01.contoso.local `
+    -WSUSServer wsus01.contoso.local `
+    -SCVMMVersion Both `
+    -WhatIf
+
+# Add the recommended products/classifications/languages without removing existing selections
+.\Configure-SCVMMWSUS.ps1 `
+    -VMMServer scvmm01.contoso.local `
+    -SCVMMVersion 2025 `
+    -AddOnly `
+    -ForceFullCatalogImport
+```
+
+### Key parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `-VMMServer` | Yes | SCVMM server that references the WSUS server |
+| `-WSUSServer` | No* | WSUS server to configure; required when SCVMM has more than one integrated WSUS server |
+| `-SCVMMVersion` | Yes | `None`, `2022`, `2025`, or `Both` |
+| `-Languages` | No | WSUS language codes to synchronize; defaults to `en`, `fr` |
+| `-AddOnly` | No | Preserve existing selections and append the recommended baseline |
+| `-NoSynchronization` | No | Apply settings without starting WSUS synchronization |
+| `-ForceFullCatalogImport` | No | Start synchronization with a full catalog import |
+
+---
+
+## New-SCVMMContentLibrary.ps1
+
+**Purpose:** Create or validate a SCVMM content library SMB share by copying NTFS and SMB permissions from an existing library share, then optionally registering the new share in SCVMM.
+
+Run this script from an administrative shell with access to the source and destination file servers. Use `-WhatIf` before applying changes in production.
+
+### Requirements
+
+- Windows PowerShell 5.1
+- Administrator shell
+- SMB PowerShell cmdlets on the management host
+- PowerShell Remoting / CIM access to source and destination file servers
+- SCVMM PowerShell module (`VirtualMachineManager`) unless `-SkipVMMRegistration` is used
+
+### Usage
+
+```powershell
+# Review the planned library creation and SCVMM registration
+.\New-SCVMMContentLibrary.ps1 `
+    -VMMServer scvmm01.contoso.local `
+    -SourceLibraryShare \\lib01\MSSCVMMLibrary `
+    -DestinationLibraryServer lib02.contoso.local `
+    -DestinationLocalPath D:\SCVMM\ContentLibrary `
+    -DestinationShareName SCVMMContentLibrary `
+    -WhatIf
+
+# Prepare the SMB share only, without registering it in SCVMM
+.\New-SCVMMContentLibrary.ps1 `
+    -VMMServer scvmm01.contoso.local `
+    -SourceLibraryShare \\lib01\MSSCVMMLibrary `
+    -DestinationLibraryServer lib02.contoso.local `
+    -DestinationLocalPath D:\SCVMM\ContentLibrary `
+    -DestinationShareName SCVMMContentLibrary `
+    -SkipVMMRegistration
+```
+
+### Key parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `-VMMServer` | Yes | SCVMM server used for library registration |
+| `-SourceLibraryShare` | Yes | Existing UNC share used as the NTFS/SMB permission source |
+| `-DestinationLibraryServer` | Yes | File server that will host the destination share |
+| `-DestinationLocalPath` | Yes | Local folder path on the destination file server |
+| `-DestinationShareName` | Yes | SMB share name to create or validate |
+| `-ChildFolders` | No | Child folders to ensure under the library root; defaults to `ISO`, `Template` |
+| `-CopyNtfsPermissions` | No | Copy the source root DACL to the destination root; defaults to `$true` |
+| `-CopySmbPermissions` | No | Replace destination SMB permissions with source SMB permissions; defaults to `$true` |
+| `-AddLibraryServerIfMissing` | No | Add the destination file server as a SCVMM Library Server if needed |
+| `-SkipVMMRegistration` | No | Create/validate SMB resources only, without SCVMM registration |
