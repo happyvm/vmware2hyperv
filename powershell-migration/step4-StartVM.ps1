@@ -69,6 +69,8 @@ param (
     [int]$WinRmMaxAttempts = 20
 )
 
+Set-StrictMode -Version Latest
+
 . "$PSScriptRoot\lib.ps1"
 if (-not $ConfigFile) { $ConfigFile = "$PSScriptRoot\config.psd1" }
 Assert-PathPresent -Path $ConfigFile -Label "Configuration file"
@@ -78,8 +80,9 @@ if (-not $CsvFile) { $CsvFile = $Config.Paths.CsvFile }
 Assert-PathPresent -Path $CsvFile -Label "Batch CSV"
 
 if (-not $ExtractIpCsvFile) {
-    if ($Config.Paths.ExtractIpCsv) {
-        $ExtractIpCsvFile = [string]$Config.Paths.ExtractIpCsv
+    $extractIpCsvConfigured = Get-MigrationConfigValue -Config $Config -Path 'Paths.ExtractIpCsv' -Default ''
+    if ($extractIpCsvConfigured) {
+        $ExtractIpCsvFile = [string]$extractIpCsvConfigured
     } else {
         $batchFolder = Split-Path -Path $CsvFile -Parent
         $ExtractIpCsvFile = Join-Path -Path $batchFolder -ChildPath "extract-ip.csv"
@@ -159,18 +162,28 @@ function Get-SCVMMVmInventory {
         Invoke-SCVMMCommand -ScriptBlock {
             param($VmmServerName, $Names, $IpMap, $BackupTag, $ForceRefresh, $InventoryThreshold)
 
+            # Property-guarded read: not every SCVMM version exposes the same VM
+            # properties (VirtualMachineState, GuestAgentStatus...), and in local
+            # (non-compat) mode this scriptblock runs under the caller's StrictMode.
+            function Get-VmPropertyText {
+                param($Vm, [string]$PropertyName)
+                $property = $Vm.PSObject.Properties[$PropertyName]
+                if ($property) { return [string]$property.Value }
+                return ''
+            }
+
             function Get-IntegrationStatusSummary {
                 param($Vm)
 
                 $primarySignals = @(
-                    [string]$Vm.IntegrationServicesState,
-                    [string]$Vm.GuestAgentStatus,
-                    [string]$Vm.VMAddition
+                    (Get-VmPropertyText -Vm $Vm -PropertyName 'IntegrationServicesState'),
+                    (Get-VmPropertyText -Vm $Vm -PropertyName 'GuestAgentStatus'),
+                    (Get-VmPropertyText -Vm $Vm -PropertyName 'VMAddition')
                 ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
                 $secondarySignals = @(
-                    [string]$Vm.HeartbeatStatus,
-                    [string]$Vm.HeartbeatEnabled
+                    (Get-VmPropertyText -Vm $Vm -PropertyName 'HeartbeatStatus'),
+                    (Get-VmPropertyText -Vm $Vm -PropertyName 'HeartbeatEnabled')
                 ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
                 $summary = $null
@@ -270,9 +283,9 @@ function Get-SCVMMVmInventory {
                 }
 
                 $statusRaw = @(
-                    [string]$vm.Status,
-                    [string]$vm.StatusString,
-                    [string]$vm.VirtualMachineState
+                    (Get-VmPropertyText -Vm $vm -PropertyName 'Status'),
+                    (Get-VmPropertyText -Vm $vm -PropertyName 'StatusString'),
+                    (Get-VmPropertyText -Vm $vm -PropertyName 'VirtualMachineState')
                 ) -join ' '
 
                 $running = $statusRaw -match 'Running|Power.*On|En cours d.?ex\u00e9cution|D\u00e9marr\u00e9'
@@ -867,30 +880,29 @@ if (-not $targetRows) {
     exit 1
 }
 
-$pollIntervalFromConfig = $Config.StartVm.IntegrationPollIntervalSeconds
+# Get-MigrationConfigValue everywhere below: StartVm/RemoteActions are optional
+# sections and a bare dot access on a missing key throws under StrictMode.
+$pollIntervalFromConfig = Get-MigrationConfigValue -Config $Config -Path 'StartVm.IntegrationPollIntervalSeconds'
 if ($pollIntervalFromConfig -and [int]$pollIntervalFromConfig -gt 0) {
     $IntegrationPollIntervalSeconds = [int]$pollIntervalFromConfig
 }
 
-$maxIterationsFromConfig = $Config.StartVm.IntegrationMaxIterations
+$maxIterationsFromConfig = Get-MigrationConfigValue -Config $Config -Path 'StartVm.IntegrationMaxIterations'
 if ($maxIterationsFromConfig -and [int]$maxIterationsFromConfig -gt 0) {
     $IntegrationMaxIterations = [int]$maxIterationsFromConfig
 }
 
 $inventoryBatchThreshold = 25
-$inventoryBatchThresholdFromConfig = $Config.StartVm.InventoryBatchThreshold
+$inventoryBatchThresholdFromConfig = Get-MigrationConfigValue -Config $Config -Path 'StartVm.InventoryBatchThreshold'
 if ($inventoryBatchThresholdFromConfig -and [int]$inventoryBatchThresholdFromConfig -gt 0) {
     $inventoryBatchThreshold = [int]$inventoryBatchThresholdFromConfig
 }
 
-$winRmCredential = $null
-if ($Config.RemoteActions.WinRm.Credential) {
-    $winRmCredential = $Config.RemoteActions.WinRm.Credential
-}
+$winRmCredential = Get-MigrationConfigValue -Config $Config -Path 'RemoteActions.WinRm.Credential'
 
-$localWinRmScriptPath = [string]$Config.RemoteActions.WinRm.RemoveVmwareToolsScriptLocalPath
-$remoteWinRmScriptPath = [string]$Config.RemoteActions.WinRm.RemoveVmwareToolsScriptRemotePath
-$expectedBackupTag = [string]$Config.Tags.BackupTag
+$localWinRmScriptPath = [string](Get-MigrationConfigValue -Config $Config -Path 'RemoteActions.WinRm.RemoveVmwareToolsScriptLocalPath' -Default '')
+$remoteWinRmScriptPath = [string](Get-MigrationConfigValue -Config $Config -Path 'RemoteActions.WinRm.RemoveVmwareToolsScriptRemotePath' -Default '')
+$expectedBackupTag = [string](Get-MigrationConfigValue -Config $Config -Path 'Tags.BackupTag' -Default '')
 
 $initialSnapshots = Get-SCVMMVmInventory -ServerName $Config.SCVMM.Server -VMNames ($targetRows.VMName) -ExpectedIpMap $expectedIpMap -ExpectedBackupTag $expectedBackupTag -ForceRefresh -BatchInventoryThreshold $inventoryBatchThreshold
 $initialSnapshotByName = @{}
@@ -898,7 +910,9 @@ foreach ($snapshot in $initialSnapshots) {
     $initialSnapshotByName[[string]$snapshot.VMName] = $snapshot
 }
 
-$vmInventory = foreach ($row in $targetRows) {
+# @(): with a single CSV row the foreach result is a scalar and the later
+# $vmInventory.Count would throw under StrictMode.
+$vmInventory = @(foreach ($row in $targetRows) {
     $vmName = [string]$row.VMName
     $sourceOs = Get-FirstPropertyValue -InputObject $row -PropertyNames @('OperatingSystem', 'Operating system')
     $snapshot = $initialSnapshotByName[$vmName]
@@ -949,7 +963,7 @@ $vmInventory = foreach ($row in $targetRows) {
         BackupTagPresent        = [bool]$snapshot.BackupTagPresent
         DisplayCompleted        = Test-VmCompliant -Exists $snapshot.Exists -Running $snapshot.Running -NetworkConnected $snapshot.NetworkConnected -IntegrationReady $snapshot.IntegrationReady -HighAvailabilityEnabled $snapshot.HighAvailabilityEnabled -BackupTagPresent $snapshot.BackupTagPresent -IPMatches $snapshot.IPMatches
     }
-}
+})
 
 Write-MigrationLog "Batch loaded: $($vmInventory.Count) VM(s)." -LogFile $LogFile
 

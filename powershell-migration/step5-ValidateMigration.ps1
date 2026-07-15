@@ -78,6 +78,8 @@ param (
     [string]$VmName
 )
 
+Set-StrictMode -Version Latest
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Initialisation
 # ═══════════════════════════════════════════════════════════════════════════
@@ -193,7 +195,7 @@ function Get-HyperVVmInventory {
                 $diskCount = $disks.Count
 
                 $adapters = @(Get-SCVirtualNetworkAdapter -VM $vm -ErrorAction SilentlyContinue)
-                $nicsConnected = ($adapters | Where-Object {
+                $nicsConnected = @($adapters | Where-Object {
                     [string]$_.ConnectionState -match 'Connected|Connecté|OK|On'
                 }).Count -gt 0
 
@@ -201,7 +203,10 @@ function Get-HyperVVmInventory {
                     Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
                     Select-Object -Unique)
 
-                $integrationOk = [string]$vm.IntegrationServicesState -match 'OK|Operational|Up|Ready'
+                # Property guard: IntegrationServicesState is not exposed by every
+                # SCVMM version, and this scriptblock can run under StrictMode locally.
+                $integrationStateText = if ($vm.PSObject.Properties['IntegrationServicesState']) { [string]$vm.IntegrationServicesState } else { '' }
+                $integrationOk = $integrationStateText -match 'OK|Operational|Up|Ready'
 
                 $haEnabled = [bool]$vm.IsHighlyAvailable
 
@@ -281,10 +286,9 @@ function Test-VmWinRmConnectivity {
         return [pscustomobject]@{ Reachable = $false; Error = 'No IP addresses' }
     }
 
-    $credential = $null
-    if ($Config.Validation.CredentialPSCredential) {
-        $credential = $Config.Validation.CredentialPSCredential
-    }
+    # Guarded read: the Validation section does not exist in the config.psd1
+    # template, and a bare access on the missing key throws under StrictMode.
+    $credential = Get-MigrationConfigValue -Config $Config -Path 'Validation.CredentialPSCredential'
 
     foreach ($ip in $IPAddresses) {
         try {
@@ -427,7 +431,7 @@ foreach ($vmName in $vmNames) {
     }
 
     # Check 8: WinRM connectivity (optional)
-    if (-not $SkipConnectivityTest -and $found -and $hv.Found -and $hv.IPAddresses.Count -gt 0) {
+    if (-not $SkipConnectivityTest -and $found -and $hv.Found -and @($hv.IPAddresses).Count -gt 0) {
         $winRmResult = Test-VmWinRmConnectivity -VMName $vmName -IPAddresses $hv.IPAddresses
         $checks += [pscustomobject]@{
             Name   = 'WinRMConnectivity'
@@ -437,9 +441,9 @@ foreach ($vmName in $vmNames) {
         }
     }
 
-    $vmPassed = ($checks | Where-Object { -not $_.Passed }).Count -eq 0
+    $vmPassed = @($checks | Where-Object { -not $_.Passed }).Count -eq 0
     $vmChecksTotal = $checks.Count
-    $vmChecksPassed = ($checks | Where-Object { $_.Passed }).Count
+    $vmChecksPassed = @($checks | Where-Object { $_.Passed }).Count
     $checksTotal += $vmChecksTotal
     $checksPassed += $vmChecksPassed
 

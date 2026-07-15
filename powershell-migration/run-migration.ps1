@@ -108,6 +108,8 @@ param (
     [switch]$SkipManualValidation
 )
 
+Set-StrictMode -Version Latest
+
 # Remove Mark-of-the-Web from every file in the toolkit (recursively, including step3\ modules
 # and config.psd1) before anything is dot-sourced or invoked. Must run first: files copied from a
 # zip download or a network share are flagged "downloaded from the internet" and, under a
@@ -407,7 +409,7 @@ $migrationTargets = @{}
 $distributedPortGroupCache = @{}
 $standardPortGroupCache = @{}
 
-$cmdbPath = $Config.Paths.CmdbExtractCsv
+$cmdbPath = Get-MigrationConfigValue -Config $Config -Path 'Paths.CmdbExtractCsv' -Default ''
 $cmdbOperatingSystems = @{}
 if (-not [string]::IsNullOrWhiteSpace($cmdbPath) -and (Test-Path $cmdbPath)) {
     $cmdbRows = Import-Csv -Path $cmdbPath -Delimiter ";"
@@ -433,7 +435,9 @@ foreach ($row in $vmRows) {
         $vmOperatingSystems[$row.VMName] = if ($cmdbOperatingSystems.ContainsKey($row.VMName)) {
             $cmdbOperatingSystems[$row.VMName]
         } else {
-            $row.OperatingSystem
+            # Property-guarded read: the OperatingSystem CSV column is optional
+            # and a bare access throws under StrictMode when it is absent.
+            Get-FirstPropertyValue -InputObject $row -PropertyNames @('OperatingSystem', 'Operating system')
         }
     }
 }
@@ -585,8 +589,9 @@ if ($runInstantRecoveryStartOutsideWorkers) {
     $irTasksFile = Join-Path $Config.Paths.LogDir ("step3-ir-tasks-{0}-{1}.json" -f (Convert-ToSafeFileName -Value $Tag), (Get-Date -Format 'yyyyMMdd-HHmmss'))
     ConvertTo-Json -InputObject $irTasks -Depth 4 | Set-Content -Path $irTasksFile -Encoding utf8
 
-    $irStartDelaySeconds = if ($Config.Orchestrator -and $Config.Orchestrator.ContainsKey('InstantRecoveryStartDelaySec') -and [int]$Config.Orchestrator.InstantRecoveryStartDelaySec -ge 0) {
-        [int]$Config.Orchestrator.InstantRecoveryStartDelaySec
+    $irStartDelayConfigured = Get-MigrationConfigValue -Config $Config -Path 'Orchestrator.InstantRecoveryStartDelaySec'
+    $irStartDelaySeconds = if ($null -ne $irStartDelayConfigured -and [int]$irStartDelayConfigured -ge 0) {
+        [int]$irStartDelayConfigured
     } else {
         2
     }
@@ -611,8 +616,10 @@ if ($runInstantRecoveryStartOutsideWorkers) {
 Write-MigrationLog "Step3 phase 2/2: worker-based execution per VM for commit/bascule and network/post-configuration..." -LogFile $LogFile
 Write-MigrationLog "Targeted VMs: $($vmNames -join ', ')" -LogFile $LogFile
 
-$step3WorkerCount = if ($Config.Orchestrator.Step3MaxParallelJobs) { [int]$Config.Orchestrator.Step3MaxParallelJobs } else { 5 }
-$step3WorkerStartupDelaySec = if ($Config.Orchestrator.Step3JobStartupDelaySec -ge 0) { [int]$Config.Orchestrator.Step3JobStartupDelaySec } else { 2 }
+$step3WorkerCountConfigured = Get-MigrationConfigValue -Config $Config -Path 'Orchestrator.Step3MaxParallelJobs'
+$step3WorkerCount = if ($step3WorkerCountConfigured) { [int]$step3WorkerCountConfigured } else { 5 }
+$step3StartupDelayConfigured = Get-MigrationConfigValue -Config $Config -Path 'Orchestrator.Step3JobStartupDelaySec'
+$step3WorkerStartupDelaySec = if ($null -ne $step3StartupDelayConfigured -and [int]$step3StartupDelayConfigured -ge 0) { [int]$step3StartupDelayConfigured } else { 2 }
 
 if ($step3WorkerCount -lt 1) {
     $step3WorkerCount = 1

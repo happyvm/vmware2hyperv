@@ -22,6 +22,8 @@
     Resolve-OperatingSystemMapping).
 #>
 
+Set-StrictMode -Version Latest
+
 function Set-SCVMMOperatingSystem {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -91,7 +93,12 @@ function Register-VmHighAvailability {
     $ClusterName = $Context.HyperVCluster
     $LogFile = $Context.LogFile
 
+    # Get-SCVMMVmRuntimeState returns $null when the VM is missing from SCVMM;
+    # a bare property read on $null throws under StrictMode.
     $vmStateBeforeHa = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName
+    if (-not $vmStateBeforeHa) {
+        throw "VM '$Name' not found in SCVMM while checking high availability."
+    }
     $vmHaState = [bool]$vmStateBeforeHa.IsHighlyAvailable
 
     $clusterVmRegistrationCommand = Get-Command -Name "Add-ClusterVirtualMachineRole" -ErrorAction SilentlyContinue |
@@ -127,7 +134,7 @@ function Register-VmHighAvailability {
         }
 
         $vmStateAfterHa = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName -Refresh
-        if (-not $vmStateAfterHa.IsHighlyAvailable) {
+        if (-not ($vmStateAfterHa -and $vmStateAfterHa.IsHighlyAvailable)) {
             if ($clusterVmRegistrationCommand) {
                 throw "VM '$Name' is still not highly available in SCVMM after Add-ClusterVirtualMachineRole and refresh."
             }
@@ -156,6 +163,9 @@ function Move-VmToSecondHost {
 
     try {
         $vmStateBeforeMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName -Refresh
+        if (-not $vmStateBeforeMove) {
+            throw "VM '$Name' not found in SCVMM while preparing the host migration."
+        }
         Write-MigrationLog "[$Name] Preparing host migration validation. Current host: '$($vmStateBeforeMove.HostName)'." -LogFile $LogFile
 
         $scvmmMigrationJob = $null
@@ -192,6 +202,12 @@ function Move-VmToSecondHost {
             $migrationValidationElapsedSeconds += $migrationValidationPollIntervalSeconds
 
             $vmStateAfterMove = Get-SCVMMVmRuntimeState -Name $Name -ServerName $ServerName -Refresh
+            if (-not $vmStateAfterMove) {
+                # Transient SCVMM refresh gap (VM object briefly unavailable during
+                # the move): keep polling instead of throwing on a $null state.
+                Write-MigrationLog "[$Name] VM state unavailable from SCVMM during migration validation (elapsed: ${migrationValidationElapsedSeconds}s); retrying." -Level WARNING -LogFile $LogFile
+                continue
+            }
             $currentHostNormalized = ConvertTo-NormalizedHostName -Name $vmStateAfterMove.HostName
 
             if ($scvmmMigrationJob -and -not [string]::IsNullOrWhiteSpace($scvmmMigrationJob.ID)) {
@@ -215,7 +231,8 @@ function Move-VmToSecondHost {
         } while ($migrationValidationElapsedSeconds -lt $migrationValidationTimeoutSeconds)
 
         if (-not $migrationValidated) {
-            throw "LiveMigration validation timed out after $migrationValidationTimeoutSeconds seconds. VM current host: '$($vmStateAfterMove.HostName)', expected destination: '$DestinationHost'."
+            $lastKnownHost = if ($vmStateAfterMove) { [string]$vmStateAfterMove.HostName } else { '<unknown>' }
+            throw "LiveMigration validation timed out after $migrationValidationTimeoutSeconds seconds. VM current host: '$lastKnownHost', expected destination: '$DestinationHost'."
         }
     } catch {
         if ([string]$_ -match "could not access an expected WMI class|Hyper-V Platform") {

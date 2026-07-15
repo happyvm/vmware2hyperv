@@ -47,6 +47,47 @@
 # lib.ps1 — Common functions for VMware → Hyper-V migration scripts
 # Load: . "$PSScriptRoot\lib.ps1"
 
+# Dot-sourcing propagates strict mode to the calling script's scope, so every
+# pipeline script runs strict. Under 'Latest', reads of unset variables, absent
+# object properties, absent hashtable keys (dot notation) and .Count on scalars
+# all throw — optional config keys must go through Get-MigrationConfigValue.
+Set-StrictMode -Version Latest
+
+# ---------------------------------------------------------------------------
+# Get-MigrationConfigValue : StrictMode-safe read of a nested config path
+# (e.g. 'Orchestrator.Step3MaxParallelJobs'). Returns $Default when any
+# segment is missing. Supports hashtables and PSCustomObjects.
+# ---------------------------------------------------------------------------
+function Get-MigrationConfigValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Config,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        $Default = $null
+    )
+
+    $current = $Config
+    foreach ($segment in ($Path -split '\.')) {
+        if ($null -eq $current) { return $Default }
+
+        if ($current -is [System.Collections.IDictionary]) {
+            if (-not $current.Contains($segment)) { return $Default }
+            $current = $current[$segment]
+            continue
+        }
+
+        $property = $current.PSObject.Properties[$segment]
+        if (-not $property) { return $Default }
+        $current = $property.Value
+    }
+
+    if ($null -eq $current) { return $Default }
+    return $current
+}
+
 # ---------------------------------------------------------------------------
 # Write-MigrationLog : timestamped logging to streams + file
 # ---------------------------------------------------------------------------
@@ -367,12 +408,15 @@ function Install-RsatHyperV {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = 'Validation result is intentionally cached per worker process, across dot-sourced script invocations.')]
     param([string]$LogFile)
 
-    if ($global:Vmware2HyperV_RsatHyperVValidated) {
+    # Get-Variable: a bare read of the never-set global throws under StrictMode.
+    $rsatAlreadyValidated = Get-Variable -Name 'Vmware2HyperV_RsatHyperVValidated' -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    if ($rsatAlreadyValidated) {
         Write-MigrationLog "Hyper-V RSAT/module availability already validated in current worker session; skipping repeated check." -LogFile $LogFile
         return
     }
 
-    if ($IsLinux -or $IsMacOS) {
+    # $IsLinux/$IsMacOS only exist on PowerShell Core; guard for Windows PowerShell 5.1.
+    if ($PSVersionTable.PSEdition -eq 'Core' -and ($IsLinux -or $IsMacOS)) {
         Write-MigrationLog "RSAT Hyper-V check skipped on non-Windows host." -Level WARNING -LogFile $LogFile
         $global:Vmware2HyperV_RsatHyperVValidated = $true
         return
@@ -432,30 +476,38 @@ function Resolve-MigrationTarget {
         [string]$LogFile
     )
 
+    # Every read goes through Get-MigrationConfigValue: a mapping entry (or a
+    # custom config file) may omit keys, and a bare dot access on a missing
+    # hashtable key throws under StrictMode Latest.
     $target = [ordered]@{
         VMwareCluster  = $VmwareClusterName
-        HyperVHost     = [string]$Config.HyperV.Host1
-        HyperVHost2    = [string]$Config.HyperV.Host2
-        HyperVCluster  = [string]$Config.HyperV.Cluster
-        ClusterStorage = [string]$Config.HyperV.ClusterStorage
+        HyperVHost     = [string](Get-MigrationConfigValue -Config $Config -Path 'HyperV.Host1' -Default '')
+        HyperVHost2    = [string](Get-MigrationConfigValue -Config $Config -Path 'HyperV.Host2' -Default '')
+        HyperVCluster  = [string](Get-MigrationConfigValue -Config $Config -Path 'HyperV.Cluster' -Default '')
+        ClusterStorage = [string](Get-MigrationConfigValue -Config $Config -Path 'HyperV.ClusterStorage' -Default '')
         MappingMatched = $false
     }
 
-    $clusterMappings = @()
-    if ($Config.ContainsKey('MigrationMappings') -and $Config.MigrationMappings -and $Config.MigrationMappings.ContainsKey('ClusterMappings') -and $Config.MigrationMappings.ClusterMappings) {
-        $clusterMappings = @($Config.MigrationMappings.ClusterMappings)
-    }
+    $clusterMappings = @(Get-MigrationConfigValue -Config $Config -Path 'MigrationMappings.ClusterMappings' -Default @())
 
     if (-not [string]::IsNullOrWhiteSpace($VmwareClusterName) -and $clusterMappings.Count -gt 0) {
         $mapping = $clusterMappings |
-            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.VMwareCluster) -and [string]::Equals([string]$_.VMwareCluster, $VmwareClusterName, [System.StringComparison]::OrdinalIgnoreCase) } |
+            Where-Object {
+                $mappingClusterName = [string](Get-MigrationConfigValue -Config $_ -Path 'VMwareCluster' -Default '')
+                -not [string]::IsNullOrWhiteSpace($mappingClusterName) -and [string]::Equals($mappingClusterName, $VmwareClusterName, [System.StringComparison]::OrdinalIgnoreCase)
+            } |
             Select-Object -First 1
 
         if ($mapping) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$mapping.Host1)) { $target.HyperVHost = [string]$mapping.Host1 }
-            if (-not [string]::IsNullOrWhiteSpace([string]$mapping.Host2)) { $target.HyperVHost2 = [string]$mapping.Host2 }
-            if (-not [string]::IsNullOrWhiteSpace([string]$mapping.HyperVCluster)) { $target.HyperVCluster = [string]$mapping.HyperVCluster }
-            if (-not [string]::IsNullOrWhiteSpace([string]$mapping.ClusterStorage)) { $target.ClusterStorage = [string]$mapping.ClusterStorage }
+            foreach ($mappingEntry in @(
+                @{ Key = 'Host1';          Target = 'HyperVHost' }
+                @{ Key = 'Host2';          Target = 'HyperVHost2' }
+                @{ Key = 'HyperVCluster';  Target = 'HyperVCluster' }
+                @{ Key = 'ClusterStorage'; Target = 'ClusterStorage' }
+            )) {
+                $mappingValue = [string](Get-MigrationConfigValue -Config $mapping -Path $mappingEntry.Key -Default '')
+                if (-not [string]::IsNullOrWhiteSpace($mappingValue)) { $target[$mappingEntry.Target] = $mappingValue }
+            }
             $target.MappingMatched = $true
         }
     }
@@ -948,6 +1000,11 @@ function Invoke-MigrationConfigWizard {
     Write-Host ""
 
     foreach ($entry in $entriesToAsk) {
+        # 'Type' and 'Optional' are optional schema keys: a bare $entry.Type on a
+        # hashtable without that key throws under StrictMode Latest.
+        $entryType = [string](Get-MigrationConfigValue -Config $entry -Path 'Type' -Default '')
+        $entryOptional = [bool](Get-MigrationConfigValue -Config $entry -Path 'Optional' -Default $false)
+
         $currentValue = $null
         if ($localConfig.ContainsKey($entry.Section) -and $localConfig[$entry.Section].ContainsKey($entry.Key)) {
             $currentValue = $localConfig[$entry.Section][$entry.Key]
@@ -955,9 +1012,9 @@ function Invoke-MigrationConfigWizard {
             $currentValue = $defaults[$entry.Section][$entry.Key]
         }
 
-        $displayValue = if ($entry.Type -eq 'StringList' -and $currentValue) { $currentValue -join ', ' } else { $currentValue }
+        $displayValue = if ($entryType -eq 'StringList' -and $currentValue) { $currentValue -join ', ' } else { $currentValue }
         $suffix = if ($null -ne $displayValue -and "$displayValue" -ne '') { " [$displayValue]" } else { "" }
-        $optionalSuffix = if ($entry.Optional) { " (optionnel)" } else { "" }
+        $optionalSuffix = if ($entryOptional) { " (optionnel)" } else { "" }
 
         do {
             $answer = Read-Host "$($entry.Question)$optionalSuffix$suffix"
@@ -965,7 +1022,7 @@ function Invoke-MigrationConfigWizard {
             $value = if ([string]::IsNullOrWhiteSpace($answer)) {
                 $currentValue
             } else {
-                switch ($entry.Type) {
+                switch ($entryType) {
                     'Int' {
                         # TryParse instead of a bare [int] cast: an invalid entry must
                         # re-prompt, not throw out of the wizard (or leave $value stale).
@@ -980,10 +1037,10 @@ function Invoke-MigrationConfigWizard {
             $isEmpty = ($null -eq $value) -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value)) -or ($value -is [array] -and $value.Count -eq 0)
             if ($parseFailed) {
                 Write-Host "Valeur numérique invalide." -ForegroundColor Yellow
-            } elseif ($isEmpty -and -not $entry.Optional) {
+            } elseif ($isEmpty -and -not $entryOptional) {
                 Write-Host "Valeur obligatoire." -ForegroundColor Yellow
             }
-        } while ($parseFailed -or ($isEmpty -and -not $entry.Optional))
+        } while ($parseFailed -or ($isEmpty -and -not $entryOptional))
 
         if (-not $localConfig.ContainsKey($entry.Section)) { $localConfig[$entry.Section] = @{} }
         $localConfig[$entry.Section][$entry.Key] = $value
