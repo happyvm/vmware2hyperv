@@ -1,4 +1,4 @@
-# hyperv-check.psd1
+﻿# hyperv-check.psd1
 # Configuration file for Test-HyperVNodeReadiness.ps1
 #
 # Copy this file next to the script (or specify -ConfigFile <path>).

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 #Requires -Modules VirtualMachineManager
 
@@ -144,6 +144,11 @@ function Wait-SCJobCompletion {
     $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
     $currentJob = $Job
 
+    # 'SucceedWithInfo' est un succès (avec avertissements), pas un échec : un
+    # cycle planifié ne doit pas s'interrompre pour une remédiation réussie
+    # accompagnée d'informations.
+    $successStatuses = @('Completed', 'SucceedWithInfo')
+
     while ($null -ne $currentJob -and $currentJob.Status -in @('Running', 'NotStarted')) {
         if ((Get-Date) -gt $deadline) {
             throw "Timeout après $TimeoutMinutes minute(s) pendant : $Activity. Job SCVMM: $($currentJob.ID)."
@@ -154,8 +159,12 @@ function Wait-SCJobCompletion {
         Write-Verbose "[$Activity] Statut SCVMM: $($currentJob.Status)."
     }
 
-    if ($null -ne $currentJob -and $currentJob.Status -ne 'Completed') {
+    if ($null -ne $currentJob -and [string]$currentJob.Status -notin $successStatuses) {
         throw "Echec SCVMM pendant : $Activity. Statut: $($currentJob.Status). Erreur: $($currentJob.ErrorInfo)."
+    }
+
+    if ($null -ne $currentJob -and [string]$currentJob.Status -eq 'SucceedWithInfo') {
+        Write-Warning "[$Activity] Job SCVMM terminé avec informations. Détail: $($currentJob.ErrorInfo)."
     }
 
     return $currentJob
@@ -176,43 +185,6 @@ function Get-ObjectName {
     }
 
     return [string]$InputObject
-}
-
-function Get-UpdateTitle {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [object]$Update
-    )
-
-    foreach ($propertyName in @('Title', 'Name')) {
-        $property = $Update.PSObject.Properties[$propertyName]
-        if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-            return [string]$property.Value
-        }
-    }
-
-    return [string]$Update
-}
-
-function Test-UpdateClassification {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [object]$Update,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$AllowedClassifications
-    )
-
-    foreach ($propertyName in @('Classification', 'UpdateClassification', 'ClassificationName')) {
-        $property = $Update.PSObject.Properties[$propertyName]
-        if ($null -ne $property -and $AllowedClassifications -contains [string]$property.Value) {
-            return $true
-        }
-    }
-
-    return $false
 }
 
 Import-Module VirtualMachineManager -ErrorAction Stop
@@ -243,11 +215,28 @@ else {
     Write-Host 'Synchronisation WSUS/SCVMM ignorée (-SkipSynchronization).'
 }
 
-$hostGroup = Get-SCVMHostGroup -VMMServer $vmmConnection -Name $HostGroupName -ErrorAction Stop
-$hosts = @(Get-SCVMHost -VMMServer $vmmConnection | Where-Object {
-        $groupProperty = $_.PSObject.Properties['VMHostGroup']
-        $null -ne $groupProperty -and $null -ne $groupProperty.Value -and $groupProperty.Value.ID -eq $hostGroup.ID
-    })
+$hostGroups = @(Get-SCVMHostGroup -VMMServer $vmmConnection -Name $HostGroupName -ErrorAction Stop)
+if ($hostGroups.Count -gt 1) {
+    $paths = ($hostGroups | ForEach-Object {
+            $pathProperty = $_.PSObject.Properties['Path']
+            if ($null -ne $pathProperty -and $pathProperty.Value) { [string]$pathProperty.Value } else { [string]$_.Name }
+        }) -join ', '
+    throw "Plusieurs groupes d'hôtes portent le nom '$HostGroupName' ($paths). Utilisez un nom de groupe unique."
+}
+$hostGroup = $hostGroups[0]
+
+# AllChildHosts inclut les hôtes des sous-groupes ; le filtre par VMHostGroup.ID
+# (repli si la propriété est absente) ne retient que les hôtes directs du groupe.
+$allChildHostsProperty = $hostGroup.PSObject.Properties['AllChildHosts']
+if ($null -ne $allChildHostsProperty -and $null -ne $allChildHostsProperty.Value) {
+    $hosts = @($allChildHostsProperty.Value)
+}
+else {
+    $hosts = @(Get-SCVMHost -VMMServer $vmmConnection | Where-Object {
+            $groupProperty = $_.PSObject.Properties['VMHostGroup']
+            $null -ne $groupProperty -and $null -ne $groupProperty.Value -and $groupProperty.Value.ID -eq $hostGroup.ID
+        })
+}
 
 if ($VMHostNames) {
     $wantedHosts = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -274,17 +263,48 @@ if ($hosts.Count -eq 0) {
 Write-Host 'Hôtes ciblés :'
 $hosts | ForEach-Object { Write-Host "  - $(Get-ObjectName -InputObject $_)" }
 
+# Le catalogue peut contenir des dizaines de milliers de mises à jour : filtrer
+# en une seule passe (classification via HashSet, titres via regex, exclusion
+# des correctifs supersédés/déclinés lorsque ces propriétés existent) plutôt
+# qu'en trois passes avec un appel de fonction par objet.
+$allowedClassifications = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($classification in $UpdateClassifications) {
+    [void]$allowedClassifications.Add($classification)
+}
+
 $updates = @(Get-SCUpdate -VMMServer $vmmConnection -ErrorAction Stop | Where-Object {
-        Test-UpdateClassification -Update $_ -AllowedClassifications $UpdateClassifications
+        $update = $_
+
+        $classificationMatch = $false
+        foreach ($propertyName in @('Classification', 'UpdateClassification', 'ClassificationName')) {
+            $property = $update.PSObject.Properties[$propertyName]
+            if ($null -ne $property -and $allowedClassifications.Contains([string]$property.Value)) {
+                $classificationMatch = $true
+                break
+            }
+        }
+        if (-not $classificationMatch) { return $false }
+
+        $title = $null
+        foreach ($propertyName in @('Title', 'Name')) {
+            $property = $update.PSObject.Properties[$propertyName]
+            if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+                $title = [string]$property.Value
+                break
+            }
+        }
+        if (-not $title) { $title = [string]$update }
+
+        if ($IncludeUpdateTitleRegex -and $title -notmatch $IncludeUpdateTitleRegex) { return $false }
+        if ($ExcludeUpdateTitleRegex -and $title -match $ExcludeUpdateTitleRegex) { return $false }
+
+        foreach ($flagName in @('IsSuperseded', 'IsDeclined')) {
+            $property = $update.PSObject.Properties[$flagName]
+            if ($null -ne $property -and $property.Value -eq $true) { return $false }
+        }
+
+        return $true
     })
-
-if ($IncludeUpdateTitleRegex) {
-    $updates = @($updates | Where-Object { (Get-UpdateTitle -Update $_) -match $IncludeUpdateTitleRegex })
-}
-
-if ($ExcludeUpdateTitleRegex) {
-    $updates = @($updates | Where-Object { (Get-UpdateTitle -Update $_) -notmatch $ExcludeUpdateTitleRegex })
-}
 
 if ($updates.Count -eq 0) {
     throw 'Aucune mise à jour candidate trouvée pour alimenter la baseline.'
@@ -302,6 +322,18 @@ else {
     if ($PSCmdlet.ShouldProcess($baselineTarget, "Mettre à jour avec $($updates.Count) correctif(s)")) {
         Set-SCBaseline -Baseline $baseline -Update $updates -ErrorAction Stop | Out-Null
         $baseline = Get-SCBaseline -VMMServer $vmmConnection -Name $BaselineName -ErrorAction Stop
+    }
+}
+
+# En mode -Confirm, l'opérateur peut refuser la création de la baseline puis
+# accepter les étapes suivantes : sans cette garde, Set-SCBaseline recevrait
+# -Baseline $null et échouerait avec une erreur de binding brute. En -WhatIf,
+# la simulation des étapes suivantes reste affichée (leurs blocs ShouldProcess
+# ne s'exécutent jamais).
+if ($null -eq $baseline) {
+    Write-Host "Baseline '$BaselineName' non disponible (création refusée ou simulée)."
+    if (-not $WhatIfPreference) {
+        return
     }
 }
 

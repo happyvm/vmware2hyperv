@@ -45,6 +45,9 @@
 
 .PARAMETER CopySmbPermissions
     Replace destination SMB permissions with those from the source share when set to $true.
+    When set to $false, a newly created share keeps only the bootstrap FullAccess
+    entry (the ComputerCredential account, or the current user) — review and
+    adjust the SMB permissions manually afterwards.
 
 .PARAMETER AddLibraryServerIfMissing
     Add the destination server as a SCVMM Library Server if it is not already declared.
@@ -287,8 +290,12 @@ function Sync-SmbShareAccess {
 $source = Split-UncSharePath -Path $SourceLibraryShare
 $destinationUnc = "\\{0}\{1}" -f $DestinationLibraryServer, $DestinationShareName
 
-if ($SourceLibraryShare.TrimEnd('\') -ieq $destinationUnc.TrimEnd('\')) {
-    throw 'The source library and destination library cannot be identical.'
+# Compare on the host short name so '\\lib01\Share' and
+# '\\lib01.contoso.local\Share' are recognized as the same target.
+$sourceServerShortName      = ($source.Server -split '\.')[0]
+$destinationServerShortName = ($DestinationLibraryServer -split '\.')[0]
+if ($sourceServerShortName -ieq $destinationServerShortName -and $source.Share -ieq $DestinationShareName) {
+    throw "The source library ($SourceLibraryShare) and destination library ($destinationUnc) resolve to the same share."
 }
 
 $target = "SCVMM library '$destinationUnc' on '$DestinationLibraryServer'"
@@ -403,7 +410,15 @@ try {
         Write-Verbose "SMB share '$DestinationShareName' already exists."
     }
     else {
-        $bootstrapAccount = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        # The share is created on the REMOTE server: when -ComputerCredential is
+        # supplied, the bootstrap FullAccess ACE must reference that account, not
+        # the local identity (which may be meaningless on the destination server).
+        $bootstrapAccount = if ($ComputerCredential) {
+            $ComputerCredential.UserName
+        }
+        else {
+            [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        }
 
         $newShareParameters = @{
             CimSession            = $destinationCim
@@ -476,10 +491,17 @@ Run again with -AddLibraryServerIfMissing, or add it first in the SCVMM console.
                     $null
                 }
 
+                $registeredLibraryServerName = $null
+                $libraryServerProperty = $_.PSObject.Properties['LibraryServer']
+                if ($libraryServerProperty -and $null -ne $libraryServerProperty.Value) {
+                    $registeredLibraryServerName = [string]$libraryServerProperty.Value.Name
+                }
+
                 ($registeredSharePath -and $registeredSharePath.TrimEnd('\') -ieq $destinationUnc.TrimEnd('\')) -or
                 (
                     $_.Name -ieq $DestinationShareName -and
-                    $_.LibraryServer.Name -ieq $libraryServer.Name
+                    $registeredLibraryServerName -and
+                    $registeredLibraryServerName -ieq $libraryServer.Name
                 )
             } |
             Select-Object -First 1
@@ -532,9 +554,12 @@ Run again with -AddLibraryServerIfMissing, or add it first in the SCVMM console.
 
     Write-Host ''
     Write-Host 'Applied SMB permissions:' -ForegroundColor Green
+    # Out-Host keeps the formatting objects out of the pipeline so callers that
+    # capture the script's output only receive the summary [pscustomobject].
     $finalShareAccess |
         Sort-Object AccountName, AccessControlType |
-        Format-Table AccountName, AccessControlType, AccessRight -AutoSize
+        Format-Table AccountName, AccessControlType, AccessRight -AutoSize |
+        Out-Host
 }
 finally {
     if ($destinationCim -and $destinationCim -ne $sourceCim) {

@@ -199,6 +199,63 @@ Describe 'Read-CfgValue (config-file mode never prompts)' {
     }
 }
 
+Describe 'New-PortEndpoint' {
+    It 'returns $null for an empty or missing target' {
+        New-PortEndpoint -Target '' -Port 445 -Service 'SMB' -Scope 'X' | Should -BeNullOrEmpty
+    }
+    It 'builds a TCP endpoint descriptor by default' {
+        $endpoint = New-PortEndpoint -Target 'host1' -Port 445 -Service 'SMB' -Scope 'DC'
+        $endpoint.Target   | Should -BeExactly 'host1'
+        $endpoint.Port     | Should -Be 445
+        $endpoint.Proto    | Should -BeExactly 'TCP'
+        $endpoint.Optional | Should -BeFalse
+    }
+    It 'marks optional endpoints' {
+        (New-PortEndpoint -Target 'host1' -Port 636 -Service 'LDAPS' -Scope 'DC' -Optional).Optional | Should -BeTrue
+    }
+}
+
+Describe 'Invoke-PortEndpointChecks' {
+    BeforeAll {
+        # Give the resilient logger a writable target so Add-Result does not warn.
+        $script:LogFile = Join-Path ([System.IO.Path]::GetTempPath()) "readiness-tests-$([guid]::NewGuid()).log"
+    }
+    BeforeEach {
+        $script:Results.Clear()
+    }
+    It 'reports PASS/FAIL/INFO for open, closed and optional-closed ports in one batch' {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        try {
+            $openPort = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+            # Bind then release a port to obtain one nothing is listening on.
+            $tmp = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $tmp.Start()
+            $closedPort = ([System.Net.IPEndPoint]$tmp.LocalEndpoint).Port
+            $tmp.Stop()
+
+            Invoke-PortEndpointChecks -Category 'Ports' -TimeoutMs 1500 -Endpoints @(
+                New-PortEndpoint -Target '127.0.0.1' -Port $openPort   -Service 'open'       -Scope 'Test'
+                New-PortEndpoint -Target '127.0.0.1' -Port $closedPort -Service 'closed'     -Scope 'Test'
+                New-PortEndpoint -Target '127.0.0.1' -Port $closedPort -Service 'closed-opt' -Scope 'Test' -Optional
+            )
+
+            $script:Results | Should -HaveCount 3
+            $script:Results[0].Status | Should -BeExactly 'PASS'
+            $script:Results[1].Status | Should -BeExactly 'FAIL'
+            $script:Results[2].Status | Should -BeExactly 'INFO'
+        } finally {
+            $listener.Stop()
+        }
+    }
+    It 'skips $null endpoints (empty targets) without emitting a result' {
+        Invoke-PortEndpointChecks -Category 'Ports' -TimeoutMs 500 -Endpoints @(
+            New-PortEndpoint -Target '' -Port 445 -Service 'SMB' -Scope 'Test'
+        )
+        $script:Results | Should -HaveCount 0
+    }
+}
+
 Describe 'Test-TcpPort' {
     It 'returns $true for a port that is actively listening' {
         $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
