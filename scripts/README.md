@@ -238,8 +238,38 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Invoke-SCVMMH
 | `-SkipSynchronization` | No | Reuse the existing catalog without starting WSUS synchronization |
 | `-SkipRemediation` | No | Refresh baseline and scan compliance only, without patching hosts |
 | `-SkipFinalComplianceScan` | No | Skip the post-remediation compliance re-scan and final state report |
-| `-ContinueOnHostFailure` | No | Keep patching the remaining hosts when one host's remediation fails (sequential mode); failures still drive exit code 1 |
-| `-ParallelRemediation` | No | Remediate all selected hosts in parallel; not recommended unless cluster capacity has been validated |
+| `-ContinueOnHostFailure` | No | Keep patching the remaining hosts when one host's remediation fails (sequential mode); failures still drive a failure exit code |
+| `-ParallelRemediation` | No | Cluster-aware parallel remediation: hosts from different clusters run at the same time; within one cluster, batches honor the two limits below |
+| `-MaxParallelHostsPerCluster` | No | Maximum simultaneous hosts per cluster in parallel mode (default 2) |
+| `-MinimumClusterAvailableResourcePercent` | No | Minimum share of the whole cluster's capacity (all active members known to VMM) that must stay available during a batch (default 50). When the threshold cannot be met even with one host (single-node cluster), the script proceeds host by host with a warning |
+| `-DismountIso` | No | Automatically eject ISO/host-drive media attached to running VMs before remediating their host — the classic Live Migration blocker. Without it, attached media are only reported as warnings |
+| `-CentreonOutput` | No | Suppress console logs and emit a final Nagios/Centreon plugin line with perfdata; exit codes switch to plugin convention (see below) |
+
+### Live Migration pre-checks
+
+Right before remediation (on refreshed host data), each host goes through Live Migration
+pre-checks. Blocking findings exclude the host from remediation and count as failures:
+unreachable/degraded host, VMM agent not ready, host already in maintenance mode.
+Non-blocking findings are logged as warnings: non-clustered host (VMs go to saved state,
+no Live Migration), running non-highly-available VMs, and DVD media attached to running
+VMs (fixable automatically with `-DismountIso`).
+
+### Centreon integration
+
+With `-CentreonOutput`, the script behaves as a Nagios/Centreon plugin: console logs are
+suppressed (use `-LogFile` to keep them), the last stdout line is the plugin output with
+perfdata (`targeted`, `remediated`, `failed`, `warnings`, `duration_min`), and the exit
+code follows the plugin convention: `0`=OK, `1`=WARNING (cycle completed with warnings,
+e.g. hosts still non-compliant after remediation), `2`=CRITICAL (host failure or fatal
+error), `3`=UNKNOWN (baseline creation declined).
+
+A patching cycle runs for hours, so do not wire it as a regular active check with a short
+timeout. Recommended patterns:
+
+- run the script from the Windows scheduled task with `-CentreonOutput 1> C:\Logs\patching.status`
+  and have a lightweight Centreon check read that file (parse the leading `OK|WARNING|CRITICAL|UNKNOWN`
+  token and alert on stale files), or
+- submit the plugin line and exit code as a passive check result to Centreon at the end of the run.
 
 
 ---

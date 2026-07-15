@@ -20,12 +20,20 @@ La remédiation SCVMM met un hôte en maintenance, évacue les VM par Live Migra
 le permet, applique les correctifs, redémarre si nécessaire, puis retire le mode maintenance.
 
 Un hôte dont le scan de conformité échoue est exclu de la remédiation et compté en échec.
+
+Pré-contrôles Live Migration (sur données hôtes rafraîchies, juste avant la remédiation) :
+- bloquants (hôte exclu) : hôte injoignable/dégradé, agent VMM non prêt, hôte déjà en maintenance ;
+- avertissements : hôte hors cluster (VM en saved state, pas d'évacuation), VM non hautement
+  disponibles, média ISO/lecteur hôte attaché à une VM en cours d'exécution — le bloqueur
+  classique de Live Migration, éjectable automatiquement avec -DismountIso.
+
 Toutes les étapes sont journalisées avec horodatage sur la console et, si -LogFile est fourni,
 dans un fichier — indispensable pour diagnostiquer une exécution planifiée.
 
-Codes de sortie :
+Codes de sortie (sans -CentreonOutput) :
   0 = cycle terminé sans échec d'hôte
-  1 = au moins un hôte en échec (scan ou remédiation), ou erreur fatale
+  1 = au moins un hôte en échec (scan, pré-contrôle ou remédiation), ou erreur fatale
+Avec -CentreonOutput, les codes suivent la convention plugin : 0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN.
 
 .PARAMETER VMMServer
 Nom FQDN ou NetBIOS du serveur SCVMM.
@@ -92,12 +100,22 @@ la capacité cluster pendant les Live Migrations.
 Nombre maximal d’hôtes remédiés simultanément dans un même cluster lorsque -ParallelRemediation est actif.
 
 .PARAMETER MinimumClusterAvailableResourcePercent
-Pourcentage minimal de ressources du cluster qui doit rester disponible dans un lot parallèle. Le script
-utilise la mémoire hôte si elle est exposée par SCVMM, sinon le nombre de CPU, sinon un poids de 1 par hôte.
+Pourcentage minimal de ressources du cluster qui doit rester disponible dans un lot parallèle. Le poids
+d'un hôte utilise sa mémoire si elle est exposée par SCVMM, sinon le nombre de CPU, sinon 1 par hôte.
+Le total de référence est la capacité de TOUS les membres actifs du cluster connus de VMM (pas seulement
+les hôtes ciblés). Si le seuil est impossible à respecter même avec un seul hôte (ex. cluster mono-nœud),
+le script avance hôte par hôte en le signalant par un avertissement.
+
+.PARAMETER DismountIso
+Éjecte automatiquement les médias (ISO/lecteur hôte) attachés aux lecteurs DVD des VM en cours
+d'exécution avant la remédiation de leur hôte — bloqueur classique de Live Migration. Sans ce
+commutateur, les médias attachés sont seulement signalés en avertissement. Sans effet en -WhatIf.
 
 .PARAMETER CentreonOutput
 Supprime la sortie de log console courante et émet une ligne finale compatible plugin Centreon/Nagios
-avec perfdata et code retour 0/1.
+avec perfdata. Les codes retour suivent alors la convention plugin : 0=OK, 1=WARNING (cycle terminé
+avec avertissements), 2=CRITICAL (échec d'hôte ou erreur fatale), 3=UNKNOWN (baseline refusée).
+Sans ce commutateur, les codes de sortie restent 0 (succès) / 1 (échec).
 
 .EXAMPLE
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Invoke-SCVMMHostPatchBaseline.ps1 `
@@ -190,6 +208,9 @@ param(
     [int]$MinimumClusterAvailableResourcePercent = 50,
 
     [Parameter()]
+    [switch]$DismountIso,
+
+    [Parameter()]
     [switch]$CentreonOutput
 )
 
@@ -200,6 +221,8 @@ $script:LogFilePath    = $LogFile
 $script:LogWriteWarned = $false
 $script:FailedHosts    = [ordered]@{}
 $script:CentreonOutputMode = [bool]$CentreonOutput
+$script:WarningCount   = 0
+$script:CycleStart     = Get-Date
 
 function Write-PatchLog {
     [CmdletBinding()]
@@ -211,6 +234,8 @@ function Write-PatchLog {
         [ValidateSet('INFO', 'WARN', 'ERROR')]
         [string]$Level = 'INFO'
     )
+
+    if ($Level -eq 'WARN') { $script:WarningCount++ }
 
     $line = '{0} [{1,-5}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
     $color = switch ($Level) {
@@ -454,19 +479,57 @@ function Get-VMHostResourceWeight {
     return 1.0
 }
 
+function Test-DvdDriveHasMedia {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Drive
+    )
+
+    foreach ($propertyName in @('ISO', 'HostDrive')) {
+        $property = $Drive.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $null -ne $property.Value -and "$($property.Value)" -ne '') {
+            return $true
+        }
+    }
+
+    $connectionProperty = $Drive.PSObject.Properties['Connection']
+    if ($null -ne $connectionProperty -and $null -ne $connectionProperty.Value) {
+        $connection = [string]$connectionProperty.Value
+        if ($connection -ne '' -and $connection -ne 'None') { return $true }
+    }
+
+    return $false
+}
+
 function Test-VMHostLiveMigrationReadiness {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [object]$VMHost
+        [object]$VMHost,
+
+        [switch]$DismountIso
     )
 
+    # Pré-contrôles des causes classiques d'échec de la mise en maintenance
+    # SCVMM (évacuation Live Migration) après le scan de baseline :
+    # - Issues (bloquants) : hôte injoignable/dégradé, agent VMM non prêt,
+    #   hôte déjà en maintenance — la remédiation échouerait, l'hôte est exclu ;
+    # - Warnings (non bloquants) : hôte hors cluster (les VM passent en saved
+    #   state, pas de Live Migration), VM non hautement disponibles, média
+    #   ISO/lecteur hôte attaché à une VM en cours d'exécution (bloqueur
+    #   classique de Live Migration, éjecté automatiquement avec -DismountIso).
     $hostName = Get-ObjectName -InputObject $VMHost
-    $issues = @()
+    $issues   = @()
+    $warnings = @()
+    $fixed    = @()
 
     $clusterName = Get-VMHostClusterName -VMHost $VMHost
-    if ($clusterName -eq '__Standalone__') {
-        $issues += 'hôte hors cluster SCVMM : remédiation avec Live Migration non garantie'
+    $isClustered = $clusterName -ne '__Standalone__'
+    if (-not $isClustered) {
+        # Avertissement, pas une exclusion : un hôte standalone reste patchable,
+        # simplement sans évacuation Live Migration.
+        $warnings += "hôte hors cluster SCVMM : pas d'évacuation Live Migration — les VM seront mises en saved state pendant la maintenance"
     }
 
     foreach ($propertyName in @('OverallState', 'Status', 'HostState', 'ComputerState')) {
@@ -490,18 +553,100 @@ function Test-VMHostLiveMigrationReadiness {
         }
     }
 
+    # Inspection des VM en cours d'exécution (défensive : une inspection
+    # impossible produit un avertissement, jamais un plantage).
+    try {
+        $vms = @(Get-SCVirtualMachine -VMHost $VMHost -ErrorAction Stop)
+
+        $runningVms = @($vms | Where-Object {
+                $vm = $_
+                $state = $null
+                foreach ($propertyName in @('VirtualMachineState', 'Status', 'StatusString')) {
+                    $property = $vm.PSObject.Properties[$propertyName]
+                    if ($null -ne $property -and $null -ne $property.Value) { $state = [string]$property.Value; break }
+                }
+                $state -match '^Running'
+            })
+
+        if ($isClustered) {
+            $nonHaVms = @($runningVms | Where-Object {
+                    $property = $_.PSObject.Properties['IsHighlyAvailable']
+                    $null -ne $property -and $property.Value -eq $false
+                })
+            if ($nonHaVms.Count -gt 0) {
+                $names = @($nonHaVms | ForEach-Object { Get-ObjectName -InputObject $_ } | Select-Object -First 5) -join ', '
+                $warnings += "$($nonHaVms.Count) VM non hautement disponible(s) en cours d'exécution (saved state pendant la maintenance, pas de Live Migration) : $names$(if ($nonHaVms.Count -gt 5) { ', …' })"
+            }
+        }
+
+        foreach ($vm in $runningVms) {
+            $vmName = Get-ObjectName -InputObject $vm
+            $drives = @()
+            try {
+                $drives = @(Get-SCVirtualDVDDrive -VM $vm -ErrorAction Stop)
+            } catch {
+                Write-Verbose "Lecture des lecteurs DVD impossible pour '$vmName' : $($_.Exception.Message)"
+                continue
+            }
+
+            foreach ($drive in $drives) {
+                if ($null -eq $drive) { continue }
+                if (-not (Test-DvdDriveHasMedia -Drive $drive)) { continue }
+
+                if ($DismountIso) {
+                    try {
+                        Set-SCVirtualDVDDrive -VirtualDVDDrive $drive -NoMedia -ErrorAction Stop | Out-Null
+                        $fixed += "média éjecté du lecteur DVD de la VM '$vmName'"
+                    } catch {
+                        $warnings += "éjection du média impossible pour la VM '$vmName' : $($_.Exception.Message) — la Live Migration de cette VM peut échouer"
+                    }
+                } else {
+                    $warnings += "VM '$vmName' : média attaché au lecteur DVD — bloqueur classique de Live Migration (relancez avec -DismountIso pour l'éjecter automatiquement)"
+                }
+            }
+        }
+    } catch {
+        $warnings += "inspection des VM de $hostName impossible : $($_.Exception.Message)"
+    }
+
     return [pscustomobject]@{
         HostName    = $hostName
         ClusterName = $clusterName
         Ready       = ($issues.Count -eq 0)
-        Issues      = $issues
+        Issues      = @($issues)
+        Warnings    = @($warnings)
+        Fixed       = @($fixed)
     }
+}
+
+function Test-VMHostContributesCapacity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$VMHost
+    )
+
+    # Un nœud injoignable ou déjà en maintenance n'apporte aucune capacité
+    # d'accueil aux VM évacuées : il ne compte pas dans le total du cluster.
+    $communicationProperty = $VMHost.PSObject.Properties['CommunicationState']
+    if ($null -ne $communicationProperty -and $null -ne $communicationProperty.Value -and
+        [string]$communicationProperty.Value -ne 'Responding') {
+        return $false
+    }
+
+    foreach ($propertyName in @('MaintenanceHost', 'InMaintenanceMode', 'MaintenanceMode')) {
+        $property = $VMHost.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $property.Value -eq $true) { return $false }
+    }
+
+    return $true
 }
 
 function New-ClusterRemediationBatch {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [object[]]$CandidateHosts,
 
         [Parameter(Mandatory = $true)]
@@ -510,13 +655,37 @@ function New-ClusterRemediationBatch {
 
         [Parameter(Mandatory = $true)]
         [ValidateRange(0, 100)]
-        [int]$MinimumClusterAvailableResourcePercent
+        [int]$MinimumClusterAvailableResourcePercent,
+
+        # Liste complète des hôtes VMM : le pourcentage « disponible » doit être
+        # calculé sur la capacité de TOUS les membres actifs du cluster, pas
+        # seulement sur les hôtes ciblés (cibler 2 hôtes d'un cluster de 8 doit
+        # permettre un lot de 2 : la capacité retirée n'est que de 25 %).
+        [AllowEmptyCollection()]
+        [object[]]$AllClusterHosts = @()
     )
 
     $batches = @()
     $clusterGroups = $CandidateHosts | Group-Object { Get-VMHostClusterName -VMHost $_ }
     $remainingByCluster = @{}
-    foreach ($group in $clusterGroups) { $remainingByCluster[$group.Name] = @($group.Group) }
+    $totalWeightByCluster = @{}
+
+    foreach ($group in $clusterGroups) {
+        $remainingByCluster[$group.Name] = @($group.Group)
+
+        $membership = @()
+        if (@($AllClusterHosts).Count -gt 0) {
+            $membership = @($AllClusterHosts | Where-Object {
+                    (Get-VMHostClusterName -VMHost $_) -eq $group.Name -and
+                    (Test-VMHostContributesCapacity -VMHost $_)
+                })
+        }
+        if ($membership.Count -eq 0) { $membership = @($group.Group) }
+
+        $totalWeight = ($membership | ForEach-Object { Get-VMHostResourceWeight -VMHost $_ } | Measure-Object -Sum).Sum
+        if (-not $totalWeight -or $totalWeight -le 0) { $totalWeight = [double]$membership.Count }
+        $totalWeightByCluster[$group.Name] = [double]$totalWeight
+    }
 
     while (($remainingByCluster.Values | Where-Object { @($_).Count -gt 0 } | Measure-Object).Count -gt 0) {
         $batch = @()
@@ -524,18 +693,27 @@ function New-ClusterRemediationBatch {
             $remaining = @($remainingByCluster[$clusterName])
             if ($remaining.Count -eq 0) { continue }
 
-            $totalWeight = ($CandidateHosts | Where-Object { (Get-VMHostClusterName -VMHost $_) -eq $clusterName } | ForEach-Object { Get-VMHostResourceWeight -VMHost $_ } | Measure-Object -Sum).Sum
-            if (-not $totalWeight -or $totalWeight -le 0) { $totalWeight = [double]$remaining.Count }
+            $totalWeight = [double]$totalWeightByCluster[$clusterName]
 
             $selected = @()
+            $selectedWeight = 0.0
             foreach ($hostItem in $remaining) {
                 if ($selected.Count -ge $MaxParallelHostsPerCluster) { break }
-                $selectedWeight = ($selected + @($hostItem) | ForEach-Object { Get-VMHostResourceWeight -VMHost $_ } | Measure-Object -Sum).Sum
-                $availablePercent = (($totalWeight - $selectedWeight) / $totalWeight) * 100
-                if ($availablePercent -ge $MinimumClusterAvailableResourcePercent) { $selected += $hostItem }
+                $candidateWeight = Get-VMHostResourceWeight -VMHost $hostItem
+                $availablePercent = (($totalWeight - ($selectedWeight + $candidateWeight)) / $totalWeight) * 100
+                if ($availablePercent -ge $MinimumClusterAvailableResourcePercent) {
+                    $selected += $hostItem
+                    $selectedWeight += $candidateWeight
+                }
             }
 
-            if ($selected.Count -eq 0) { $selected = @($remaining | Select-Object -First 1) }
+            if ($selected.Count -eq 0) {
+                # Seuil impossible à respecter même avec un seul hôte (ex. cluster
+                # mono-nœud) : on avance hôte par hôte mais on le SIGNALE au lieu
+                # de violer silencieusement la contrainte.
+                $selected = @($remaining | Select-Object -First 1)
+                Write-PatchLog "[$clusterName] Seuil de $MinimumClusterAvailableResourcePercent% de ressources disponibles impossible à respecter même avec un seul hôte — remédiation hôte par hôte sous le seuil : $(Get-ObjectName -InputObject $selected[0])." -Level WARN
+            }
             $batch += $selected
             $remainingByCluster[$clusterName] = @($remaining | Where-Object { $current = $_; -not @($selected | Where-Object { [object]::ReferenceEquals($_, $current) }) })
         }
@@ -543,20 +721,60 @@ function New-ClusterRemediationBatch {
         $batches += , @($batch)
     }
 
-    return , $batches
+    # Émet chaque lot comme un objet unique : l'appelant collecte avec @() et
+    # obtient un tableau de lots. (L'ancien `return , $batches` combiné au @()
+    # de l'appelant ajoutait un niveau d'imbrication : en mode parallèle chaque
+    # « hôte » remédié était en réalité un tableau d'hôtes.)
+    foreach ($completedBatch in $batches) {
+        Write-Output -InputObject @($completedBatch) -NoEnumerate
+    }
 }
 
-function Write-CentreonSummary {
+function Get-CentreonState {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)][int]$TargetedCount,
-        [Parameter(Mandatory = $true)][int]$RemediatedCount,
-        [Parameter(Mandatory = $true)][int]$FailureCount
+        [Parameter(Mandatory = $true)][int]$FailureCount,
+        [int]$WarningCount = 0
     )
 
-    $state = if ($FailureCount -gt 0) { 'CRITICAL' } else { 'OK' }
-    $message = "$state - Hyper-V/SCVMM patching: targeted=$TargetedCount remediated=$RemediatedCount failed=$FailureCount | targeted=$TargetedCount remediated=$RemediatedCount failed=$FailureCount"
-    Write-Output $message
+    if ($FailureCount -gt 0) { return 'CRITICAL' }
+    if ($WarningCount -gt 0) { return 'WARNING' }
+    return 'OK'
+}
+
+function Get-CentreonExitCode {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('OK', 'WARNING', 'CRITICAL', 'UNKNOWN')]
+        [string]$State
+    )
+
+    # Convention plugin Nagios/Centreon : 0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN.
+    # (Un simple 0/1 ferait afficher WARNING à Centreon pour un texte CRITICAL.)
+    switch ($State) {
+        'OK'       { return 0 }
+        'WARNING'  { return 1 }
+        'CRITICAL' { return 2 }
+        default    { return 3 }
+    }
+}
+
+function Format-CentreonSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('OK', 'WARNING', 'CRITICAL', 'UNKNOWN')]
+        [string]$State,
+
+        [Parameter(Mandatory = $true)][int]$TargetedCount,
+        [Parameter(Mandatory = $true)][int]$RemediatedCount,
+        [Parameter(Mandatory = $true)][int]$FailureCount,
+        [int]$WarningCount = 0,
+        [double]$DurationMinutes = 0
+    )
+
+    return "$State - Hyper-V/SCVMM patching: targeted=$TargetedCount remediated=$RemediatedCount failed=$FailureCount warnings=$WarningCount | targeted=$TargetedCount remediated=$RemediatedCount failed=$FailureCount warnings=$WarningCount duration_min=$DurationMinutes"
 }
 
 function Get-VMHostComplianceState {
@@ -599,6 +817,11 @@ function Get-VMHostComplianceState {
 }
 
 Import-Module VirtualMachineManager -ErrorAction Stop
+
+# Le corps principal est encapsulé pour qu'une erreur fatale produise quand même
+# une ligne plugin Centreon (CRITICAL) et un code de sortie exploitables : sans
+# cela, un throw laissait la supervision sans aucune sortie.
+try {
 
 Write-PatchLog "Cycle patching démarré — VMM: $VMMServer, baseline: '$BaselineName', groupe: '$HostGroupName'."
 $vmmConnection = Get-SCVMMServer -ComputerName $VMMServer -SetAsDefault -ErrorAction Stop
@@ -753,6 +976,10 @@ else {
 if ($null -eq $baseline) {
     Write-PatchLog "Baseline '$BaselineName' non disponible (création refusée ou simulée)." -Level WARN
     if (-not $WhatIfPreference) {
+        if ($CentreonOutput) {
+            Write-Output "UNKNOWN - Hyper-V/SCVMM patching: baseline '$BaselineName' non disponible (création refusée)"
+            exit (Get-CentreonExitCode -State 'UNKNOWN')
+        }
         return
     }
 }
@@ -797,6 +1024,25 @@ if ($SkipRemediation) {
     Write-PatchLog 'Remédiation ignorée (-SkipRemediation).'
 }
 else {
+    # Vue rafraîchie des hôtes VMM : la synchronisation WSUS et les scans de
+    # conformité peuvent durer des heures — les pré-contrôles Live Migration et
+    # le calcul de capacité doivent refléter l'état ACTUEL des hôtes, pas celui
+    # du début de cycle.
+    $refreshedVmmHosts = @()
+    $refreshedHostsByAlias = @{}
+    try {
+        $refreshedVmmHosts = @(Get-SCVMHost -VMMServer $vmmConnection -ErrorAction Stop)
+        foreach ($refreshedHost in $refreshedVmmHosts) {
+            foreach ($alias in (Get-VMHostAliasSet -VMHost $refreshedHost)) {
+                if (-not $refreshedHostsByAlias.ContainsKey($alias)) {
+                    $refreshedHostsByAlias[$alias] = $refreshedHost
+                }
+            }
+        }
+    } catch {
+        Write-PatchLog "Rafraîchissement des hôtes VMM impossible ($($_.Exception.Message)) — pré-contrôles sur les données du début de cycle." -Level WARN
+    }
+
     $candidateHosts = @()
     foreach ($hostItem in $hosts) {
         $hostName = Get-ObjectName -InputObject $hostItem
@@ -805,17 +1051,22 @@ else {
             continue
         }
 
-        $readiness = Test-VMHostLiveMigrationReadiness -VMHost $hostItem
+        $currentHost = if ($refreshedHostsByAlias.ContainsKey($hostName)) { $refreshedHostsByAlias[$hostName] } else { $hostItem }
+
+        # L'éjection ISO est une action : jamais en -WhatIf.
+        $readiness = Test-VMHostLiveMigrationReadiness -VMHost $currentHost -DismountIso:($DismountIso -and -not $WhatIfPreference)
+        foreach ($fixedItem in $readiness.Fixed)      { Write-PatchLog "[$hostName] $fixedItem" }
+        foreach ($warningItem in $readiness.Warnings) { Write-PatchLog "[$hostName] $warningItem" -Level WARN }
         if (-not $readiness.Ready) {
             Add-HostFailure -HostName $hostName -Reason "Pré-contrôle Live Migration en échec : $($readiness.Issues -join '; ')"
             continue
         }
 
-        $candidateHosts += $hostItem
+        $candidateHosts += $currentHost
     }
 
     $remediationBatches = if ($ParallelRemediation) {
-        @(New-ClusterRemediationBatch -CandidateHosts $candidateHosts -MaxParallelHostsPerCluster $MaxParallelHostsPerCluster -MinimumClusterAvailableResourcePercent $MinimumClusterAvailableResourcePercent)
+        @(New-ClusterRemediationBatch -CandidateHosts $candidateHosts -MaxParallelHostsPerCluster $MaxParallelHostsPerCluster -MinimumClusterAvailableResourcePercent $MinimumClusterAvailableResourcePercent -AllClusterHosts $refreshedVmmHosts)
     } else {
         @($candidateHosts | ForEach-Object { , @($_) })
     }
@@ -889,17 +1140,29 @@ else {
 
 # ── Bilan et code de sortie ───────────────────────────────────────────────────
 $failureCount = $script:FailedHosts.Count
-Write-PatchLog "Cycle patching Hyper-V/SCVMM terminé : $($hosts.Count) hôte(s) ciblé(s), $($remediatedHostItems.Count) remédié(s), $failureCount en échec."
-
-if ($CentreonOutput) {
-    Write-CentreonSummary -TargetedCount $hosts.Count -RemediatedCount $remediatedHostItems.Count -FailureCount $failureCount
-}
+$durationMinutes = [math]::Round(((Get-Date) - $script:CycleStart).TotalMinutes, 1)
+Write-PatchLog "Cycle patching Hyper-V/SCVMM terminé en $durationMinutes min : $($hosts.Count) hôte(s) ciblé(s), $($remediatedHostItems.Count) remédié(s), $failureCount en échec, $($script:WarningCount) avertissement(s)."
 
 if ($failureCount -gt 0) {
     foreach ($failure in $script:FailedHosts.GetEnumerator()) {
         Write-PatchLog "  Échec $($failure.Key) : $($failure.Value)" -Level ERROR
     }
-    exit 1
 }
 
-exit 0
+if ($CentreonOutput) {
+    $centreonState = Get-CentreonState -FailureCount $failureCount -WarningCount $script:WarningCount
+    Write-Output (Format-CentreonSummary -State $centreonState -TargetedCount $hosts.Count -RemediatedCount $remediatedHostItems.Count -FailureCount $failureCount -WarningCount $script:WarningCount -DurationMinutes $durationMinutes)
+    exit (Get-CentreonExitCode -State $centreonState)
+}
+
+exit $(if ($failureCount -gt 0) { 1 } else { 0 })
+
+} catch {
+    $fatalMessage = $_.Exception.Message
+    Write-PatchLog "Erreur fatale : $fatalMessage" -Level ERROR
+    if ($CentreonOutput) {
+        Write-Output "CRITICAL - Hyper-V/SCVMM patching: erreur fatale: $fatalMessage"
+        exit (Get-CentreonExitCode -State 'CRITICAL')
+    }
+    exit 1
+}

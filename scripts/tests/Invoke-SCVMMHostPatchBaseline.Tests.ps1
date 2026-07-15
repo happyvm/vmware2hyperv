@@ -35,9 +35,11 @@ BeforeAll {
     }
 
     # Script-scope state normally initialized by the script preamble.
-    $script:LogFilePath    = $null
-    $script:LogWriteWarned = $false
-    $script:FailedHosts    = [ordered]@{}
+    $script:LogFilePath        = $null
+    $script:LogWriteWarned     = $false
+    $script:FailedHosts        = [ordered]@{}
+    $script:CentreonOutputMode = $false
+    $script:WarningCount       = 0
 }
 
 Describe 'Get-ObjectName' {
@@ -185,13 +187,93 @@ Describe 'Wait-SCJobBatch' {
     }
 }
 
-Describe 'Live migration remediation planning' {
-    It 'detects non-clustered hosts as not ready for Live Migration remediation' {
+Describe 'Test-VMHostLiveMigrationReadiness' {
+    It 'keeps non-clustered hosts patchable but warns about saved state (no Live Migration)' {
+        # Regression: standalone hosts used to be excluded from patching entirely.
         $result = Test-VMHostLiveMigrationReadiness -VMHost ([pscustomobject]@{ Name = 'hv01'; Status = 'OK'; AgentStatus = 'UpToDate' })
-        $result.Ready | Should -BeFalse
-        $result.Issues -join '; ' | Should -Match 'hors cluster'
+        $result.Ready | Should -BeTrue
+        $result.Warnings -join '; ' | Should -Match 'hors cluster'
     }
 
+    It 'blocks a host that is already in maintenance mode' {
+        $result = Test-VMHostLiveMigrationReadiness -VMHost ([pscustomobject]@{ Name = 'hv01'; HostCluster = [pscustomobject]@{ Name = 'CL01' }; MaintenanceHost = $true })
+        $result.Ready | Should -BeFalse
+        $result.Issues -join '; ' | Should -Match 'maintenance'
+    }
+
+    Context 'VM inspection with stubbed VMM cmdlets' {
+        BeforeAll {
+            function Get-SCVirtualMachine {
+                param($VMHost, $ErrorAction)
+                $script:FakeVms
+            }
+            function Get-SCVirtualDVDDrive {
+                param($VM, $ErrorAction)
+                if ($script:FakeDrivesByVm.ContainsKey($VM.Name)) { $script:FakeDrivesByVm[$VM.Name] } else { @() }
+            }
+            function Set-SCVirtualDVDDrive {
+                param($VirtualDVDDrive, [switch]$NoMedia, $ErrorAction)
+                $script:DismountedDrives += $VirtualDVDDrive
+            }
+        }
+        BeforeEach {
+            $script:FakeVms          = @()
+            $script:FakeDrivesByVm   = @{}
+            $script:DismountedDrives = @()
+        }
+
+        It 'warns about an attached ISO on a running VM without -DismountIso' {
+            $script:FakeVms = @([pscustomobject]@{ Name = 'vm1'; VirtualMachineState = 'Running'; IsHighlyAvailable = $true })
+            $script:FakeDrivesByVm['vm1'] = @([pscustomobject]@{ ISO = 'install.iso' })
+
+            $result = Test-VMHostLiveMigrationReadiness -VMHost ([pscustomobject]@{ Name = 'hv01'; HostCluster = [pscustomobject]@{ Name = 'CL01' } })
+            $result.Ready | Should -BeTrue
+            $result.Warnings -join '; ' | Should -Match 'DismountIso'
+            $script:DismountedDrives | Should -HaveCount 0
+        }
+
+        It 'ejects the attached media with -DismountIso and reports the fix' {
+            $script:FakeVms = @([pscustomobject]@{ Name = 'vm1'; VirtualMachineState = 'Running'; IsHighlyAvailable = $true })
+            $script:FakeDrivesByVm['vm1'] = @([pscustomobject]@{ ISO = 'install.iso' })
+
+            $result = Test-VMHostLiveMigrationReadiness -VMHost ([pscustomobject]@{ Name = 'hv01'; HostCluster = [pscustomobject]@{ Name = 'CL01' } }) -DismountIso
+            $result.Fixed -join '; ' | Should -Match 'vm1'
+            $script:DismountedDrives | Should -HaveCount 1
+        }
+
+        It 'warns about running non-highly-available VMs on a clustered host' {
+            $script:FakeVms = @(
+                [pscustomobject]@{ Name = 'vm1'; VirtualMachineState = 'Running'; IsHighlyAvailable = $false }
+                [pscustomobject]@{ Name = 'vm2'; VirtualMachineState = 'PowerOff'; IsHighlyAvailable = $false }
+            )
+
+            $result = Test-VMHostLiveMigrationReadiness -VMHost ([pscustomobject]@{ Name = 'hv01'; HostCluster = [pscustomobject]@{ Name = 'CL01' } })
+            $result.Ready | Should -BeTrue
+            $result.Warnings -join '; ' | Should -Match '1 VM non hautement disponible'
+        }
+
+        It 'ignores stopped VMs when checking DVD media' {
+            $script:FakeVms = @([pscustomobject]@{ Name = 'vm1'; VirtualMachineState = 'PowerOff' })
+            $script:FakeDrivesByVm['vm1'] = @([pscustomobject]@{ ISO = 'install.iso' })
+
+            $result = Test-VMHostLiveMigrationReadiness -VMHost ([pscustomobject]@{ Name = 'hv01'; HostCluster = [pscustomobject]@{ Name = 'CL01' } })
+            $result.Warnings -join '; ' | Should -Not -Match 'DismountIso'
+        }
+    }
+}
+
+Describe 'Test-DvdDriveHasMedia' {
+    It 'detects an ISO, a host drive and a non-None connection' {
+        Test-DvdDriveHasMedia -Drive ([pscustomobject]@{ ISO = 'x.iso' })        | Should -BeTrue
+        Test-DvdDriveHasMedia -Drive ([pscustomobject]@{ HostDrive = 'D:' })     | Should -BeTrue
+        Test-DvdDriveHasMedia -Drive ([pscustomobject]@{ Connection = 'ISOImage' }) | Should -BeTrue
+    }
+    It 'reports no media for an empty drive' {
+        Test-DvdDriveHasMedia -Drive ([pscustomobject]@{ ISO = $null; Connection = 'None' }) | Should -BeFalse
+    }
+}
+
+Describe 'New-ClusterRemediationBatch' {
     It 'allows hosts from different clusters in the same parallel batch but limits each cluster to two hosts' {
         $hosts = @(
             [pscustomobject]@{ Name = 'a1'; ClusterName = 'A'; TotalMemory = 100 }
@@ -207,8 +289,70 @@ Describe 'Live migration remediation planning' {
         @($batches | ForEach-Object { $_ } | ForEach-Object { $_.Name }) | Should -Contain 'a3'
     }
 
+    It 'computes the 50% threshold against the whole cluster membership, not only the targeted hosts' {
+        # Regression: targeting 2 hosts of a 4-node cluster only removes 50% of
+        # the cluster capacity, so both must fit in a single batch.
+        $targeted = @(
+            [pscustomobject]@{ Name = 'a1'; ClusterName = 'A'; TotalMemory = 100 }
+            [pscustomobject]@{ Name = 'a2'; ClusterName = 'A'; TotalMemory = 100 }
+        )
+        $allHosts = $targeted + @(
+            [pscustomobject]@{ Name = 'a3'; ClusterName = 'A'; TotalMemory = 100 }
+            [pscustomobject]@{ Name = 'a4'; ClusterName = 'A'; TotalMemory = 100 }
+        )
+
+        $batches = @(New-ClusterRemediationBatch -CandidateHosts $targeted -MaxParallelHostsPerCluster 2 -MinimumClusterAvailableResourcePercent 50 -AllClusterHosts $allHosts)
+        $batches | Should -HaveCount 1
+        @($batches[0]) | Should -HaveCount 2
+    }
+
+    It 'excludes non-responding or in-maintenance nodes from the cluster capacity' {
+        $targeted = @(
+            [pscustomobject]@{ Name = 'a1'; ClusterName = 'A'; TotalMemory = 100 }
+            [pscustomobject]@{ Name = 'a2'; ClusterName = 'A'; TotalMemory = 100 }
+        )
+        $allHosts = $targeted + @(
+            [pscustomobject]@{ Name = 'a3'; ClusterName = 'A'; TotalMemory = 100; CommunicationState = 'NotResponding' }
+            [pscustomobject]@{ Name = 'a4'; ClusterName = 'A'; TotalMemory = 100; MaintenanceHost = $true }
+        )
+
+        # Only a1+a2 contribute capacity: taking both would leave 0% — they
+        # must land in separate batches.
+        $batches = @(New-ClusterRemediationBatch -CandidateHosts $targeted -MaxParallelHostsPerCluster 2 -MinimumClusterAvailableResourcePercent 50 -AllClusterHosts $allHosts)
+        $batches | Should -HaveCount 2
+    }
+
+    It 'falls back to one host per batch with a warning when the threshold cannot be met' {
+        $hosts = @([pscustomobject]@{ Name = 'solo'; ClusterName = 'A'; TotalMemory = 100 })
+        $warningsBefore = $script:WarningCount
+        $batches = @(New-ClusterRemediationBatch -CandidateHosts $hosts -MaxParallelHostsPerCluster 2 -MinimumClusterAvailableResourcePercent 50)
+        $batches | Should -HaveCount 1
+        @($batches[0]).Name | Should -BeExactly 'solo'
+        $script:WarningCount | Should -BeGreaterThan $warningsBefore
+    }
+
+    It 'returns no batches for an empty candidate list' {
+        @(New-ClusterRemediationBatch -CandidateHosts @() -MaxParallelHostsPerCluster 2 -MinimumClusterAvailableResourcePercent 50 |
+            Where-Object { @($_).Count -gt 0 }) | Should -HaveCount 0
+    }
+}
+
+Describe 'Centreon output' {
+    It 'maps failure and warning counts to the plugin state' {
+        Get-CentreonState -FailureCount 1 -WarningCount 0 | Should -BeExactly 'CRITICAL'
+        Get-CentreonState -FailureCount 0 -WarningCount 2 | Should -BeExactly 'WARNING'
+        Get-CentreonState -FailureCount 0 -WarningCount 0 | Should -BeExactly 'OK'
+    }
+
+    It 'maps plugin states to Nagios exit codes (0/1/2/3)' {
+        Get-CentreonExitCode -State 'OK'       | Should -Be 0
+        Get-CentreonExitCode -State 'WARNING'  | Should -Be 1
+        Get-CentreonExitCode -State 'CRITICAL' | Should -Be 2
+        Get-CentreonExitCode -State 'UNKNOWN'  | Should -Be 3
+    }
+
     It 'formats a Centreon-compatible summary with perfdata' {
-        Write-CentreonSummary -TargetedCount 3 -RemediatedCount 2 -FailureCount 1 |
-            Should -BeExactly 'CRITICAL - Hyper-V/SCVMM patching: targeted=3 remediated=2 failed=1 | targeted=3 remediated=2 failed=1'
+        Format-CentreonSummary -State 'CRITICAL' -TargetedCount 3 -RemediatedCount 2 -FailureCount 1 -WarningCount 4 -DurationMinutes 12.5 |
+            Should -BeExactly 'CRITICAL - Hyper-V/SCVMM patching: targeted=3 remediated=2 failed=1 warnings=4 | targeted=3 remediated=2 failed=1 warnings=4 duration_min=12.5'
     }
 }
