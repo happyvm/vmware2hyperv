@@ -39,12 +39,13 @@ install-integration-services.bat
 
 - `/reboot` ou `-reboot` : active le redémarrage automatique si le script détecte qu’il est requis.
 - `/noreboot` ou `-noreboot` : force la désactivation du redémarrage automatique (comportement par défaut actuel).
-- `/forcecleanup` : active un nettoyage VMware forcé supplémentaire.
+- `/forcecleanup` : conserve explicitement le nettoyage VMware forcé supplémentaire (activé par défaut).
+- `/noforcecleanup` : désactive le nettoyage VMware forcé si vous voulez uniquement tenter la désinstallation MSI standard.
 
 Exemple :
 
 ```bat
-install-integration-services.bat /reboot /forcecleanup
+install-integration-services.bat /reboot
 ```
 
 ## Journalisation
@@ -68,7 +69,7 @@ Le script crée `C:\temp` si le dossier n’existe pas.
 3. Si VMware détecté : sortie sans action.
 4. Si Hyper‑V détecté :
    1. **Integration Services d’abord** : pour les OS non intégrés (Windows ≤ 6.1), vérifie la présence d’une entrée `Hyper-V Integration Services` / `Integration Services` dans Ajout/Suppression de programmes. Si absente, lance `setup.exe` en **mode non silencieux** (fenêtre d’installation visible) selon l’architecture.
-   2. Désinstalle VMware Tools, puis les agents hardware (HP/HPE/Dell), puis nettoie les devices VMware cachés.
+   2. Désinstalle VMware Tools ; si MSI laisse des résidus, le cleanup VMware forcé est tenté par défaut, puis le script traite les agents hardware (HP/HPE/Dell) et les devices VMware cachés.
 5. Si nécessaire, planifie un reboot uniquement si `/reboot` est fourni (sinon il l’indique sans le déclencher).
 
 ## Recommandations d’exploitation
@@ -82,6 +83,8 @@ Le script crée `C:\temp` si le dossier n’existe pas.
 
 ## Dépannage rapide
 
+- Si des fichiers parasites comme `6.1)` ou `Hyper-V` sont apparus à côté du script, ils viennent d’une ancienne exécution LF-only ; la nouvelle version les supprime automatiquement au démarrage.
+- Si la désinstallation VMware Tools échoue, contrôler le log `RC=...` : après un échec MSI ou une entrée Add/Remove Programs restante, le cleanup VMware forcé est tenté par défaut sauf avec `/noforcecleanup`.
 - Si le script affiche `Hyperviseur detecte (manufacturer): UNKNOWN` et `Modele detecte: UNKNOWN`, il peut s’agir d’un OS legacy où WMIC/BIOS ne remonte pas correctement les infos.
 - Le script tente désormais aussi une détection Hyper‑V via :
   - `HKLM\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters` ;
