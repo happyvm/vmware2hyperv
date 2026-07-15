@@ -22,7 +22,7 @@ set "IS_INSTALL_STATUS=NOT_RUN"
 set "LOG_FILE=C:\temp\vmware2hyperv-postmigration.log"
 set "ENABLE_GENERIC_VMWARE_SERVICE_SWEEP=0"
 set "ENABLE_HIDDEN_DEVICE_CLEANUP=1"
-set "ENABLE_FORCE_VMWARE_CLEANUP=0"
+set "ENABLE_FORCE_VMWARE_CLEANUP=1"
 set "OS_VERSION="
 set "OS_MAJOR="
 set "OS_MINOR="
@@ -37,6 +37,7 @@ if /i "%~1"=="-reboot" set "AUTO_REBOOT=1"
 if /i "%~1"=="/noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="-noreboot" set "AUTO_REBOOT=0"
 if /i "%~1"=="/forcecleanup" set "ENABLE_FORCE_VMWARE_CLEANUP=1"
+if /i "%~1"=="/noforcecleanup" set "ENABLE_FORCE_VMWARE_CLEANUP=0"
 shift
 goto :ParseArgs
 
@@ -44,6 +45,7 @@ goto :ParseArgs
 
 call :InitLog
 call :Log "Debut du script post-migration VMware -> Hyper-V"
+call :CleanupLfCorruptionArtifacts
 
 call :RequireAdmin
 if errorlevel 1 (
@@ -164,6 +166,22 @@ cmd /c "!CMD_TO_RUN!"
 set "CMD_RC=%ERRORLEVEL%"
 call :Log "RC=!CMD_RC!"
 exit /b !CMD_RC!
+
+:CleanupLfCorruptionArtifacts
+REM Si une ancienne copie LF-only a ete lancee sur Windows, cmd.exe peut avoir
+REM interprete les caracteres < et > presents dans les commentaires comme des
+REM redirections et cree des fichiers parasites dans le dossier du script.
+for %%A in ("%~dp06.1)" "%~dp0Hyper-V") do (
+    if exist "%%~A" (
+        del /f /q "%%~A" >nul 2>&1
+        if errorlevel 1 (
+            call :Log "ATTENTION : impossible de supprimer artefact LF-only: %%~A"
+        ) else (
+            call :Log "Artefact LF-only supprime: %%~A"
+        )
+    )
+)
+goto :EOF
 
 :RequireAdmin
 net session >nul 2>&1
@@ -327,7 +345,7 @@ call :Log "Echec desinstallation VMware Tools (code !UNINSTALL_RC!). Tentative c
 if "!ENABLE_FORCE_VMWARE_CLEANUP!"=="1" (
     call :RunVmwareCleanup
 ) else (
-    call :Log "Cleanup force desactive. Aucun fallback agressif applique."
+    call :Log "Cleanup force desactive (/noforcecleanup). Aucun fallback agressif applique."
     set "VMWARE_TOOLS_STATUS=ERROR"
 )
 if /i "!VMWARE_TOOLS_STATUS!"=="CLEANUP_ONLY" (
@@ -345,10 +363,10 @@ if not defined DETECTED_VMWARE_TOOLS_KEY (
 
 call :Log "Verification post-desinstallation: VMware Tools toujours present (cle: !DETECTED_VMWARE_TOOLS_KEY!)."
 if "!ENABLE_FORCE_VMWARE_CLEANUP!"=="1" (
-    call :Log "Option /forcecleanup active : lancement du cleanup force pour supprimer les residus."
+    call :Log "Cleanup force actif : lancement du nettoyage pour supprimer les residus."
     call :RunVmwareCleanup
 ) else (
-    call :Log "Cleanup force desactive. Relancer avec /forcecleanup pour supprimer l'entree restante."
+    call :Log "Cleanup force desactive (/noforcecleanup). Relancer sans cette option pour supprimer l'entree restante."
     set "VMWARE_TOOLS_STATUS=ERROR"
 )
 if /i "!VMWARE_TOOLS_STATUS!"=="CLEANUP_ONLY" set "NEED_REBOOT=1"
