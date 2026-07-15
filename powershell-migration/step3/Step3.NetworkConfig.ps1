@@ -264,10 +264,18 @@ function Set-VmNetworkConfiguration {
                 $matchingByName = @(if ($inventoryCache.VMNetworksByLookupName.ContainsKey($lookupKey)) {
                     @($inventoryCache.VMNetworksByLookupName[$lookupKey])
                 } else {
-                    @($allVMNetworks | Where-Object { $_.Name -eq $mappingNetworkName -or $_.Description -eq $mappingNetworkName })
+                    @($allVMNetworks | Where-Object {
+                        $candidateName = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'Name' -Context 'VMNetwork'
+                        $candidateDescription = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'Description' -Context 'VMNetwork'
+                        $candidateName -eq $mappingNetworkName -or $candidateDescription -eq $mappingNetworkName
+                    })
                 })
                 if (-not $matchingByName) {
-                    $matchingByName = @($allVMNetworks | Where-Object { $_.Name -like "*$mappingNetworkName*" -or $_.Description -like "*$mappingNetworkName*" })
+                    $matchingByName = @($allVMNetworks | Where-Object {
+                        $candidateName = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'Name' -Context 'VMNetwork'
+                        $candidateDescription = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'Description' -Context 'VMNetwork'
+                        $candidateName -like "*$mappingNetworkName*" -or $candidateDescription -like "*$mappingNetworkName*"
+                    })
                 }
                 if ($matchingByName.Count -gt 0) {
                     $selectedByName = $matchingByName | Select-Object -First 1
