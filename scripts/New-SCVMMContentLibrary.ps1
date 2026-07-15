@@ -450,7 +450,7 @@ Run again with -AddLibraryServerIfMissing, or add it first in the SCVMM console.
             }
 
             if (-not $LibraryServerCredential) {
-                throw "Server '$DestinationLibraryServer' must be added to SCVMM, but -LibraryServerCredential was not provided. Run again with -LibraryServerCredential to remain compatible with non-interactive execution."
+                throw "Le serveur '$DestinationLibraryServer' doit être ajouté à SCVMM, mais -LibraryServerCredential n'a pas été fourni. Relancez avec -LibraryServerCredential pour rester compatible avec une exécution non interactive."
             }
 
             Write-Step "Adding $DestinationLibraryServer as Library Server"
