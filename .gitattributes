@@ -1,0 +1,14 @@
+# Windows batch files must keep CRLF in repository archives (GitHub ZIP, SCP, etc.).
+# Windows Server 2016 Notepad/cmd tooling can display or parse LF-only .bat files badly.
+*.bat -text
+
+# Keep PowerShell scripts normalized in Git; Windows checkouts materialize CRLF.
+*.ps1 text eol=crlf
+*.psd1 text eol=crlf
+*.psm1 text eol=crlf
+
+# Documentation and Unix shell scripts stay LF.
+*.md text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
