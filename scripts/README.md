@@ -175,6 +175,60 @@ Use this script from an administrative shell on a server that has the SCVMM Powe
 | `-NoSynchronization` | No | Apply settings without starting WSUS synchronization |
 | `-ForceFullCatalogImport` | No | Start synchronization with a full catalog import |
 
+## Invoke-SCVMMHostPatchBaseline.ps1
+
+**Purpose:** Automate the SCVMM-managed Hyper-V patching cycle from a scheduled task: synchronize the WSUS catalog managed by SCVMM, refresh a patch baseline, assign it to Hyper-V hosts, scan compliance, then remediate hosts with SCVMM maintenance mode and Live Migration.
+
+Run this script from an administrative shell or a Windows scheduled task on a management server with the SCVMM PowerShell module installed. By default, hosts are remediated one by one to preserve cluster capacity while SCVMM live-migrates workloads away from the host being patched.
+
+### Requirements
+
+- Windows PowerShell 5.1
+- Administrator shell / scheduled task account with SCVMM rights to manage updates and hosts
+- SCVMM PowerShell module (`VirtualMachineManager`)
+- A WSUS server already integrated with SCVMM
+- Hyper-V hosts managed by SCVMM, preferably clustered for Live Migration-based evacuation
+
+### Usage
+
+```powershell
+# Dry run before creating the scheduled task
+.\Invoke-SCVMMHostPatchBaseline.ps1 `
+    -VMMServer scvmm01.contoso.local `
+    -BaselineName 'Hyper-V Monthly Security Baseline' `
+    -HostGroupName 'All Hosts\Production\Hyper-V' `
+    -WhatIf
+
+# Command line suitable for a Windows scheduled task action
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Invoke-SCVMMHostPatchBaseline.ps1 `
+    -VMMServer scvmm01.contoso.local `
+    -BaselineName 'Hyper-V Monthly Security Baseline' `
+    -HostGroupName 'All Hosts\Production\Hyper-V'
+
+# Limit the maintenance window to selected hosts
+.\Invoke-SCVMMHostPatchBaseline.ps1 `
+    -VMMServer scvmm01.contoso.local `
+    -BaselineName 'Hyper-V Monthly Security Baseline' `
+    -HostGroupName 'All Hosts\Production\Hyper-V' `
+    -VMHostNames hv01.contoso.local,hv02.contoso.local
+```
+
+### Key parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `-VMMServer` | Yes | SCVMM server to connect to |
+| `-BaselineName` | Yes | Baseline to create or refresh with current update candidates |
+| `-HostGroupName` | Yes | SCVMM host group containing the Hyper-V hosts to patch |
+| `-VMHostNames` | No | Optional allow-list of Hyper-V hosts to process |
+| `-UpdateClassifications` | No | WSUS/SCVMM classifications to include; defaults to security, critical, rollup, and updates |
+| `-IncludeUpdateTitleRegex` | No | Optional regex to keep only matching update titles |
+| `-ExcludeUpdateTitleRegex` | No | Regex to exclude update titles; defaults to previews, language packs, and feature updates |
+| `-SkipSynchronization` | No | Reuse the existing catalog without starting WSUS synchronization |
+| `-SkipRemediation` | No | Refresh baseline and scan compliance only, without patching hosts |
+| `-ParallelRemediation` | No | Remediate all selected hosts in parallel; not recommended unless cluster capacity has been validated |
+
+
 ---
 
 ## New-SCVMMContentLibrary.ps1
