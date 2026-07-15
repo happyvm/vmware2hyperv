@@ -193,7 +193,9 @@ function Connect-VCenter {
 function Disconnect-VCenter {
     param([string]$LogFile)
 
-    Disconnect-VIServer -Confirm:$false -ErrorAction SilentlyContinue
+    # -Server *: Connect-VCenter enforces DefaultVIServerMode Multiple, so several
+    # connections can be open; without it only the default server is disconnected.
+    Disconnect-VIServer -Server * -Confirm:$false -ErrorAction SilentlyContinue
     Write-MigrationLog "Disconnected from vCenter." -Level INFO -LogFile $LogFile
 }
 
@@ -865,6 +867,15 @@ function ConvertTo-Psd1ScalarLiteral {
         $items = @($Value | ForEach-Object { ConvertTo-Psd1ScalarLiteral $_ })
         return "@(" + ($items -join ', ') + ")"
     }
+    # Nested hashtables: config.local.psd1 may carry hand-added structured overrides
+    # (e.g. SCVMM.Network); stringifying them would corrupt the file on the next
+    # wizard run ('System.Collections.Hashtable').
+    if ($Value -is [hashtable]) {
+        $entries = @(foreach ($key in $Value.Keys) {
+            "$key = $(ConvertTo-Psd1ScalarLiteral $Value[$key])"
+        })
+        return "@{ " + ($entries -join '; ') + " }"
+    }
     $escaped = [string]$Value -replace "'", "''"
     return "'$escaped'"
 }
@@ -950,21 +961,29 @@ function Invoke-MigrationConfigWizard {
 
         do {
             $answer = Read-Host "$($entry.Question)$optionalSuffix$suffix"
+            $parseFailed = $false
             $value = if ([string]::IsNullOrWhiteSpace($answer)) {
                 $currentValue
             } else {
                 switch ($entry.Type) {
-                    'Int'        { [int]$answer }
+                    'Int' {
+                        # TryParse instead of a bare [int] cast: an invalid entry must
+                        # re-prompt, not throw out of the wizard (or leave $value stale).
+                        $parsedInt = 0
+                        if ([int]::TryParse($answer.Trim(), [ref]$parsedInt)) { $parsedInt } else { $parseFailed = $true; $null }
+                    }
                     'Bool'       { $answer -match '^(o|oui|y|yes|true|1)$' }
                     'StringList' { @($answer -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
                     default      { $answer }
                 }
             }
             $isEmpty = ($null -eq $value) -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value)) -or ($value -is [array] -and $value.Count -eq 0)
-            if ($isEmpty -and -not $entry.Optional) {
+            if ($parseFailed) {
+                Write-Host "Valeur numérique invalide." -ForegroundColor Yellow
+            } elseif ($isEmpty -and -not $entry.Optional) {
                 Write-Host "Valeur obligatoire." -ForegroundColor Yellow
             }
-        } while ($isEmpty -and -not $entry.Optional)
+        } while ($parseFailed -or ($isEmpty -and -not $entry.Optional))
 
         if (-not $localConfig.ContainsKey($entry.Section)) { $localConfig[$entry.Section] = @{} }
         $localConfig[$entry.Section][$entry.Key] = $value

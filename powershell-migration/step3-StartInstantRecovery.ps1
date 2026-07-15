@@ -178,12 +178,15 @@ foreach ($vmName in $startedVmNames) {
     }
 }
 
+# $elapsed only sums the sleep intervals; the bulk Veeam polls themselves can take
+# a long time, so the timeout is also bounded by wall-clock time.
+$monitorStartedAt = Get-Date
 $elapsed = 0
 while ($true) {
     $pendingNames = @($vmStatuses.Keys | Where-Object { $vmStatuses[$_].Status -eq 'Mounting' } | Sort-Object)
     if (-not $pendingNames) { break }
 
-    if ($elapsed -ge $WaitingTimeoutSeconds) {
+    if ($elapsed -ge $WaitingTimeoutSeconds -or ((Get-Date) - $monitorStartedAt).TotalSeconds -ge $WaitingTimeoutSeconds) {
         foreach ($vmName in $pendingNames) {
             $vmStatuses[$vmName].Status = 'TimedOut'
             Write-MigrationLog "[$vmName] Timeout of $WaitingTimeoutSeconds seconds reached while waiting for WaitingForUserAction." -Level ERROR -LogFile $LogFile

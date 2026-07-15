@@ -189,6 +189,11 @@ while ($true) {
     Write-MigrationLog "[$WorkerName] Starting step3 task for VM '$vmName'." -LogFile $LogFile
 
     try {
+        # 'exit <n>' in a script invoked with '&' ends only that script and never
+        # reaches the catch below; reset then check $LASTEXITCODE so such failures
+        # cannot be silently recorded as a successful task (same guard as
+        # Invoke-OrchestratorStep in run-migration.ps1).
+        $global:LASTEXITCODE = 0
         & $step3ScriptPath `
             -BackupJobName ([string]$task.BackupJobName) `
             -VMName $vmName `
@@ -204,6 +209,10 @@ while ($true) {
             -SkipInstantRecoveryStart:$([bool]$task.SkipInstantRecoveryStart) `
             -ForceNetworkConfigOnly:$([bool]$task.ForceNetworkConfigOnly) `
             -LogFile ([string]$task.VmLogFile)
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "step3-MigrateVM.ps1 ended with exit code $LASTEXITCODE."
+        }
 
         $task | Add-Member -NotePropertyName Status -NotePropertyValue "Success" -Force
         $task | Add-Member -NotePropertyName CompletedAt -NotePropertyValue (Get-Date).ToString("o") -Force

@@ -124,6 +124,13 @@ function Get-CachedScvmmServer {
         [switch]$ForceRefresh
     )
 
+    # StrictMode-safe read: this file is dot-sourced into scopes where
+    # Set-StrictMode -Version Latest is active (step3 modules), and a bare read of
+    # an unset $script: variable would throw "variable cannot be retrieved".
+    if (-not (Get-Variable -Name CachedVmmServer -Scope Script -ErrorAction SilentlyContinue)) {
+        $script:CachedVmmServer = $null
+    }
+
     if (-not $ForceRefresh -and $script:CachedVmmServer) {
         $cachedName = if ($script:CachedVmmServer.PSObject.Properties['Name'] -and $script:CachedVmmServer.Name) {
             [string]$script:CachedVmmServer.Name
@@ -273,7 +280,10 @@ function Get-ScvmmInventoryCache {
         [string]$LogicalSwitch
     )
 
-    if (-not $script:ScvmmInventoryCacheByServer) {
+    # StrictMode-safe initialization: same rationale as in Get-CachedScvmmServer —
+    # a bare read of the unset $script: variable throws under StrictMode (active in
+    # direct mode, where the step3 modules are dot-sourced into a strict scope).
+    if (-not (Get-Variable -Name ScvmmInventoryCacheByServer -Scope Script -ErrorAction SilentlyContinue) -or -not $script:ScvmmInventoryCacheByServer) {
         $script:ScvmmInventoryCacheByServer = @{}
     }
 

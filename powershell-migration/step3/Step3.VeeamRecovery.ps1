@@ -227,6 +227,9 @@ function Wait-InstantRecoveryUserAction {
 
     Write-MigrationLog "[$VMName] Waiting for Instant Recovery mount..." -LogFile $LogFile
 
+    # $elapsed only sums the sleep intervals; the Veeam queries themselves can take
+    # a long time, so the loop is also bounded by wall-clock time.
+    $waitStartedAt = Get-Date
     $elapsed = 0
     do {
         $waitCheck = Invoke-VeeamCommand -ScriptBlock {
@@ -312,7 +315,7 @@ function Wait-InstantRecoveryUserAction {
 
         Start-Sleep -Seconds $WaitingPollIntervalSeconds
         $elapsed += $WaitingPollIntervalSeconds
-    } while ($elapsed -lt $WaitingTimeoutSeconds)
+    } while ($elapsed -lt $WaitingTimeoutSeconds -and ((Get-Date) - $waitStartedAt).TotalSeconds -lt $WaitingTimeoutSeconds)
 
     throw "Timeout of $WaitingTimeoutSeconds seconds reached while waiting for WaitingForUserAction."
 }
@@ -414,6 +417,9 @@ function Complete-InstantRecovery {
 
     Write-MigrationLog "[$VMName] Waiting for restore session to complete..." -LogFile $LogFile
 
+    # Same wall-clock bound as Wait-InstantRecoveryUserAction: $elapsed alone
+    # ignores the duration of the Veeam queries.
+    $waitStartedAt = Get-Date
     $elapsed = 0
     do {
         $check = Invoke-VeeamCommand -ScriptBlock {
@@ -468,7 +474,7 @@ function Complete-InstantRecovery {
 
         Start-Sleep -Seconds $WaitingPollIntervalSeconds
         $elapsed += $WaitingPollIntervalSeconds
-    } while ($elapsed -lt $WaitingTimeoutSeconds)
+    } while ($elapsed -lt $WaitingTimeoutSeconds -and ((Get-Date) - $waitStartedAt).TotalSeconds -lt $WaitingTimeoutSeconds)
 
     throw "Timeout of $WaitingTimeoutSeconds seconds reached while waiting for restore session completion."
 }
