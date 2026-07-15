@@ -1,5 +1,33 @@
 Set-StrictMode -Version Latest
 
+Describe 'Get-ScvmmObjectPropertyValue' {
+    BeforeAll {
+        $modulePath = [System.IO.Path]::GetFullPath(
+            (Join-Path $PWD.Path 'powershell-migration' 'step3' 'Step3.ScvmmSession.Functions.ps1')
+        )
+        . $modulePath
+    }
+
+    It 'returns an existing property value under StrictMode' {
+        $adapter = [pscustomobject]@{ MACAddressString = '00:50:56:AA:BB:CC' }
+
+        Get-ScvmmObjectPropertyValue -InputObject $adapter -PropertyName 'MACAddressString' |
+            Should -Be '00:50:56:AA:BB:CC'
+    }
+
+    It 'returns null for a missing property under StrictMode' {
+        $adapter = [pscustomobject]@{ Name = 'Network Adapter' }
+
+        Get-ScvmmObjectPropertyValue -InputObject $adapter -PropertyName 'MACAddressString' |
+            Should -BeNullOrEmpty
+    }
+
+    It 'returns null for a null input object' {
+        Get-ScvmmObjectPropertyValue -InputObject $null -PropertyName 'MACAddressString' |
+            Should -BeNullOrEmpty
+    }
+}
+
 # Tests for Resolve-ScvmmVlanMapping — pure function, no SCVMM dependency.
 # The function operates on a pre-built inventory cache object (data only).
 # Source: Step3.ScvmmSession.Functions.ps1
