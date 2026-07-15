@@ -28,8 +28,7 @@ function Set-SCVMMOperatingSystem {
         [hashtable]$Context,
 
         [Parameter(Mandatory = $false)]
-        [PSObject]$Result,
-
+        [PSObject]$Result
     )
 
     $Name = $Context.VMName
