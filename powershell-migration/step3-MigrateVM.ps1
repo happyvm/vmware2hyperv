@@ -47,7 +47,7 @@ param (
     [string]$ClusterStorage,
     [string]$VmwareCluster,
     [string]$BackupTag,
-    [int]$WaitingTimeoutSeconds = 1800,
+    [int]$WaitingTimeoutSeconds = 0,
     [int]$WaitingPollIntervalSeconds = 15,
 
     # ── Modes de rejeu lisibles ──────────────────────────────────────────
@@ -84,6 +84,9 @@ $Config = Import-MigrationConfig -ConfigFile "$PSScriptRoot\config.psd1"
 
 if (-not $SCVMMServer)   { $SCVMMServer   = $Config.SCVMM.Server }
 if (-not $LogFile)       { $LogFile       = "$($Config.Paths.LogDir)\step3-migrate-$VMName-$(Get-Date -Format 'yyyyMMdd').log" }
+if (-not $PSBoundParameters.ContainsKey('WaitingTimeoutSeconds')) {
+    $WaitingTimeoutSeconds = [int](Get-MigrationConfigValue -Config $Config -Path 'Timeouts.InstantRecovery.WaitingSeconds' -Default 1800)
+}
 
 $target = Resolve-MigrationTarget -Config $Config -VmwareClusterName $VmwareCluster -LogFile $LogFile
 if (-not $HyperVHost)    { $HyperVHost    = $target.HyperVHost }

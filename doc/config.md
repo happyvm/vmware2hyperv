@@ -193,6 +193,32 @@ IntegrationServices = @{
 
 Integration Services ISO paths by OS family.
 
+### `Timeouts`
+
+```powershell
+Timeouts = @{
+    Shutdown = @{
+        GracefulShutdownSeconds = 300
+        ForcedStopGraceSeconds  = 300
+    }
+    InstantRecovery = @{
+        WaitingSeconds = 1800
+    }
+    LiveMigration = @{
+        ValidationSeconds = 600
+    }
+    Validation = @{
+        WinRmConnectionSeconds = 10
+        WinRmIdleSeconds       = 60
+    }
+}
+```
+
+Central timeout configuration for VM shutdown, Veeam Instant Recovery, live
+migration validation, and the final WinRM connectivity check. Every value is in
+seconds. Command-line timeout parameters remain available for one-off overrides;
+when they are omitted, the scripts use these values.
+
 ### `StartVm`
 
 ```powershell

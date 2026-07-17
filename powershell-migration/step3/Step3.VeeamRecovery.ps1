@@ -221,7 +221,7 @@ function Wait-InstantRecoveryUserAction {
     )
 
     $VMName                     = $Context.VMName
-    $WaitingTimeoutSeconds      = if ($Context.ContainsKey('WaitingTimeoutSeconds'))      { $Context.WaitingTimeoutSeconds      } else { 1800 }
+    $WaitingTimeoutSeconds      = if ($Context.ContainsKey('WaitingTimeoutSeconds'))      { $Context.WaitingTimeoutSeconds      } else { [int](Get-MigrationConfigValue -Config $Context.Config -Path 'Timeouts.InstantRecovery.WaitingSeconds' -Default 1800) }
     $WaitingPollIntervalSeconds = if ($Context.ContainsKey('WaitingPollIntervalSeconds')) { $Context.WaitingPollIntervalSeconds } else { 15 }
     $LogFile                    = $Context.LogFile
 
@@ -357,7 +357,7 @@ function Complete-InstantRecovery {
 
     $VMName                     = $Context.VMName
     $VMMServerName              = $Context.VMMServerName
-    $WaitingTimeoutSeconds      = if ($Context.ContainsKey('WaitingTimeoutSeconds'))      { $Context.WaitingTimeoutSeconds      } else { 1800 }
+    $WaitingTimeoutSeconds      = if ($Context.ContainsKey('WaitingTimeoutSeconds'))      { $Context.WaitingTimeoutSeconds      } else { [int](Get-MigrationConfigValue -Config $Context.Config -Path 'Timeouts.InstantRecovery.WaitingSeconds' -Default 1800) }
     $WaitingPollIntervalSeconds = if ($Context.ContainsKey('WaitingPollIntervalSeconds')) { $Context.WaitingPollIntervalSeconds } else { 15 }
     $LogFile                    = $Context.LogFile
 
