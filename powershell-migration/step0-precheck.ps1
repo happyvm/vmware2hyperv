@@ -672,24 +672,37 @@ try {
 
     Write-ExecutionLog "Starting VM tagging"
 
-    # Single bulk query for the whole category instead of one Get-TagAssignment
+    # Single bulk query scoped to the resolved VMs instead of one Get-TagAssignment
     # call per VM (N+1 avoidance). Entries are indexed by entity Id.
+    # The lookup is scoped with -Entity rather than -Category: querying the whole
+    # category also enumerates non-VM entities such as datastores, and a single
+    # inaccessible datastore makes the entire call throw and forces the slow
+    # per-VM fallback. VM views are converted to VI objects in one bulk call so
+    # -Entity never touches unrelated objects.
     $assignmentsByEntityId = @{}
 
-    try {
-        foreach ($assignment in @(Get-TagAssignment -Category $tagCategory -ErrorAction Stop)) {
-            $entityId = [string]$assignment.Entity.Id
-
-            if (-not $assignmentsByEntityId.ContainsKey($entityId)) {
-                $assignmentsByEntityId[$entityId] = [System.Collections.Generic.List[object]]::new()
-            }
-
-            $assignmentsByEntityId[$entityId].Add($assignment)
-        }
+    $batchVmViews = foreach ($viewList in $vmIndex.Values) { $viewList }
+    $batchVmEntities = @()
+    if (@($batchVmViews).Count -gt 0) {
+        $batchVmEntities = @(Get-VIObjectByVIView -VIView $batchVmViews -ErrorAction SilentlyContinue)
     }
-    catch {
-        Write-ExecutionLog "Bulk tag assignment lookup failed ($($_.Exception.Message)); falling back to per-VM queries." -Level WARN
-        $assignmentsByEntityId = $null
+
+    if ($batchVmEntities.Count -gt 0) {
+        try {
+            foreach ($assignment in @(Get-TagAssignment -Entity $batchVmEntities -Category $tagCategory -ErrorAction Stop)) {
+                $entityId = [string]$assignment.Entity.Id
+
+                if (-not $assignmentsByEntityId.ContainsKey($entityId)) {
+                    $assignmentsByEntityId[$entityId] = [System.Collections.Generic.List[object]]::new()
+                }
+
+                $assignmentsByEntityId[$entityId].Add($assignment)
+            }
+        }
+        catch {
+            Write-ExecutionLog "Bulk tag assignment lookup failed ($($_.Exception.Message)); falling back to per-VM queries." -Level WARN
+            $assignmentsByEntityId = $null
+        }
     }
 
     $script:tagCache   = @{}

@@ -147,17 +147,25 @@ if ($csvVmNames) {
 }
 
 $assignmentsByEntityId = @{}
-try {
-    foreach ($assignment in @(Get-TagAssignment -Category $TagCategory -ErrorAction Stop)) {
-        $entityId = [string]$assignment.Entity.Id
-        if (-not $assignmentsByEntityId.ContainsKey($entityId)) {
-            $assignmentsByEntityId[$entityId] = New-Object System.Collections.ArrayList
+# Scope the bulk lookup to the resolved VMs only. Querying the whole category
+# (Get-TagAssignment -Category) also enumerates non-VM entities such as
+# datastores; a single inaccessible datastore makes the whole call throw and
+# forces the slow per-VM fallback. -Entity keeps it to a single call while
+# never touching unrelated objects.
+$batchVmEntities = @($vmsByName.Values)
+if ($batchVmEntities.Count -gt 0) {
+    try {
+        foreach ($assignment in @(Get-TagAssignment -Entity $batchVmEntities -Category $TagCategory -ErrorAction Stop)) {
+            $entityId = [string]$assignment.Entity.Id
+            if (-not $assignmentsByEntityId.ContainsKey($entityId)) {
+                $assignmentsByEntityId[$entityId] = New-Object System.Collections.ArrayList
+            }
+            [void]$assignmentsByEntityId[$entityId].Add($assignment)
         }
-        [void]$assignmentsByEntityId[$entityId].Add($assignment)
+    } catch {
+        Write-MigrationLog "Bulk tag assignment lookup failed ($($_.Exception.Message)); falling back to per-VM queries." -Level WARNING -LogFile $LogFile
+        $assignmentsByEntityId = $null
     }
-} catch {
-    Write-MigrationLog "Bulk tag assignment lookup failed ($($_.Exception.Message)); falling back to per-VM queries." -Level WARNING -LogFile $LogFile
-    $assignmentsByEntityId = $null
 }
 
 $processedVmNames = New-Object 'System.Collections.Generic.HashSet[string]'
