@@ -142,7 +142,7 @@ function Disconnect-VmNetworkAdapters {
 }
 
 $vmStates = @{}
-$timeoutSeconds = 300
+$timeoutSeconds = [int](Get-MigrationConfigValue -Config $Config -Path 'Timeouts.Shutdown.GracefulShutdownSeconds' -Default 300)
 $pollIntervalSeconds = 10
 $startTime = Get-Date
 
@@ -176,7 +176,7 @@ foreach ($vmEntry in $vmList) {
 if ($vmStates.Count -gt 0) {
     # Escape hatch: after the graceful timeout plus this grace period following forced
     # power-off, abort instead of looping forever on a VM that will not shut down.
-    $forcedStopGraceSeconds = 300
+    $forcedStopGraceSeconds = [int](Get-MigrationConfigValue -Config $Config -Path 'Timeouts.Shutdown.ForcedStopGraceSeconds' -Default 300)
 
     do {
         $allPoweredOff = $true

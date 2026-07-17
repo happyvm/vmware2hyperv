@@ -281,8 +281,13 @@ function Test-VmWinRmConnectivity {
     param(
         [string]$VMName,
         [string[]]$IPAddresses,
-        [int]$TimeoutSeconds = 10
+        [int]$TimeoutSeconds = 0
     )
+
+    if ($TimeoutSeconds -le 0) {
+        $TimeoutSeconds = [int](Get-MigrationConfigValue -Config $Config -Path 'Timeouts.Validation.WinRmConnectionSeconds' -Default 10)
+    }
+    $idleTimeoutSeconds = [int](Get-MigrationConfigValue -Config $Config -Path 'Timeouts.Validation.WinRmIdleSeconds' -Default 60)
 
     if (-not $IPAddresses -or $IPAddresses.Count -eq 0) {
         return [pscustomobject]@{ Reachable = $false; Error = 'No IP addresses' }
@@ -301,7 +306,7 @@ function Test-VmWinRmConnectivity {
             if ($credential) { $params.Credential = $credential }
 
             $sessionOption = New-PSSessionOption -OpenTimeout ($TimeoutSeconds * 1000) `
-                -OperationTimeout ($TimeoutSeconds * 1000) -IdleTimeout 60000
+                -OperationTimeout ($TimeoutSeconds * 1000) -IdleTimeout ($idleTimeoutSeconds * 1000)
             $session = New-PSSession @params -SessionOption $sessionOption
             if ($session) {
                 Remove-PSSession -Session $session -ErrorAction SilentlyContinue

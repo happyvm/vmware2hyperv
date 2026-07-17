@@ -56,7 +56,7 @@ param (
     # Pause between two Start-VBRHvInstantRecovery calls to smooth the load on Veeam/mount hosts
     [int]$StartDelaySeconds = 2,
 
-    [int]$WaitingTimeoutSeconds = 1800,
+    [int]$WaitingTimeoutSeconds = 0,
     [int]$WaitingPollIntervalSeconds = 15,
     [string]$LogFile
 )
@@ -69,6 +69,9 @@ Get-ChildItem "$PSScriptRoot\step3\Step3.*.ps1" |
     Where-Object Name -ne 'Step3.ScvmmSession.Functions.ps1' |
     ForEach-Object { . $_.FullName }
 $Config = Import-MigrationConfig -ConfigFile "$PSScriptRoot\config.psd1"
+if (-not $PSBoundParameters.ContainsKey('WaitingTimeoutSeconds')) {
+    $WaitingTimeoutSeconds = [int](Get-MigrationConfigValue -Config $Config -Path 'Timeouts.InstantRecovery.WaitingSeconds' -Default 1800)
+}
 
 if (-not $LogFile) { $LogFile = "$($Config.Paths.LogDir)\step3-ir-start-$(Get-Date -Format 'yyyyMMdd-HHmmss').log" }
 

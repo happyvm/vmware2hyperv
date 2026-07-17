@@ -193,7 +193,7 @@ function Move-VmToSecondHost {
         }
 
         $destinationHostNormalized = ConvertTo-NormalizedHostName -Name $DestinationHost
-        $migrationValidationTimeoutSeconds = 600
+        $migrationValidationTimeoutSeconds = [int](Get-MigrationConfigValue -Config $Context.Config -Path 'Timeouts.LiveMigration.ValidationSeconds' -Default 600)
         $migrationValidationPollIntervalSeconds = 15
         $migrationValidationElapsedSeconds = 0
         $migrationValidated = $false

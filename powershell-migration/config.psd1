@@ -141,6 +141,25 @@
         BackupProxy = "" # Optional: Veeam backup proxy name used when creating jobs
     }
 
+    # Centralized timeouts used by the migration pipeline. Values are expressed in
+    # seconds so operators no longer need to edit the scripts themselves.
+    Timeouts = @{
+        Shutdown = @{
+            GracefulShutdownSeconds = 300
+            ForcedStopGraceSeconds  = 300
+        }
+        InstantRecovery = @{
+            WaitingSeconds = 1800
+        }
+        LiveMigration = @{
+            ValidationSeconds = 600
+        }
+        Validation = @{
+            WinRmConnectionSeconds = 10
+            WinRmIdleSeconds       = 60
+        }
+    }
+
     Tags = @{
         Category  = "HypV-Migration"           # VMware tag category for migration
         BackupTag = "TAGforbackupsolution"      # Tag applied to VMs after migration
