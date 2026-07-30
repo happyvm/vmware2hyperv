@@ -15,9 +15,9 @@ Step 2 de la pipeline de migration :
 1. **Arrêt des VMs** : shutdown graceful de toutes les VMs du lot
 2. **Déconnexion réseau** : déconnecte les NICs des VMs arrêtées
 3. **Email pré-migration** : notifie les destinataires configurés (liste des VMs du tag et leur état)
-4. **Backup Veeam** : démarre le job de backup et attend sa complétion
+4. **Backup Veeam** : démarre un active full du job de backup
 
-En PowerShell 7, le démarrage du job Veeam est délégué à `powershell.exe` (Windows PowerShell).
+Le job est toujours lancé avec `Start-VBRJob -FullBackup` : chaque migration produit donc un active full et ne dépend pas du CBT pour une chaîne incrémentale. En PowerShell 7, ce démarrage est délégué à `powershell.exe` (Windows PowerShell).
 
 L'envoi de l'email pré-migration est géré directement par ce script (plus de script externe séparé) et peut être désactivé globalement via `Config.Smtp.Enabled = $false`. Un échec de l'email (destinataire invalide, tag introuvable, SMTP indisponible...) est non bloquant : il est loggé en WARNING et le backup Veeam continue.
 

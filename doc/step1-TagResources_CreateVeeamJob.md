@@ -14,7 +14,7 @@ Step 1 de la pipeline de migration :
 
 1. **Tag VMware** : lit le CSV batch, applique les tags vSphere aux VMs listées
 2. **Nettoyage** : supprime les assignations de tag précédentes avant d'appliquer les nouvelles
-3. **Job Veeam** : crée ou met à jour les jobs de backup Veeam correspondants
+3. **Job Veeam** : crée ou met à jour les jobs de backup Veeam correspondants et désactive leur CBT
 
 En PowerShell 7, le script délègue la création des jobs Veeam à `powershell.exe` (Windows PowerShell) pour éviter les conflits d'assembly `VimService` entre VMware et Veeam et les objets désérialisés.
 
@@ -47,8 +47,13 @@ En PowerShell 7, le script délègue la création des jobs Veeam à `powershell.
 │ 3. Pour chaque tag unique du CSV :                    │
 │    - Cherche le tag dans l'inventaire Veeam/VMware    │
 │    - Crée le job "Backup-{tag}" s'il n'existe pas    │
+│    - Désactive Use CBT et Enable CBT sur le job        │
 └───────────────────────────────────────────────────────┘
 ```
+
+## Configuration CBT
+
+Après avoir créé ou retrouvé chaque job, le script désactive les deux options VMware `UseChangeTracking` et `EnableChangeTracking`, puis sauvegarde les options avec `Set-VBRJobOptions`. Cette mise à jour s’applique donc aussi aux jobs existants qui avaient encore le CBT activé.
 
 ## Détail : délégation Windows PowerShell
 
