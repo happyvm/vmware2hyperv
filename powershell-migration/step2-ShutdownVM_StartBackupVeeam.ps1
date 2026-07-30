@@ -299,8 +299,8 @@ if (-not $job) {
     exit 1
 }
 
-Start-VBRJob -Job $job | Out-Null
-Write-Output "[SUCCESS] Job Veeam '$JobName' started successfully."
+Start-VBRJob -Job $job -FullBackup | Out-Null
+Write-Output "[SUCCESS] Veeam active full backup '$JobName' started successfully."
 '@
 
     $encodedScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($startJobScript))
@@ -333,8 +333,8 @@ Write-Output "[SUCCESS] Job Veeam '$JobName' started successfully."
 } else {
     $Job = Get-VBRJob -Name $JobName
     if ($Job) {
-        Start-VBRJob -Job $Job | Out-Null
-        Write-MigrationLog "Job Veeam '$JobName' started successfully." -Level SUCCESS -LogFile $LogFile
+        Start-VBRJob -Job $Job -FullBackup | Out-Null
+        Write-MigrationLog "Veeam active full backup '$JobName' started successfully." -Level SUCCESS -LogFile $LogFile
     } else {
         $message = "Job '$JobName' not found in Veeam."
         Write-MigrationLog $message -Level ERROR -LogFile $LogFile
