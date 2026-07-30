@@ -240,6 +240,20 @@ if ($tags -isnot [System.Array]) {
     $tags = @($tags)
 }
 
+function Disable-VBRJobCbt {
+    param([Parameter(Mandatory = $true)]$Job)
+
+    $jobOptions = Get-VBRJobOptions -Job $Job -ErrorAction Stop
+    $jobOptions.ViSourceOptions.UseChangeTracking = $false
+    $jobOptions.ViSourceOptions.EnableChangeTracking = $false
+    Set-VBRJobOptions -Job $Job -Options $jobOptions -ErrorAction Stop | Out-Null
+
+    $savedOptions = Get-VBRJobOptions -Job $Job -ErrorAction Stop
+    if ($savedOptions.ViSourceOptions.UseChangeTracking -or $savedOptions.ViSourceOptions.EnableChangeTracking) {
+        throw "Veeam did not persist the disabled CBT settings for job '$($Job.Name)'."
+    }
+}
+
 foreach ($tagName in $tags) {
     $vmwareTag = $availableVeeamTags | Where-Object { $_.Name -eq $tagName } | Select-Object -First 1
     if (-not $vmwareTag) {
@@ -252,14 +266,17 @@ foreach ($tagName in $tags) {
 
     if (-not $job) {
         if ($backupProxy) {
-            Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag -Proxy $backupProxy | Out-Null
+            $job = Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag -Proxy $backupProxy
         } else {
-            Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
+            $job = Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag
         }
         Write-Output "[SUCCESS] Created backup job: $jobName"
     } else {
         Write-Output "[INFO] The job $jobName already exists."
     }
+
+    Disable-VBRJobCbt -Job $job
+    Write-Output "[SUCCESS] Disabled CBT for backup job: $jobName"
 }
 '@
 
@@ -316,6 +333,20 @@ $backupProxy = $null
         Write-MigrationLog "Using backup proxy '$BackupProxyName' for newly created jobs." -LogFile $LogFile
     }
 
+    function Disable-VBRJobCbt {
+        param([Parameter(Mandatory = $true)]$Job)
+
+        $jobOptions = Get-VBRJobOptions -Job $Job -ErrorAction Stop
+        $jobOptions.ViSourceOptions.UseChangeTracking = $false
+        $jobOptions.ViSourceOptions.EnableChangeTracking = $false
+        Set-VBRJobOptions -Job $Job -Options $jobOptions -ErrorAction Stop | Out-Null
+
+        $savedOptions = Get-VBRJobOptions -Job $Job -ErrorAction Stop
+        if ($savedOptions.ViSourceOptions.UseChangeTracking -or $savedOptions.ViSourceOptions.EnableChangeTracking) {
+            throw "Veeam did not persist the disabled CBT settings for job '$($Job.Name)'."
+        }
+    }
+
     foreach ($tagName in $csvTags) {
         $vmwareTag = $availableVeeamTags | Where-Object { $_.Name -eq $tagName } | Select-Object -First 1
         if (-not $vmwareTag) {
@@ -329,13 +360,16 @@ $backupProxy = $null
         if (-not $job) {
             Write-MigrationLog "Creating backup job: $jobName" -LogFile $LogFile
             if ($backupProxy) {
-                Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag -Proxy $backupProxy | Out-Null
+                $job = Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag -Proxy $backupProxy
             } else {
-                Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag | Out-Null
+                $job = Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag
             }
         } else {
             Write-MigrationLog "The job $jobName already exists." -LogFile $LogFile
         }
+
+        Disable-VBRJobCbt -Job $job
+        Write-MigrationLog "Disabled CBT for backup job: $jobName" -Level SUCCESS -LogFile $LogFile
     }
 }
 
