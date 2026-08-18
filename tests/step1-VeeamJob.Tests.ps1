@@ -31,7 +31,7 @@ Describe 'step1 Veeam job creation' {
     It 'makes the Windows PowerShell child process fail closed on Veeam errors' {
         $source | Should -Match '(?m)^\$ErrorActionPreference\s*=\s*''Stop''$'
         $source | Should -Match '(?m)^\s*Write-Output "\[ERROR\] \$\(\$_.Exception.Message\)"$'
-        $source | Should -Match "(?m)^\s*exit 1$"
-        $source | Should -Match "\^\\\[ERROR\\\]\\s\+\(\.\*\)\\\$"
+        $source | Should -Match '(?m)^\s*exit 1$'
+        $source | Should -Match ([regex]::Escape('if ($line -match ''^\[ERROR\]\s+(.*)$'')'))
     }
 }
