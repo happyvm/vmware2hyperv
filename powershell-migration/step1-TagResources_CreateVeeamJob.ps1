@@ -219,9 +219,12 @@ $VCenterServer = $env:VMW2HV_VCENTER_SERVER
 $TagsJson = $env:VMW2HV_TAGS_JSON
 $BackupProxyName = $env:VMW2HV_BACKUP_PROXY_NAME
 
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
 Import-Module Veeam.Backup.PowerShell -DisableNameChecking -ErrorAction Stop
 $backupRepo = Get-VBRBackupRepository -Name $BackupRepoName -ErrorAction Stop
-$availableVeeamTags = Find-VBRViEntity -Tags -Server $VCenterServer
+$availableVeeamTags = Find-VBRViEntity -Tags -Server $VCenterServer -ErrorAction Stop
 $backupProxy = $null
 if (-not [string]::IsNullOrWhiteSpace($BackupProxyName)) {
     $backupProxy = Get-VBRViProxy -Name $BackupProxyName -ErrorAction SilentlyContinue
@@ -229,7 +232,7 @@ if (-not [string]::IsNullOrWhiteSpace($BackupProxyName)) {
         Write-Output "[ERROR] Backup proxy '$BackupProxyName' not found in Veeam."
         exit 1
     }
-    Write-Output "[INFO] Using backup proxy '$BackupProxyName' for newly created jobs."
+    Write-Output "[INFO] Using backup proxy '$BackupProxyName' for Veeam jobs."
 }
 $tags = @()
 if (-not [string]::IsNullOrWhiteSpace($TagsJson)) {
@@ -254,29 +257,38 @@ function Disable-VBRJobCbt {
     }
 }
 
-foreach ($tagName in $tags) {
-    $vmwareTag = $availableVeeamTags | Where-Object { $_.Name -eq $tagName } | Select-Object -First 1
-    if (-not $vmwareTag) {
-        Write-Output "[WARNING] Tag '$tagName' not found in VMware/Veeam inventory. Skipping job creation for this tag."
-        continue
-    }
-
-    $jobName = "Backup-$tagName"
-    $job = Get-VBRJob -Name $jobName -ErrorAction SilentlyContinue
-
-    if (-not $job) {
-        if ($backupProxy) {
-            $job = Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag -Proxy $backupProxy
-        } else {
-            $job = Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag
+try {
+    foreach ($tagName in $tags) {
+        $vmwareTag = $availableVeeamTags | Where-Object { $_.Name -eq $tagName } | Select-Object -First 1
+        if (-not $vmwareTag) {
+            Write-Output "[WARNING] Tag '$tagName' not found in VMware/Veeam inventory. Skipping job creation for this tag."
+            continue
         }
-        Write-Output "[SUCCESS] Created backup job: $jobName"
-    } else {
-        Write-Output "[INFO] The job $jobName already exists."
-    }
 
-    Disable-VBRJobCbt -Job $job
-    Write-Output "[SUCCESS] Disabled CBT for backup job: $jobName"
+        $jobName = "Backup-$tagName"
+        $job = Get-VBRJob -Name $jobName -ErrorAction SilentlyContinue
+
+        if (-not $job) {
+            $job = Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag -ErrorAction Stop
+            if (-not $job) {
+                throw "Add-VBRViBackupJob returned no job for '$jobName'."
+            }
+            Write-Output "[SUCCESS] Created backup job: $jobName"
+        } else {
+            Write-Output "[INFO] The job $jobName already exists."
+        }
+
+        if ($backupProxy) {
+            Set-VBRJobProxy -Job $job -Proxy $backupProxy -ErrorAction Stop | Out-Null
+            Write-Output "[SUCCESS] Assigned backup proxy '$BackupProxyName' to job: $jobName"
+        }
+
+        Disable-VBRJobCbt -Job $job
+        Write-Output "[SUCCESS] Disabled CBT for backup job: $jobName"
+    }
+} catch {
+    Write-Output "[ERROR] $($_.Exception.Message)"
+    exit 1
 }
 '@
 
@@ -303,7 +315,9 @@ foreach ($tagName in $tags) {
     }
 
     foreach ($line in $winPsOutput) {
-        if ($line -match '^\[WARNING\]\s+(.*)$') {
+        if ($line -match '^\[ERROR\]\s+(.*)$') {
+            Write-MigrationLog $Matches[1] -Level ERROR -LogFile $LogFile
+        } elseif ($line -match '^\[WARNING\]\s+(.*)$') {
             Write-MigrationLog $Matches[1] -Level WARNING -LogFile $LogFile
         } elseif ($line -match '^\[SUCCESS\]\s+(.*)$') {
             Write-MigrationLog $Matches[1] -Level SUCCESS -LogFile $LogFile
@@ -322,7 +336,7 @@ foreach ($tagName in $tags) {
 } else {
     $backupRepo = Get-VBRBackupRepository -Name $BackupRepoName
     $availableVeeamTags = Find-VBRViEntity -Tags -Server $VCenterServer
-$backupProxy = $null
+    $backupProxy = $null
     if (-not [string]::IsNullOrWhiteSpace($BackupProxyName)) {
         $backupProxy = Get-VBRViProxy -Name $BackupProxyName -ErrorAction SilentlyContinue
         if (-not $backupProxy) {
@@ -330,7 +344,7 @@ $backupProxy = $null
             Write-MigrationLog $message -Level ERROR -LogFile $LogFile
             throw $message
         }
-        Write-MigrationLog "Using backup proxy '$BackupProxyName' for newly created jobs." -LogFile $LogFile
+        Write-MigrationLog "Using backup proxy '$BackupProxyName' for Veeam jobs." -LogFile $LogFile
     }
 
     function Disable-VBRJobCbt {
@@ -359,13 +373,20 @@ $backupProxy = $null
 
         if (-not $job) {
             Write-MigrationLog "Creating backup job: $jobName" -LogFile $LogFile
-            if ($backupProxy) {
-                $job = Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag -Proxy $backupProxy
-            } else {
-                $job = Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag
+            $job = Add-VBRViBackupJob -Name $jobName -Description "Backup for tag $tagName" -BackupRepository $backupRepo -Entity $vmwareTag -ErrorAction Stop
+            if (-not $job) {
+                $message = "Add-VBRViBackupJob returned no job for '$jobName'."
+                Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+                throw $message
             }
+            Write-MigrationLog "Created backup job: $jobName" -Level SUCCESS -LogFile $LogFile
         } else {
             Write-MigrationLog "The job $jobName already exists." -LogFile $LogFile
+        }
+
+        if ($backupProxy) {
+            Set-VBRJobProxy -Job $job -Proxy $backupProxy -ErrorAction Stop | Out-Null
+            Write-MigrationLog "Assigned backup proxy '$BackupProxyName' to job: $jobName" -Level SUCCESS -LogFile $LogFile
         }
 
         Disable-VBRJobCbt -Job $job
