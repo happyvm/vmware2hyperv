@@ -1139,7 +1139,74 @@ function ConvertTo-NormalizedOperatingSystemName {
 }
 
 # ---------------------------------------------------------------------------
+# Get-OperatingSystemFamilyKey : '<distribution> <major version>' for an OS label
+#
+# Linux inventories name the same OS a dozen ways -- 'Red Hat Enterprise Linux
+# 8.6', 'Red Hat Enterprise Linux ES 7.9', 'Red Hat Enterprise Linux 8
+# (64-bit)' (vCenter guest id), 'Red Hat Enterprise Linux release 8.9 (Ootpa)'
+# (VMware Tools) -- while the SCVMM side only ever distinguishes the MAJOR
+# version. Reducing a label to '<family> <major>' gives the mapping table a
+# single key per distribution family instead of one key per minor release.
+#
+# Windows labels carry their version in the MIDDLE ('windows server 2019
+# datacenter'), so only a TRAILING version is recognised: Windows entries
+# return $null here and keep resolving by exact match alone, where the edition
+# (Datacenter vs Standard) is what distinguishes them.
+# ---------------------------------------------------------------------------
+function Get-OperatingSystemFamilyKey {
+    param(
+        [AllowNull()]
+        [string]$Name
+    )
+
+    $normalized = ConvertTo-NormalizedOperatingSystemName -Name $Name
+    if ([string]::IsNullOrWhiteSpace($normalized)) {
+        return $null
+    }
+
+    # Parenthesised qualifiers: bitness '(64-bit)' from vCenter guest ids and
+    # release code names '(Ootpa)' from VMware Tools.
+    $stripped = $normalized -replace '\([^)]*\)', ' '
+
+    # Bare architecture/bitness tokens.
+    $stripped = $stripped -replace '\b(?:x86 64|amd64|i386|x64|x86|32 bit|64 bit|bit)\b', ' '
+
+    # Edition/noise tokens that differ between inventories for the same OS:
+    # 'ES 7.9', 'Server 7.9' and 'release 7.9' all mean RHEL 7.
+    $stripped = $stripped -replace '\b(?:release|edition|es|as|ws|server)\b', ' '
+
+    $stripped = ($stripped -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($stripped)) {
+        return $null
+    }
+
+    # [regex]::Match with named groups rather than -match/$Matches: $Matches is a
+    # shared automatic variable, and reading it a few lines after the test is a
+    # needless dependency on nothing else having written to it in between.
+    $versionMatch = [regex]::Match($stripped, '^(?<family>.*?)\s+(?<version>\d+(?:\.\d+)*)$')
+    if (-not $versionMatch.Success) {
+        return $null
+    }
+
+    $family = $versionMatch.Groups['family'].Value.Trim()
+    if ([string]::IsNullOrWhiteSpace($family)) {
+        return $null
+    }
+
+    $major = ($versionMatch.Groups['version'].Value -split '\.')[0]
+    return "$family $major"
+}
+
+# ---------------------------------------------------------------------------
 # Resolve-OperatingSystemMapping : resolve a source OS value to an SCVMM OS name
+#
+# Two passes, in order:
+#   1. Exact match after normalisation. Config always wins, so a minor-specific
+#      entry ('Red Hat Enterprise Linux ES 7.3' -> 'Red Hat Enterprise Linux
+#      7.3 (64 bit)') keeps overriding the family default.
+#   2. Family fallback on '<distribution> <major>'. Without it, the table had to
+#      enumerate EVERY minor release, and any RHEL minor the operator had not
+#      listed silently resolved to nothing.
 # ---------------------------------------------------------------------------
 function Resolve-OperatingSystemMapping {
     param(
@@ -1157,6 +1224,18 @@ function Resolve-OperatingSystemMapping {
     foreach ($entry in $OperatingSystemMap.GetEnumerator()) {
         $entryKey = ConvertTo-NormalizedOperatingSystemName -Name ([string]$entry.Key)
         if ($entryKey -eq $normalized) {
+            return [string]$entry.Value
+        }
+    }
+
+    $familyKey = Get-OperatingSystemFamilyKey -Name $OperatingSystem
+    if ([string]::IsNullOrWhiteSpace($familyKey)) {
+        return $null
+    }
+
+    foreach ($entry in $OperatingSystemMap.GetEnumerator()) {
+        $entryKey = ConvertTo-NormalizedOperatingSystemName -Name ([string]$entry.Key)
+        if ($entryKey -eq $familyKey) {
             return [string]$entry.Value
         }
     }

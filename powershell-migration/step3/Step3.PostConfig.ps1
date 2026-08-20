@@ -47,8 +47,17 @@ function Set-SCVMMOperatingSystem {
 
     $targetOperatingSystem = Resolve-OperatingSystemMapping -OperatingSystem $SourceOperatingSystem -OperatingSystemMap $OperatingSystemMap
     if ([string]::IsNullOrWhiteSpace($targetOperatingSystem)) {
+        # Name both keys that were looked up: the operator can then add the exact
+        # line that is missing from SCVMM.OperatingSystemMap instead of guessing
+        # which spelling the resolver expects.
         $normalizedOperatingSystem = ConvertTo-NormalizedOperatingSystemName -Name $SourceOperatingSystem
-        Write-MigrationLog "[$Name] No SCVMM OS mapping found for '$normalizedOperatingSystem'." -Level WARNING -LogFile $LogFile
+        $familyKey = Get-OperatingSystemFamilyKey -Name $SourceOperatingSystem
+        $familyHint = if ([string]::IsNullOrWhiteSpace($familyKey)) {
+            "no family key could be derived from this label"
+        } else {
+            "no family default '$familyKey' either"
+        }
+        Write-MigrationLog "[$Name] No SCVMM OS mapping found for '$normalizedOperatingSystem' ($familyHint). Add an entry to SCVMM.OperatingSystemMap in config.psd1." -Level WARNING -LogFile $LogFile
         return
     }
 
@@ -63,7 +72,22 @@ function Set-SCVMMOperatingSystem {
         $scvmmOperatingSystems = Get-SCOperatingSystem -VMMServer $server
         $scvmmOperatingSystem = $scvmmOperatingSystems | Where-Object { $_.Name -eq $TargetOperatingSystemName } | Select-Object -First 1
         if (-not $scvmmOperatingSystem) {
-            throw "Operating system '$TargetOperatingSystemName' not found in SCVMM."
+            # The map VALUE has to match an SCVMM OS name character for character.
+            # A near-miss ('(64-bit)' vs '(64 bit)', a stray plural) is the second
+            # way OS mapping fails, and an unqualified "not found" gives the
+            # operator nothing to act on -- so list what SCVMM actually offers.
+            $firstWord = ([string]$TargetOperatingSystemName -split '\s+' | Where-Object { $_ })[0]
+            $closeNames = @($scvmmOperatingSystems |
+                Where-Object { [string]$_.Name -like "*$firstWord*" } |
+                ForEach-Object { [string]$_.Name } |
+                Sort-Object -Unique |
+                Select-Object -First 10)
+            $candidateHint = if ($closeNames.Count -gt 0) {
+                " Closest SCVMM names: $($closeNames -join ' | ')."
+            } else {
+                " No SCVMM operating system name contains '$firstWord'."
+            }
+            throw "Operating system '$TargetOperatingSystemName' not found in SCVMM. Fix the value in SCVMM.OperatingSystemMap (config.psd1) so it matches an SCVMM name exactly.$candidateHint"
         }
 
         $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server | Where-Object { $_.VirtualizationPlatform -eq 'HyperV' } | Select-Object -First 1

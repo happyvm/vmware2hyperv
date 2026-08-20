@@ -51,7 +51,8 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 | Fonction | Description |
 |----------|-------------|
 | `ConvertTo-NormalizedOperatingSystemName` | Normalise un label OS (case, séparateurs, préfixe Microsoft) |
-| `Resolve-OperatingSystemMapping` | Mappe un OS source vers un OS SCVMM |
+| `Get-OperatingSystemFamilyKey` | Réduit un label OS à `"<distribution> <version majeure>"` (`RHEL 8.6`, `RHEL 8 (64-bit)`, `RHEL release 8.9 (Ootpa)` → `red hat enterprise linux 8`). Retourne `$null` pour Windows, dont la version n'est pas en fin de label |
+| `Resolve-OperatingSystemMapping` | Mappe un OS source vers un OS SCVMM : correspondance exacte, puis repli sur la clé de famille. Voir [config.md](config.md#operatingsystemmap) |
 | `Get-OsGeneration` | Extrait l'année de release (2003-2025) d'un nom d'OS |
 
 ### VLAN

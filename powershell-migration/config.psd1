@@ -90,6 +90,17 @@
             "Windows Server 2003 R2 Enterprise x64 Edition"    = "Windows Server 2003 Enterprise x64 Edition"
 
             # Linux
+            #
+            # Family defaults: matched on "<distribution> <major version>" when no
+            # exact entry above matches. They cover every minor release of a family
+            # in one line -- 8.0 through 8.10, listed or not -- because SCVMM only
+            # distinguishes the major version anyway. Minor-specific entries below
+            # still win, since exact matches are tried first.
+            "Red Hat Enterprise Linux 6"                       = "Red Hat Enterprise Linux 6 (64 bit)"
+            "Red Hat Enterprise Linux 7"                       = "Red Hat Enterprise Linux 7 (64 bit)"
+            "Red Hat Enterprise Linux 8"                       = "Red Hat Enterprise Linux 8 (64 bit)"
+            "Red Hat Enterprise Linux 9"                       = "Red Hat Enterprise Linux 9 (64 bit)"
+
             "Red Hat Enterprise Linux ES 7.9"                  = "Red Hat Enterprise Linux 7 (64 bit)"
             "Red Hat Enterprise Linux ES 7.7"                  = "Red Hat Enterprise Linux 7 (64 bit)"
             "Red Hat Enterprise Linux ES 7.3"                  = "Red Hat Enterprise Linux 7.3 (64 bit)"
