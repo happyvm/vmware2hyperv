@@ -146,18 +146,30 @@ if ($csvVmNames) {
     }
 }
 
+# Scoped to the batch VMs rather than to the whole category. A bare
+# 'Get-TagAssignment -Category' walks EVERY tagged object in vCenter, including
+# the CNS/First Class Disk volumes a Kubernetes CSI driver creates
+# ('pvc-<guid>'), and PowerCLI throws "An item with the same key has already
+# been added" on those - which pushed this step onto its per-VM fallback (one
+# vCenter round-trip per VM) on every single run. Passing -Entity keeps the
+# single-call behaviour and never touches the objects that trigger the defect.
 $assignmentsByEntityId = @{}
-try {
-    foreach ($assignment in @(Get-TagAssignment -Category $TagCategory -ErrorAction Stop)) {
-        $entityId = [string]$assignment.Entity.Id
-        if (-not $assignmentsByEntityId.ContainsKey($entityId)) {
-            $assignmentsByEntityId[$entityId] = New-Object System.Collections.ArrayList
-        }
-        [void]$assignmentsByEntityId[$entityId].Add($assignment)
-    }
-} catch {
-    Write-MigrationLog "Bulk tag assignment lookup failed ($($_.Exception.Message)); falling back to per-VM queries." -Level WARNING -LogFile $LogFile
+$batchVmObjects = @($vmsByName.Values)
+if ($batchVmObjects.Count -eq 0) {
     $assignmentsByEntityId = $null
+} else {
+    try {
+        foreach ($assignment in @(Get-TagAssignment -Entity $batchVmObjects -Category $TagCategory -ErrorAction Stop)) {
+            $entityId = [string]$assignment.Entity.Id
+            if (-not $assignmentsByEntityId.ContainsKey($entityId)) {
+                $assignmentsByEntityId[$entityId] = New-Object System.Collections.ArrayList
+            }
+            [void]$assignmentsByEntityId[$entityId].Add($assignment)
+        }
+    } catch {
+        Write-MigrationLog "Bulk tag assignment lookup failed ($($_.Exception.Message)); falling back to per-VM queries." -Level WARNING -LogFile $LogFile
+        $assignmentsByEntityId = $null
+    }
 }
 
 $processedVmNames = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -195,20 +207,30 @@ foreach ($entry in $csvData) {
         $vmEntityId = [string]$vm.Id
         if ($assignmentsByEntityId.ContainsKey($vmEntityId)) { @($assignmentsByEntityId[$vmEntityId]) } else { @() }
     } else {
-        # .Category is a TagCategory object: comparing it with -eq against the
-        # category NAME never matches, so the fallback used to remove nothing and
-        # New-TagAssignment then failed on a Single-cardinality category.
-        @(Get-TagAssignment -Entity $vm -ErrorAction SilentlyContinue | Where-Object { [string]$_.Tag.Category.Name -eq $TagCategory })
+        @(Get-TagAssignment -Entity $vm -ErrorAction SilentlyContinue |
+            Where-Object { (Get-VmwareTagCategoryName -Category $_.Tag.Category) -eq $TagCategory })
     }
-    foreach ($existingAssignment in $existingAssignments) {
+    # Only drop the tags that are NOT the one this VM must end up with. Removing
+    # the correct tag just to add it back leaves a window where the VM carries no
+    # batch tag at all -- and the Veeam job targets that tag, so a failure inside
+    # the window silently drops the VM from the backup scope.
+    # (step0-precheck.ps1 already works this way.)
+    $assignmentsToRemove = @($existingAssignments | Where-Object { [string]$_.Tag.Name -ne $tagName })
+    $alreadyAssigned = @($existingAssignments | Where-Object { [string]$_.Tag.Name -eq $tagName })
+
+    foreach ($existingAssignment in $assignmentsToRemove) {
         Write-MigrationLog "Removing existing tag $($existingAssignment.Tag.Name) from $vmName" -Level WARNING -LogFile $LogFile
         Remove-TagAssignment -TagAssignment $existingAssignment -Confirm:$false
     }
 
-    Write-MigrationLog "Adding tag $tagName to $vmName" -LogFile $LogFile
-    # Assign the resolved tag object: a bare name is ambiguous when a same-named tag
-    # exists in another category.
-    New-TagAssignment -Tag $existingTag -Entity $vm | Out-Null
+    if ($alreadyAssigned.Count -gt 0) {
+        Write-MigrationLog "Tag $tagName already assigned to $vmName." -LogFile $LogFile
+    } else {
+        Write-MigrationLog "Adding tag $tagName to $vmName" -LogFile $LogFile
+        # Assign the resolved tag object: a bare name is ambiguous when a same-named tag
+        # exists in another category.
+        New-TagAssignment -Tag $existingTag -Entity $vm | Out-Null
+    }
 }
 
 # Creating Veeam jobs by tag from CSV (configurable and deterministic)

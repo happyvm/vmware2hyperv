@@ -157,6 +157,31 @@ function Test-ExpectedIPv4Address {
 }
 
 # ---------------------------------------------------------------------------
+# Get-VmwareTagCategoryName : category name of a tag, whatever shape it has
+#
+# Tag.Category is a TagCategory object on some PowerCLI versions and a bare
+# string on others. Reading .Name blindly throws under StrictMode against the
+# string form; comparing the object form to a string only works when PowerCLI
+# happens to supply a type converter. Resolve the name explicitly instead.
+# ---------------------------------------------------------------------------
+function Get-VmwareTagCategoryName {
+    param(
+        [AllowNull()]
+        $Category
+    )
+
+    if ($null -eq $Category) { return '' }
+    if ($Category -is [string]) { return $Category }
+
+    $nameProperty = $Category.PSObject.Properties['Name']
+    if ($nameProperty -and -not [string]::IsNullOrWhiteSpace([string]$nameProperty.Value)) {
+        return [string]$nameProperty.Value
+    }
+
+    return [string]$Category
+}
+
+# ---------------------------------------------------------------------------
 # Get-VmwareAdapterConnectionState : read a NIC's link state, defensively
 #
 # A vSphere NIC carries TWO independent flags:

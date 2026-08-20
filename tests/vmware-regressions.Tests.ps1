@@ -201,12 +201,14 @@ Describe 'step2 VM resolution' {
 
 Describe 'step1 tag category comparison' {
 
-    # $_.Tag.Category is a TagCategory object; comparing it with -eq against the
-    # category NAME never matches, so the per-VM fallback removed nothing and
-    # New-TagAssignment then failed on a Single-cardinality category.
-    It 'compares the category name, not the category object' {
+    # $_.Tag.Category is a TagCategory object on some PowerCLI versions and a
+    # bare string on others. Comparing the raw value to the category name only
+    # works when PowerCLI supplies a type converter, and reading .Name blindly
+    # throws under StrictMode against the string form -- hence the helper.
+    # Detailed coverage lives in tests/step1-TagAssignment.Tests.ps1.
+    It 'resolves the category name through the shape-agnostic helper' {
         $source = Get-MigrationSource -RelativePath 'step1-TagResources_CreateVeeamJob.ps1'
-        $source | Should -Match '\[string\]\$_\.Tag\.Category\.Name -eq \$TagCategory'
+        $source | Should -Match 'Get-VmwareTagCategoryName -Category \$_\.Tag\.Category'
         $source | Should -Not -Match '\$_\.Tag\.Category -eq \$TagCategory'
     }
 }
