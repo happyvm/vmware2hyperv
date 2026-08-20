@@ -157,6 +157,165 @@ function Test-ExpectedIPv4Address {
 }
 
 # ---------------------------------------------------------------------------
+# Get-VmwareAdapterConnectionState : read a NIC's link state, defensively
+#
+# A vSphere NIC carries TWO independent flags:
+#   - Connected      : the live link state. Only meaningful while the VM runs.
+#   - StartConnected : whether the NIC is plugged in AT POWER ON. This is the
+#                      one that decides whether a powered-off VM rejoins the
+#                      network the next time somebody boots it.
+#
+# PowerCLI exposes them in three different shapes depending on the version, so
+# every read is property-guarded (a bare access throws under StrictMode).
+# ---------------------------------------------------------------------------
+function Get-VmwareAdapterConnectionState {
+    param(
+        [AllowNull()]
+        $Adapter
+    )
+
+    $state = [pscustomobject]@{
+        Connected      = $null
+        StartConnected = $null
+        Source         = 'unknown'
+    }
+
+    if (-not $Adapter) { return $state }
+
+    $readFlag = {
+        param($Container, [string]$FlagName)
+        if (-not $Container) { return $null }
+        $property = $Container.PSObject.Properties[$FlagName]
+        if (-not $property -or $null -eq $property.Value) { return $null }
+        return [bool]$property.Value
+    }
+
+    # 1. PowerCLI NicConnectionState (Get-NetworkAdapter on current versions)
+    $connectionStateProperty = $Adapter.PSObject.Properties['ConnectionState']
+    if ($connectionStateProperty -and $connectionStateProperty.Value) {
+        $state.Connected = & $readFlag $connectionStateProperty.Value 'Connected'
+        $state.StartConnected = & $readFlag $connectionStateProperty.Value 'StartConnected'
+        if ($null -ne $state.Connected -or $null -ne $state.StartConnected) {
+            $state.Source = 'ConnectionState'
+            return $state
+        }
+    }
+
+    # 2. Flattened properties on the adapter itself
+    $flatConnected = & $readFlag $Adapter 'Connected'
+    $flatStartConnected = & $readFlag $Adapter 'StartConnected'
+    if ($null -ne $flatConnected -or $null -ne $flatStartConnected) {
+        $state.Connected = $flatConnected
+        $state.StartConnected = $flatStartConnected
+        $state.Source = 'Adapter'
+        return $state
+    }
+
+    # 3. Raw vSphere API object
+    $extensionDataProperty = $Adapter.PSObject.Properties['ExtensionData']
+    if ($extensionDataProperty -and $extensionDataProperty.Value) {
+        $connectableProperty = $extensionDataProperty.Value.PSObject.Properties['Connectable']
+        if ($connectableProperty -and $connectableProperty.Value) {
+            $state.Connected = & $readFlag $connectableProperty.Value 'Connected'
+            $state.StartConnected = & $readFlag $connectableProperty.Value 'StartConnected'
+            if ($null -ne $state.Connected -or $null -ne $state.StartConnected) {
+                $state.Source = 'ExtensionData'
+                return $state
+            }
+        }
+    }
+
+    $availableProperties = @($Adapter.PSObject.Properties.Name | Sort-Object) -join ', '
+    Write-Verbose "PowerCLI debug: no Connected/StartConnected flag found on adapter. Available properties: $availableProperties"
+    return $state
+}
+
+# ---------------------------------------------------------------------------
+# Set-VmwareVmNetworkAdapterConnection : plug or unplug every NIC of a VM
+#
+# Always writes StartConnected -- that is what survives a power cycle. The live
+# link state is only written when the VM is actually running: vSphere rejects
+# (or ignores) a runtime connect/disconnect on a powered-off VM.
+#
+# Returns a summary so the caller can report precisely what changed, and so the
+# failure of a NIC the operator is counting on is never silent.
+# ---------------------------------------------------------------------------
+function Set-VmwareVmNetworkAdapterConnection {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $VmObject,
+
+        # $false unplugs the NIC (now and at every future boot), $true plugs it back.
+        [Parameter(Mandatory = $true)]
+        [bool]$Connected,
+
+        [string]$LogFile
+    )
+
+    $summary = [pscustomobject]@{
+        VMName         = $VmName
+        AdapterCount   = 0
+        ChangedCount   = 0
+        UnchangedCount = 0
+        FailedCount    = 0
+    }
+
+    if (-not $VmObject) {
+        Write-MigrationLog "Unable to change NIC state: VM not found ($VmName)." -Level WARNING -LogFile $LogFile
+        return $summary
+    }
+
+    $networkAdapters = @(Get-NetworkAdapter -VM $VmObject -ErrorAction SilentlyContinue)
+    if ($networkAdapters.Count -eq 0) {
+        Write-MigrationLog "No network adapter found on VM $VmName." -Level WARNING -LogFile $LogFile
+        return $summary
+    }
+    $summary.AdapterCount = $networkAdapters.Count
+
+    $powerStateProperty = $VmObject.PSObject.Properties['PowerState']
+    $isPoweredOn = $powerStateProperty -and ([string]$powerStateProperty.Value -eq 'PoweredOn')
+
+    $action = if ($Connected) { 'connect' } else { 'disconnect' }
+
+    foreach ($adapter in $networkAdapters) {
+        $adapterName = [string]$adapter.Name
+        $currentState = Get-VmwareAdapterConnectionState -Adapter $adapter
+
+        $startConnectedAlreadySet = ($null -ne $currentState.StartConnected -and $currentState.StartConnected -eq $Connected)
+        $runtimeAlreadySet = (-not $isPoweredOn) -or ($null -ne $currentState.Connected -and $currentState.Connected -eq $Connected)
+
+        if ($startConnectedAlreadySet -and $runtimeAlreadySet) {
+            $summary.UnchangedCount++
+            continue
+        }
+
+        $setParameters = @{
+            NetworkAdapter = $adapter
+            StartConnected = $Connected
+            Confirm        = $false
+            ErrorAction    = 'Stop'
+        }
+        if ($isPoweredOn) {
+            $setParameters['Connected'] = $Connected
+        }
+
+        try {
+            Set-NetworkAdapter @setParameters | Out-Null
+            $summary.ChangedCount++
+        } catch {
+            $summary.FailedCount++
+            Write-MigrationLog "Failed to $action NIC '$adapterName' on VM ${VmName}: $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
+        }
+    }
+
+    return $summary
+}
+
+# ---------------------------------------------------------------------------
 # Resolve-AdapterVlanId : VMware port group -> VLAN id
 #
 # Used by run-migration.ps1 to build the per-adapter VLAN map handed to step3.

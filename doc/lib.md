@@ -65,6 +65,8 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 | Fonction | Description |
 |----------|-------------|
 | `Test-VmwareVirtualMachineEntity` | Teste si une entité de `Get-TagAssignment` est une VM. PowerCLI renvoie le type d'implémentation (`UniversalVirtualMachineImpl`, `VirtualMachineImpl`), jamais `VirtualMachine` : la fonction accepte le nom de type **ou** le préfixe de l'`Id` managé (`VirtualMachine-vm-…`) |
+| `Get-VmwareAdapterConnectionState` | Lit les drapeaux `Connected` (lien en cours) et `StartConnected` (branchée au démarrage) d'une NIC, quelle que soit la forme exposée par PowerCLI (`ConnectionState`, propriétés à plat, ou `ExtensionData.Connectable`) |
+| `Set-VmwareVmNetworkAdapterConnection` | Branche ou débranche toutes les NICs d'une VM. Écrit **toujours** `StartConnected` (c'est lui qui survit à un cycle d'alimentation), et `Connected` seulement si la VM tourne. Retourne un récapitulatif (`ChangedCount`, `UnchangedCount`, `FailedCount`) pour qu'un échec ne soit jamais silencieux |
 | `Resolve-AdapterVlanId` | Résout le VLAN d'une carte réseau VMware (port group distribué, puis standard, puis backing, puis suffixe de nom). Rejette VLAN 0 (untagged), 4095 et les port groups trunk : retourne `PortGroup not found` plutôt qu'un VLAN inventé. Définie ici et non dans `run-migration.ps1` pour que la suite Pester exerce l'implémentation réelle |
 
 ### SCVMM

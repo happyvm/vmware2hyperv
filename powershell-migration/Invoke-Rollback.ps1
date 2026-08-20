@@ -352,6 +352,18 @@ function Invoke-PowerOnRollback {
                     Where-Object { $_.PowerState -eq 'PoweredOff' } |
                     Select-Object -First 1
                 if ($vm) {
+                    # step2 unplugs the source NICs and clears their
+                    # "connect at power on" flag so the migrated VM keeps the
+                    # identity to itself. Restoring the source means plugging
+                    # them back in FIRST, otherwise the VM boots with no network
+                    # and the rollback restores nothing usable.
+                    $reconnectResult = Set-VmwareVmNetworkAdapterConnection -VmName $VMName -VmObject $vm -Connected $true -LogFile $LogFile
+                    if ($reconnectResult.FailedCount -gt 0) {
+                        Write-MigrationLog "[$VMName] $($reconnectResult.FailedCount)/$($reconnectResult.AdapterCount) NIC(s) could not be reconnected; the VM will start without full network connectivity." -Level ERROR -LogFile $LogFile
+                    } elseif ($reconnectResult.ChangedCount -gt 0) {
+                        Write-MigrationLog "[$VMName] Reconnected $($reconnectResult.ChangedCount)/$($reconnectResult.AdapterCount) NIC(s) before power on." -Level SUCCESS -LogFile $LogFile
+                    }
+
                     Start-VM -VM $vm -ErrorAction Stop | Out-Null
                     Write-MigrationLog "[$VMName] VMware VM started." -Level SUCCESS -LogFile $LogFile
                 } else {
@@ -380,10 +392,27 @@ function Invoke-PowerOnRollback {
                 }
             }
         } else {
-            Write-MigrationLog "[DRY-RUN] Would start VMware VM on $($vmwareState.VMHost)" -LogFile $LogFile
+            Write-MigrationLog "[DRY-RUN] Would reconnect the NICs of VMware VM '$VMName' (including at power on), then start it on $($vmwareState.VMHost)" -LogFile $LogFile
         }
     } elseif ($vmwareState.PowerState -eq 'PoweredOn') {
         Write-MigrationLog "[$VMName] VMware VM is already powered on." -LogFile $LogFile
+
+        # It may still be running with the NICs step2 unplugged, which is not a
+        # restored service. Plug them back in here too.
+        if (-not $DryRun) {
+            $runningVm = VMware.VimAutomation.Core\Get-VM -Id $vmwareState.Id -Server $VcenterServer -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($runningVm) {
+                $reconnectResult = Set-VmwareVmNetworkAdapterConnection -VmName $VMName -VmObject $runningVm -Connected $true -LogFile $LogFile
+                if ($reconnectResult.FailedCount -gt 0) {
+                    Write-MigrationLog "[$VMName] $($reconnectResult.FailedCount)/$($reconnectResult.AdapterCount) NIC(s) could not be reconnected on the running VM." -Level ERROR -LogFile $LogFile
+                } elseif ($reconnectResult.ChangedCount -gt 0) {
+                    Write-MigrationLog "[$VMName] Reconnected $($reconnectResult.ChangedCount)/$($reconnectResult.AdapterCount) NIC(s) on the running VM." -Level SUCCESS -LogFile $LogFile
+                }
+            }
+        } else {
+            Write-MigrationLog "[DRY-RUN] Would reconnect the NICs of the already-running VMware VM '$VMName'" -LogFile $LogFile
+        }
     } else {
         # Suspended or any other unexpected power state: powering on blindly could
         # resume a stale workload — require manual handling and report a failure.

@@ -89,6 +89,24 @@ if ($rowsWithTag) {
 }
 
 function Disconnect-VmNetworkAdapters {
+    <#
+    .SYNOPSIS
+        Unplug every NIC of a migrated source VM, now AND at every future boot.
+
+    .DESCRIPTION
+        Clearing only the live link state (Set-NetworkAdapter -Connected:$false)
+        leaves StartConnected untouched, so the source VM rejoins the network as
+        soon as anybody powers it back on -- colliding with the migrated Hyper-V
+        VM, which now owns the same identity and IP. StartConnected is therefore
+        always written; the runtime flag only applies while the VM is running.
+
+        This also has to run on VMs that were ALREADY powered off: their live
+        link state is meaningless, but their StartConnected flag is exactly what
+        needs clearing.
+
+        Invoke-Rollback.ps1 plugs the NICs back in when it restores the VMware
+        source (Set-VmwareVmNetworkAdapterConnection -Connected $true).
+    #>
     param(
         [Parameter(Mandatory = $true)]
         [string]$VmName,
@@ -102,49 +120,21 @@ function Disconnect-VmNetworkAdapters {
         [string]$LogFile
     )
 
-    $vmObj = $VmObject
-    if (-not $vmObj) {
-        Write-MigrationLog "Unable to disconnect NICs: VM not found ($VmName)." -Level WARNING -LogFile $LogFile
+    $result = Set-VmwareVmNetworkAdapterConnection -VmName $VmName -VmObject $VmObject -Connected $false -LogFile $LogFile
+
+    if ($result.AdapterCount -eq 0) {
         return
     }
 
-    $networkAdapters = VMware.VimAutomation.Core\Get-NetworkAdapter -VM $vmObj -ErrorAction SilentlyContinue
-    if (-not $networkAdapters) {
-        Write-MigrationLog "No network adapter found on VM $VmName." -Level WARNING -LogFile $LogFile
-        return
+    if ($result.FailedCount -gt 0) {
+        Write-MigrationLog "$($result.FailedCount)/$($result.AdapterCount) NIC(s) on VM $VmName could NOT be unplugged: this VM may rejoin the network if it is powered on again. Disconnect them manually in vCenter before validating the batch." -Level ERROR -LogFile $LogFile
     }
 
-    # @(): a single connected adapter is a scalar and .Count on it throws under StrictMode.
-    # PowerCLI adapter objects differ by version; some expose Connected only on
-    # ExtensionData.Connectable. Guard property access so StrictMode does not
-    # turn a disconnected/older adapter shape into a hard failure.
-    $connectedAdapters = @($networkAdapters | Where-Object {
-        if ($_.PSObject.Properties['Connected']) {
-            return [bool]$_.Connected
-        }
-
-        if (
-            $_.PSObject.Properties['ExtensionData'] -and $_.ExtensionData -and
-            $_.ExtensionData.PSObject.Properties['Connectable'] -and $_.ExtensionData.Connectable -and
-            $_.ExtensionData.Connectable.PSObject.Properties['Connected']
-        ) {
-            return [bool]$_.ExtensionData.Connectable.Connected
-        }
-
-        $availableProperties = @($_.PSObject.Properties.Name | Sort-Object) -join ', '
-        Write-Verbose "PowerCLI debug: adapter for VM '$VmName' has no direct Connected property and no ExtensionData.Connectable.Connected value. Available properties: $availableProperties"
-        return $false
-    })
-    if (-not $connectedAdapters) {
-        Write-MigrationLog "All NICs are already disconnected on VM $VmName." -Level INFO -LogFile $LogFile
-        return
+    if ($result.ChangedCount -gt 0) {
+        Write-MigrationLog "Disconnected $($result.ChangedCount)/$($result.AdapterCount) NIC(s) on VM $VmName (also cleared 'connect at power on')." -Level SUCCESS -LogFile $LogFile
+    } elseif ($result.FailedCount -eq 0) {
+        Write-MigrationLog "All NICs on VM $VmName are already disconnected, including at power on." -Level INFO -LogFile $LogFile
     }
-
-    foreach ($adapter in $connectedAdapters) {
-        VMware.VimAutomation.Core\Set-NetworkAdapter -NetworkAdapter $adapter -Connected:$false -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-    }
-
-    Write-MigrationLog "Disconnected $($connectedAdapters.Count) NIC(s) on VM $VmName." -Level SUCCESS -LogFile $LogFile
 }
 
 $vmStates = @{}
