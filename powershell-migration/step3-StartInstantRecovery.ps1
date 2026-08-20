@@ -245,6 +245,8 @@ foreach ($vmName in $startedVmNames) {
 # a long time, so the timeout is also bounded by wall-clock time.
 $monitorStartedAt = Get-Date
 $elapsed = 0
+# Deduplicates the "column stayed empty" diagnostics: identical for every VM.
+$loggedDiagnostics = New-Object 'System.Collections.Generic.HashSet[string]'
 while ($true) {
     $pendingNames = @($vmStatuses.Keys | Where-Object { $vmStatuses[$_].Status -eq 'Mounting' } | Sort-Object)
     if (-not $pendingNames) { break }
@@ -260,7 +262,7 @@ while ($true) {
     $step3VeeamRecoveryPath = "$PSScriptRoot\step3\Step3.VeeamRecovery.ps1"
 
     $snapshots = @(Invoke-VeeamCommand -ScriptBlock {
-        param($VmNames, $VeeamRecoveryPath)
+        param($VmNames, $VeeamRecoveryPath, $EmitDiagnostics)
 
         . $VeeamRecoveryPath
 
@@ -270,22 +272,18 @@ while ($true) {
         $restoreSessions = @(Get-VBRRestoreSession)
 
         foreach ($vmName in @($VmNames)) {
-            # Property guard: the dot-sourced module enables StrictMode in this session,
-            # and Get-VBRInstantRecovery can return objects without a VMName property.
-            $irSession = $irSessions |
-                Where-Object { $_.PSObject.Properties['VMName'] -and [string]$_.VMName -eq $vmName } |
-                Select-Object -First 1
-            # Use the shared bounded-name helper to avoid matching another VM whose
-            # name shares a prefix (WEB1 vs WEB10).
+            # Matched on whichever property carries the machine name in this module
+            # version, with the same bounded pattern used for restore sessions
+            # (WEB1 must not match WEB10).
+            $irSession = Find-VmInstantRecoverySession -VmName $vmName -InstantRecoverySessions $irSessions
             $restoreSession = Find-VmRestoreSession -VmName $vmName -RestoreSessions $restoreSessions
 
-            # Same property guard as VMName above: Get-VBRInstantRecovery / Get-VBRRestoreSession
-            # can return objects that don't (yet) expose a 'State' property (e.g. while the
-            # session is still being created), and StrictMode throws PropertyNotFoundException
-            # on direct access.
-            $irState = if ($irSession -and $irSession.PSObject.Properties['State']) { [string]$irSession.State } else { $null }
-            $restoreSessionStateRaw = if ($restoreSession -and $restoreSession.PSObject.Properties['State']) { [string]$restoreSession.State } else { $null }
-            $restoreSessionResultRaw = if ($restoreSession -and $restoreSession.PSObject.Properties['Result']) { [string]$restoreSession.Result } else { $null }
+            # Candidate paths rather than one hard-coded name: 'State' is absent on
+            # several Veeam builds, and reading only it kept the InstantRecovery
+            # column at '<none>' for the whole run.
+            $irState = [string](Get-VeeamPropertyValue -InputObject $irSession -PropertyPaths @('State', 'Status', 'SessionState'))
+            $restoreSessionStateRaw = [string](Get-VeeamPropertyValue -InputObject $restoreSession -PropertyPaths @('State', 'Status'))
+            $restoreSessionResultRaw = [string](Get-VeeamPropertyValue -InputObject $restoreSession -PropertyPaths @('Result'))
 
             $waitingDetected = $false
             $detectionSource = $null
@@ -296,9 +294,30 @@ while ($true) {
 
             $sessionState = if ($restoreSessionStateRaw) { $restoreSessionStateRaw } else { '<none>' }
             $sessionResult = $restoreSessionResultRaw
-            $progress = $null
-            if ($restoreSession -and $restoreSession.PSObject.Properties['Progress'] -and $null -ne $restoreSession.Progress) {
-                $progress = [string]$restoreSession.Progress
+
+            # Veeam reports completion as Progress.Percents on some builds and as a
+            # flat numeric property on others. Reading only 'Progress' returned an
+            # object (or nothing), so the column showed '-' from start to finish.
+            $progress = [string](Get-VeeamPropertyValue -InputObject $restoreSession -PropertyPaths @(
+                'Progress.Percents', 'Progress.Percent', 'ProgressPercent', 'CompletionPercentage', 'Progress'
+            ))
+
+            # Emitted once per run, only for a column that stayed empty: names the
+            # properties this Veeam module really exposes so the candidate lists
+            # above can be corrected instead of guessed at.
+            $irDiagnostic = $null
+            $progressDiagnostic = $null
+            if ($EmitDiagnostics) {
+                if (-not $irSession) {
+                    $sampleIrSession = @($irSessions) | Select-Object -First 1
+                    $irDiagnostic = "no Instant Recovery session matched; Get-VBRInstantRecovery returned $(@($irSessions).Count) session(s), first: $(Get-VeeamObjectPropertySummary -InputObject $sampleIrSession)"
+                } elseif ([string]::IsNullOrWhiteSpace($irState)) {
+                    $irDiagnostic = "Instant Recovery session matched but exposes no state; $(Get-VeeamObjectPropertySummary -InputObject $irSession)"
+                }
+
+                if ($restoreSession -and [string]::IsNullOrWhiteSpace($progress)) {
+                    $progressDiagnostic = "restore session exposes no progress; $(Get-VeeamObjectPropertySummary -InputObject $restoreSession)"
+                }
             }
 
             $logReadError = $null
@@ -341,17 +360,19 @@ while ($true) {
             }
 
             [pscustomobject]@{
-                VMName          = $vmName
-                IrState         = if ($irState) { $irState } else { '<none>' }
-                SessionState    = $sessionState
-                SessionResult   = $sessionResult
-                Progress        = $progress
-                WaitingDetected = $waitingDetected
-                DetectionSource = $detectionSource
-                LogReadError    = $logReadError
+                VMName             = $vmName
+                IrState            = if ($irState) { $irState } else { '<none>' }
+                SessionState       = $sessionState
+                SessionResult      = $sessionResult
+                Progress           = $progress
+                WaitingDetected    = $waitingDetected
+                DetectionSource    = $detectionSource
+                LogReadError       = $logReadError
+                IrDiagnostic       = $irDiagnostic
+                ProgressDiagnostic = $progressDiagnostic
             }
         }
-    } -ArgumentList @([string[]]$pendingNames, $step3VeeamRecoveryPath))
+    } -ArgumentList @([string[]]$pendingNames, $step3VeeamRecoveryPath, ($elapsed -eq 0)))
 
     foreach ($snapshot in $snapshots) {
         $tracked = $vmStatuses[[string]$snapshot.VMName]
@@ -376,6 +397,19 @@ while ($true) {
         } elseif ($snapshot.PSObject.Properties['LogReadError'] -and $snapshot.LogReadError) {
             Write-MigrationLog "[$($snapshot.VMName)] Unable to read restore session log while checking for 'Waiting for user action': $($snapshot.LogReadError) (elapsed: ${elapsed}s)." -Level WARNING -LogFile $LogFile
         }
+
+        # One line per dead dashboard column, on the first poll only: a column that
+        # shows '<none>' or '-' for an entire run is a lookup that found nothing,
+        # and the message names the properties Veeam actually exposes.
+        foreach ($diagnosticProperty in @('IrDiagnostic', 'ProgressDiagnostic')) {
+            if (-not $snapshot.PSObject.Properties[$diagnosticProperty]) { continue }
+
+            $diagnosticText = [string]$snapshot.$diagnosticProperty
+            if ([string]::IsNullOrWhiteSpace($diagnosticText) -or $loggedDiagnostics.Contains($diagnosticText)) { continue }
+
+            [void]$loggedDiagnostics.Add($diagnosticText)
+            Write-MigrationLog "[$($snapshot.VMName)] Instant Recovery dashboard: $diagnosticText" -Level WARNING -LogFile $LogFile
+        }
     }
 
     # Progress dashboard: one row per VM, refreshed at every poll in the same console.
@@ -386,7 +420,15 @@ while ($true) {
             Status          = $tracked.Status
             InstantRecovery = $tracked.IrState
             RestoreSession  = $tracked.SessionState
-            Progress        = if ($null -ne $tracked.Progress -and $tracked.Progress -ne '') { "$($tracked.Progress)%" } else { '-' }
+            # '%' only when Veeam gave a number: some builds report a textual stage
+            # there, and '-' stays the honest answer when nothing was reported.
+            Progress        = if ([string]::IsNullOrWhiteSpace([string]$tracked.Progress)) {
+                '-'
+            } elseif ([string]$tracked.Progress -match '^\d+(\.\d+)?$') {
+                "$($tracked.Progress)%"
+            } else {
+                [string]$tracked.Progress
+            }
         }
     }
 
