@@ -62,7 +62,7 @@ try {
     }
 
     $tagAssignments = Get-TagAssignment -Tag $vmwareTag -ErrorAction SilentlyContinue |
-        Where-Object { $_.Entity -and $_.Entity.GetType().Name -eq 'VirtualMachine' }
+        Where-Object { Test-VmwareVirtualMachineEntity -Entity $_.Entity }
 
     if (-not $tagAssignments) {
         Write-MigrationLog "No VMware VM found with tag '$Tag'. Nothing to cleanup." -LogFile $LogFile

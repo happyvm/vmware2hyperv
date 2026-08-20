@@ -157,6 +157,169 @@ function Test-ExpectedIPv4Address {
 }
 
 # ---------------------------------------------------------------------------
+# Resolve-AdapterVlanId : VMware port group -> VLAN id
+#
+# Used by run-migration.ps1 to build the per-adapter VLAN map handed to step3.
+# Lives here rather than inline in the orchestrator so the Pester suite can
+# exercise the real implementation.
+# ---------------------------------------------------------------------------
+function Resolve-AdapterVlanId {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Adapter,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$DistributedPortGroupCache,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$StandardPortGroupCache
+    )
+
+    $networkName = [string]$Adapter.NetworkName
+    if ([string]::IsNullOrWhiteSpace($networkName)) {
+        return "Not connected to a network"
+    }
+
+    # Shared guard for every resolution path below. VLAN 0 means "untagged" on a
+    # port group and is not a usable mapping key on the SCVMM side either
+    # (Get-ScvmmInventoryCache drops it explicitly), so it must never be
+    # returned as if it were a real VLAN.
+    $isUsableVlanId = {
+        param($Candidate)
+        $parsed = 0
+        if (-not [int]::TryParse([string]$Candidate, [ref]$parsed)) { return $false }
+        return ($parsed -ge 1 -and $parsed -le 4094)
+    }
+
+    # A trunk port group carries a RANGE, not a VLAN. Its string form
+    # ('Trunk (0-4094)') used to be scraped by the loose \d+ fallback below and
+    # yielded '0' -- or '1' -- as if it were the VM's VLAN.
+    $isTrunkConfiguration = {
+        param($Configuration)
+        if (-not $Configuration) { return $false }
+        if ($Configuration.PSObject.Properties['Ranges']) { return $true }
+        return ([string]$Configuration -match 'Trunk')
+    }
+
+    if (-not $DistributedPortGroupCache.ContainsKey($networkName)) {
+        $DistributedPortGroupCache[$networkName] = @(Get-VDPortgroup -Name $networkName -ErrorAction SilentlyContinue)
+    }
+    $distributedPortGroups = @($DistributedPortGroupCache[$networkName])
+    foreach ($distributedPortGroup in $distributedPortGroups) {
+        # Prefer direct integer property on the DVS VLAN spec (avoids string-parsing ambiguity)
+        try {
+            $vlanSpec = $distributedPortGroup.ExtensionData.Config.DefaultPortConfig.Vlan
+            if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
+                $rawId = [int]$vlanSpec.VlanId
+                if (& $isUsableVlanId $rawId) {
+                    return [string]$rawId
+                }
+
+                # An explicit VlanId that is out of range (typically 0 = untagged)
+                # is an answer, not a miss: do not let the looser fallbacks below
+                # re-invent a VLAN for this port group.
+                continue
+            }
+        } catch {
+            Write-Verbose "DVS VLAN spec unavailable for port group '$networkName': $($_.Exception.Message)"
+        }
+
+        $vlanConfiguration = $null
+        if ($distributedPortGroup.PSObject.Properties['VlanConfiguration']) {
+            $vlanConfiguration = $distributedPortGroup.VlanConfiguration
+        }
+
+        if (& $isTrunkConfiguration $vlanConfiguration) {
+            Write-Verbose "Port group '$networkName' is a trunk: no single VLAN to map."
+            continue
+        }
+
+        if ($vlanConfiguration -and $vlanConfiguration.PSObject.Properties['VlanId']) {
+            if (& $isUsableVlanId $vlanConfiguration.VlanId) {
+                return [string][int]$vlanConfiguration.VlanId
+            }
+            continue
+        }
+
+        if ([string]$vlanConfiguration -match '(\d+)' -and (& $isUsableVlanId $matches[1])) {
+            return [string][int]$matches[1]
+        }
+    }
+
+    if (-not $StandardPortGroupCache.ContainsKey($networkName)) {
+        $StandardPortGroupCache[$networkName] = @(Get-VirtualPortGroup -Name $networkName -ErrorAction SilentlyContinue)
+    }
+    $standardPortGroups = @($StandardPortGroupCache[$networkName])
+    foreach ($standardPortGroup in $standardPortGroups) {
+        # 4095 is the "all VLANs" trunk value on a standard port group, and 0 is
+        # untagged: neither is a VLAN this VM can be mapped onto.
+        if (& $isUsableVlanId $standardPortGroup.VLanId) {
+            return [string][int]$standardPortGroup.VLanId
+        }
+    }
+
+    $backing = $null
+    try { $backing = $Adapter.ExtensionData.Backing } catch {
+        Write-Verbose "Adapter backing data unavailable: $($_.Exception.Message)"
+    }
+    if ($backing -and $backing.PSObject.Properties['Port'] -and $backing.Port -and $backing.Port.PortgroupKey) {
+        $portGroupView = Get-View -Id $backing.Port.PortgroupKey -ErrorAction SilentlyContinue
+        if ($portGroupView -and $portGroupView.Config) {
+            try {
+                $vlanSpec = $portGroupView.Config.DefaultPortConfig.Vlan
+                if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
+                    $rawId = [int]$vlanSpec.VlanId
+                    if (& $isUsableVlanId $rawId) {
+                        return [string]$rawId
+                    }
+                }
+            } catch {
+                Write-Verbose "Port group view VLAN spec unavailable: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    # Last resort: extract VLAN from port group name (e.g. "dvPG-LAN_1816" → "1816")
+    if ($networkName -match '_(\d{1,4})$') {
+        return $matches[1]
+    }
+
+    return "PortGroup not found"
+}
+
+# ---------------------------------------------------------------------------
+# Test-VmwareVirtualMachineEntity : is a tag assignment attached to a VM?
+#
+# Get-TagAssignment returns entities whose runtime type is the PowerCLI *impl*
+# class -- 'UniversalVirtualMachineImpl' or 'VirtualMachineImpl' depending on
+# the PowerCLI/vSphere version -- never the bare interface name
+# 'VirtualMachine'. Comparing GetType().Name with -eq 'VirtualMachine' is
+# therefore always false and silently discards every assignment.
+# (Get-VMwareClusterNameForVm in run-migration.ps1 already matches impl names
+# with -match for exactly this reason.)
+#
+# Two independent signals are accepted so the check survives a PowerCLI type
+# rename: the impl type name, and the entity Id, which vSphere always prefixes
+# with the managed object type ('VirtualMachine-vm-1234').
+# ---------------------------------------------------------------------------
+function Test-VmwareVirtualMachineEntity {
+    param(
+        [AllowNull()]
+        $Entity
+    )
+
+    if (-not $Entity) { return $false }
+
+    $typeName = [string]$Entity.GetType().Name
+    if ($typeName -match 'VirtualMachine') { return $true }
+
+    $idProperty = $Entity.PSObject.Properties['Id']
+    if ($idProperty -and [string]$idProperty.Value -match '^VirtualMachine-') { return $true }
+
+    return $false
+}
+
+# ---------------------------------------------------------------------------
 # ConvertTo-ScvmmMemoryGigabytes : SCVMM VM memory (MB) -> GB
 #
 # SCVMM exposes VirtualMachine.Memory in MEGABYTES (the setter is

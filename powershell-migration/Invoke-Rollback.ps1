@@ -189,6 +189,7 @@ function Get-VmwareVmState {
     if (-not $vm) {
         return [pscustomobject]@{
             Found      = $false
+            Id         = $null
             PowerState = $null
             VMHost     = $null
             Datastore  = $null
@@ -197,6 +198,11 @@ function Get-VmwareVmState {
 
     return [pscustomobject]@{
         Found      = $true
+        # The moref of the VM that was actually inspected. The power-on step
+        # re-resolves by Id rather than by name so it cannot act on a homonym
+        # in another folder/datacenter, nor on a different VM than the one whose
+        # power state was just read.
+        Id         = [string]$vm.Id
         PowerState = [string]$vm.PowerState
         VMHost     = if ($vm.VMHost) { [string]$vm.VMHost.Name } else { $null }
         Datastore  = [string]$vm.DatastoreIdList
@@ -342,7 +348,7 @@ function Invoke-PowerOnRollback {
 
         if (-not $DryRun) {
             try {
-                $vm = VMware.VimAutomation.Core\Get-VM -Name $VMName |
+                $vm = VMware.VimAutomation.Core\Get-VM -Id $vmwareState.Id -Server $VcenterServer -ErrorAction SilentlyContinue |
                     Where-Object { $_.PowerState -eq 'PoweredOff' } |
                     Select-Object -First 1
                 if ($vm) {

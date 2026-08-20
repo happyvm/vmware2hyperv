@@ -99,7 +99,7 @@ $cleanupEntries = @(foreach ($csvTag in $csvTags) {
     }
 
     $taggedVmAssignments = @(Get-TagAssignment -Tag $existingCsvTag -ErrorAction SilentlyContinue |
-        Where-Object { $_.Entity -and $_.Entity.GetType().Name -eq 'VirtualMachine' })
+        Where-Object { Test-VmwareVirtualMachineEntity -Entity $_.Entity })
 
     if (-not $taggedVmAssignments) {
         Write-MigrationLog "Cleanup: no VMware VM found with tag '$csvTag'." -LogFile $LogFile
@@ -195,7 +195,10 @@ foreach ($entry in $csvData) {
         $vmEntityId = [string]$vm.Id
         if ($assignmentsByEntityId.ContainsKey($vmEntityId)) { @($assignmentsByEntityId[$vmEntityId]) } else { @() }
     } else {
-        @(Get-TagAssignment -Entity $vm -ErrorAction SilentlyContinue | Where-Object { $_.Tag.Category -eq $TagCategory })
+        # .Category is a TagCategory object: comparing it with -eq against the
+        # category NAME never matches, so the fallback used to remove nothing and
+        # New-TagAssignment then failed on a Single-cardinality category.
+        @(Get-TagAssignment -Entity $vm -ErrorAction SilentlyContinue | Where-Object { [string]$_.Tag.Category.Name -eq $TagCategory })
     }
     foreach ($existingAssignment in $existingAssignments) {
         Write-MigrationLog "Removing existing tag $($existingAssignment.Tag.Name) from $vmName" -Level WARNING -LogFile $LogFile

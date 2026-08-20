@@ -245,87 +245,9 @@ if ($startIndex -le 2) {
 $csvFile = $Config.Paths.CsvFile
 Assert-PathPresent -Path $csvFile -Label "batch CSV" -LogFile $LogFile
 
-function Resolve-AdapterVlanId {
-    param(
-        [Parameter(Mandatory = $true)]
-        $Adapter,
-
-        [Parameter(Mandatory = $true)]
-        [hashtable]$DistributedPortGroupCache,
-
-        [Parameter(Mandatory = $true)]
-        [hashtable]$StandardPortGroupCache
-    )
-
-    $networkName = [string]$Adapter.NetworkName
-    if ([string]::IsNullOrWhiteSpace($networkName)) {
-        return "Not connected to a network"
-    }
-
-    if (-not $DistributedPortGroupCache.ContainsKey($networkName)) {
-        $DistributedPortGroupCache[$networkName] = @(Get-VDPortgroup -Name $networkName -ErrorAction SilentlyContinue)
-    }
-    $distributedPortGroups = @($DistributedPortGroupCache[$networkName])
-    foreach ($distributedPortGroup in $distributedPortGroups) {
-        # Prefer direct integer property on the DVS VLAN spec (avoids string-parsing ambiguity)
-        try {
-            $vlanSpec = $distributedPortGroup.ExtensionData.Config.DefaultPortConfig.Vlan
-            if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
-                $rawId = [int]$vlanSpec.VlanId
-                if ($rawId -ge 1 -and $rawId -le 4094) {
-                    return [string]$rawId
-                }
-            }
-        } catch {
-            Write-Verbose "DVS VLAN spec unavailable for port group '$networkName': $($_.Exception.Message)"
-        }
-
-        if ([string]$distributedPortGroup.VlanConfiguration -match '\d+') {
-            return [string]$matches[0]
-        }
-    }
-
-    if (-not $StandardPortGroupCache.ContainsKey($networkName)) {
-        $StandardPortGroupCache[$networkName] = @(Get-VirtualPortGroup -Name $networkName -ErrorAction SilentlyContinue)
-    }
-    $standardPortGroups = @($StandardPortGroupCache[$networkName])
-    foreach ($standardPortGroup in $standardPortGroups) {
-        if ([string]$standardPortGroup.VLanId -match '^\d+$') {
-            return [string]$standardPortGroup.VLanId
-        }
-    }
-
-    $backing = $null
-    try { $backing = $Adapter.ExtensionData.Backing } catch {
-        Write-Verbose "Adapter backing data unavailable: $($_.Exception.Message)"
-    }
-    if ($backing -and $backing.PSObject.Properties['Port'] -and $backing.Port -and $backing.Port.PortgroupKey) {
-        $portGroupView = Get-View -Id $backing.Port.PortgroupKey -ErrorAction SilentlyContinue
-        if ($portGroupView -and $portGroupView.Config) {
-            try {
-                $vlanSpec = $portGroupView.Config.DefaultPortConfig.Vlan
-                if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
-                    $rawId = [int]$vlanSpec.VlanId
-                    if ($rawId -ge 1 -and $rawId -le 4094) {
-                        return [string]$rawId
-                    }
-                }
-            } catch {
-                Write-Verbose "Port group view VLAN spec unavailable: $($_.Exception.Message)"
-            }
-            if ([string]$portGroupView.Config.DefaultPortConfig.Vlan -match '\d+') {
-                return [string]$matches[0]
-            }
-        }
-    }
-
-    # Last resort: extract VLAN from port group name (e.g. "dvPG-LAN_1816" → "1816")
-    if ($networkName -match '_(\d{1,4})$') {
-        return $matches[1]
-    }
-
-    return "PortGroup not found"
-}
+# Resolve-AdapterVlanId lives in lib.ps1 so the Pester suite can exercise the real
+# implementation instead of a copy: the duplicated copy is how the VLAN 0 defect
+# stayed green in tests/step3-MigrateVM.Tests.ps1.
 
 $csvRows = Import-Csv -Path $csvFile -Delimiter ";"
 $vmRows = @($csvRows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.VMName) })
@@ -382,7 +304,13 @@ function Get-VMwareClusterNameForVm {
         Write-Verbose "Get-Cluster lookup failed for VM '$($VMObject.Name)'; falling back to parent traversal: $($_.Exception.Message)"
     }
 
-    $parent = $VMObject.VMHost.Parent
+    # Null guard: a VM whose host is unavailable (orphaned, host disconnected)
+    # exposes a null VMHost, and $null.Parent throws under StrictMode -- which
+    # used to abort the whole VLAN resolution pass over one bad VM.
+    $parent = $null
+    if ($VMObject.PSObject.Properties['VMHost'] -and $VMObject.VMHost) {
+        $parent = $VMObject.VMHost.Parent
+    }
     while ($parent) {
         if ($parent.PSObject.Properties['Name'] -and -not [string]::IsNullOrWhiteSpace([string]$parent.Name)) {
             if ([string]$parent.GetType().Name -match 'Cluster|ClusterImpl') {

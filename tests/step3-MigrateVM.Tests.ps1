@@ -5,77 +5,9 @@ Set-StrictMode -Version Latest
 
 Describe 'Resolve-AdapterVlanId' {
     BeforeAll {
-        # Define the function under test
-        function script:Resolve-AdapterVlanId {
-            param(
-                [Parameter(Mandatory = $true)]
-                $Adapter,
-                [Parameter(Mandatory = $true)]
-                [hashtable]$DistributedPortGroupCache,
-                [Parameter(Mandatory = $true)]
-                [hashtable]$StandardPortGroupCache
-            )
-            $networkName = [string]$Adapter.NetworkName
-            if ([string]::IsNullOrWhiteSpace($networkName)) {
-                return "Not connected to a network"
-            }
-            if (-not $DistributedPortGroupCache.ContainsKey($networkName)) {
-                $DistributedPortGroupCache[$networkName] = @(Get-VDPortgroup -Name $networkName -ErrorAction SilentlyContinue)
-            }
-            $distributedPortGroups = @($DistributedPortGroupCache[$networkName])
-            foreach ($distributedPortGroup in $distributedPortGroups) {
-                try {
-                    $vlanSpec = $distributedPortGroup.ExtensionData.Config.DefaultPortConfig.Vlan
-                    if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
-                        $rawId = [int]$vlanSpec.VlanId
-                        if ($rawId -ge 1 -and $rawId -le 4094) {
-                            return [string]$rawId
-                        }
-                    }
-                } catch {
-                    Write-Verbose "DVS VLAN spec unavailable: $($_.Exception.Message)"
-                }
-                if ([string]$distributedPortGroup.VlanConfiguration -match '\d+') {
-                    return [string]$matches[0]
-                }
-            }
-            if (-not $StandardPortGroupCache.ContainsKey($networkName)) {
-                $StandardPortGroupCache[$networkName] = @(Get-VirtualPortGroup -Name $networkName -ErrorAction SilentlyContinue)
-            }
-            $standardPortGroups = @($StandardPortGroupCache[$networkName])
-            foreach ($standardPortGroup in $standardPortGroups) {
-                if ([string]$standardPortGroup.VLanId -match '^\d+$') {
-                    return [string]$standardPortGroup.VLanId
-                }
-            }
-            $backing = $null
-            try { $backing = $Adapter.ExtensionData.Backing } catch {
-                Write-Verbose "Adapter backing data unavailable: $($_.Exception.Message)"
-            }
-            if ($backing -and $backing.PSObject.Properties['Port'] -and $backing.Port -and $backing.Port.PortgroupKey) {
-                $portGroupView = Get-View -Id $backing.Port.PortgroupKey -ErrorAction SilentlyContinue
-                if ($portGroupView -and $portGroupView.Config) {
-                    try {
-                        $vlanSpec = $portGroupView.Config.DefaultPortConfig.Vlan
-                        if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
-                            $rawId = [int]$vlanSpec.VlanId
-                            if ($rawId -ge 1 -and $rawId -le 4094) {
-                                return [string]$rawId
-                            }
-                        }
-                    } catch {
-                        Write-Verbose "Port group view VLAN spec unavailable: $($_.Exception.Message)"
-                    }
-                    if ([string]$portGroupView.Config.DefaultPortConfig.Vlan -match '\d+') {
-                        return [string]$matches[0]
-                    }
-                }
-            }
-            if ($networkName -match '_(\d{1,4})$') {
-                return $matches[1]
-            }
-            return "PortGroup not found"
-        }
+        # Dot-source the real implementation instead of copying it: the previous
+        # local copy drifted from production and kept the VLAN 0 defect green.
+        . (Join-Path (Split-Path -Parent $PSScriptRoot) 'powershell-migration/lib.ps1')
 
         # Stub functions so Mock can find them
         function script:Get-VDPortgroup { }
@@ -237,10 +169,45 @@ Describe 'Resolve-AdapterVlanId' {
             }
         }
         Mock Get-VDPortgroup { @($fakeDvsPortGroup) }
+        Mock Get-VirtualPortGroup { @() }
         $result = Resolve-AdapterVlanId -Adapter $adapter `
             -DistributedPortGroupCache $distributedCache `
             -StandardPortGroupCache $standardCache
-        $result | Should -Be '0'
+        # The test used to assert '0' -- i.e. the exact behaviour its own name says
+        # must not happen. The -ge 1 guard on VlanId was cancelled out by the
+        # VlanConfiguration string fallback ('VLAN 0' -match '\d+' -> '0').
+        $result | Should -Be 'PortGroup not found'
+    }
+
+    It 'does not invent a VLAN for a trunk port group' {
+        $adapter = [PSCustomObject]@{ NetworkName = 'dvPG-Trunk'; MacAddress = '00:50:56:aa:bb:cc' }
+        $fakeDvsPortGroup = [PSCustomObject]@{
+            Name = 'dvPG-Trunk'
+            VlanConfiguration = 'Trunk (0-4094)'
+            ExtensionData = [PSCustomObject]@{
+                Config = [PSCustomObject]@{
+                    DefaultPortConfig = [PSCustomObject]@{ Vlan = [PSCustomObject]@{ Ranges = '0-4094' } }
+                }
+            }
+        }
+        Mock Get-VDPortgroup { @($fakeDvsPortGroup) }
+        Mock Get-VirtualPortGroup { @() }
+        $result = Resolve-AdapterVlanId -Adapter $adapter `
+            -DistributedPortGroupCache $distributedCache `
+            -StandardPortGroupCache $standardCache
+        $result | Should -Be 'PortGroup not found'
+    }
+
+    It 'rejects VLAN 0 and 4095 on a standard port group' {
+        foreach ($rejectedVlan in @('0', '4095')) {
+            $adapter = [PSCustomObject]@{ NetworkName = 'StdUntagged'; MacAddress = '00:50:56:aa:bb:cc' }
+            Mock Get-VDPortgroup { @() }
+            Mock Get-VirtualPortGroup { @([PSCustomObject]@{ Name = 'StdUntagged'; VLanId = $rejectedVlan }) }
+            $result = Resolve-AdapterVlanId -Adapter $adapter `
+                -DistributedPortGroupCache @{} `
+                -StandardPortGroupCache @{}
+            $result | Should -Be 'PortGroup not found'
+        }
     }
 }
 

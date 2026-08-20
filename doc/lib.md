@@ -60,6 +60,13 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 |----------|-------------|
 | *(résolution VLAN intégrée dans `run-migration.ps1`)* | |
 
+### VMware
+
+| Fonction | Description |
+|----------|-------------|
+| `Test-VmwareVirtualMachineEntity` | Teste si une entité de `Get-TagAssignment` est une VM. PowerCLI renvoie le type d'implémentation (`UniversalVirtualMachineImpl`, `VirtualMachineImpl`), jamais `VirtualMachine` : la fonction accepte le nom de type **ou** le préfixe de l'`Id` managé (`VirtualMachine-vm-…`) |
+| `Resolve-AdapterVlanId` | Résout le VLAN d'une carte réseau VMware (port group distribué, puis standard, puis backing, puis suffixe de nom). Rejette VLAN 0 (untagged), 4095 et les port groups trunk : retourne `PortGroup not found` plutôt qu'un VLAN inventé. Définie ici et non dans `run-migration.ps1` pour que la suite Pester exerce l'implémentation réelle |
+
 ### SCVMM
 
 | Fonction | Description |
