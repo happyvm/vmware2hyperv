@@ -152,18 +152,41 @@ function Start-VmInstantRecovery {
                 [string]$DestinationPath
             )
 
-            $backup = Get-VBRBackup | Where-Object { $_.Name -eq $JobName } | Select-Object -First 1
-            if (-not $backup) {
+            # Same rule as the bulk path in step3-StartInstantRecovery.ps1: consider
+            # EVERY backup carrying this name (a deleted-and-recreated job leaves the
+            # previous one behind), and match the machine on Name or VmName.
+            $backups = @(Get-VBRBackup | Where-Object { $_.Name -eq $JobName })
+            if ($backups.Count -eq 0) {
                 throw "Backup job '$JobName' not found in Veeam."
             }
 
-            $restorePoint = Get-VBRRestorePoint -Backup $backup |
-                Where-Object { $_.Name -eq $Vm } |
+            $restorePoints = @(foreach ($backupEntry in $backups) { Get-VBRRestorePoint -Backup $backupEntry })
+
+            $vmKey = $Vm.Trim().ToLowerInvariant()
+            $machineNames = New-Object System.Collections.Generic.List[string]
+            $matchingRestorePoints = @($restorePoints | Where-Object {
+                $matched = $false
+                foreach ($namePropertyName in @('Name', 'VmName')) {
+                    $nameProperty = $_.PSObject.Properties[$namePropertyName]
+                    if (-not $nameProperty) { continue }
+
+                    $machineName = [string]$nameProperty.Value
+                    if ([string]::IsNullOrWhiteSpace($machineName)) { continue }
+
+                    [void]$machineNames.Add($machineName.Trim())
+                    if ($machineName.Trim().ToLowerInvariant() -eq $vmKey) { $matched = $true }
+                }
+                $matched
+            })
+
+            $restorePoint = $matchingRestorePoints |
                 Sort-Object -Property CreationTime -Descending |
                 Select-Object -First 1
 
             if (-not $restorePoint) {
-                throw "No restore point found for VM '$Vm' in job '$JobName'."
+                $knownNames = @($machineNames | Sort-Object -Unique | Select-Object -First 20)
+                $knownHint = if ($knownNames.Count -gt 0) { $knownNames -join ', ' } else { '<none>' }
+                throw "No restore point found for VM '$Vm' in job '$JobName' ($($backups.Count) backup(s), $($restorePoints.Count) restore point(s)). Machines with a restore point in this job: $knownHint."
             }
 
             Start-VBRHvInstantRecovery -RestorePoint $restorePoint `

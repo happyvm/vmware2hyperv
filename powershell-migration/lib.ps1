@@ -520,7 +520,13 @@ function Write-MigrationLog {
 
     switch ($Level) {
         "ERROR" {
-            Write-Error -Message $entry -ErrorAction Continue
+            # NOT Write-Error: an ERROR *log line* is a reported outcome, not a
+            # PowerShell error record. Write-Error decorated every one of them with
+            # 'Write-Error: <script>:<line>' plus the source of the logging call and
+            # a squiggle underline, which buried the actual message -- a batch with
+            # a handful of failures produced a screenful of noise pointing at the
+            # logger instead of at the failure.
+            $Host.UI.WriteErrorLine($entry)
         }
         "WARNING" {
             Write-Warning -Message $entry

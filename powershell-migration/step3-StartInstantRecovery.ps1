@@ -97,12 +97,48 @@ $startResults = @(Invoke-VeeamCommand -ScriptBlock {
 
     $TaskList = @($TaskList)
 
-    $backup = Get-VBRBackup | Where-Object { $_.Name -eq $JobName } | Select-Object -First 1
-    if (-not $backup) {
+    # ALL backups carrying this name, not just the first one Veeam happens to
+    # enumerate. Deleting and recreating a job leaves the previous backup behind
+    # under the same name, and picking one of the two arbitrarily is how a lot
+    # whose restore points exist in the console still reports 'no restore point'.
+    $backups = @(Get-VBRBackup | Where-Object { $_.Name -eq $JobName })
+    if ($backups.Count -eq 0) {
         throw "Backup job '$JobName' not found in Veeam."
     }
 
-    $restorePoints = @(Get-VBRRestorePoint -Backup $backup)
+    $restorePoints = @(foreach ($backupEntry in $backups) { Get-VBRRestorePoint -Backup $backupEntry })
+
+    # Index by machine name. Veeam exposes it as Name, and as VmName on some
+    # restore point types/versions, so both are indexed (property-guarded: a bare
+    # access throws under StrictMode).
+    $restorePointsByName = @{}
+    foreach ($restorePointEntry in $restorePoints) {
+        foreach ($namePropertyName in @('Name', 'VmName')) {
+            $nameProperty = $restorePointEntry.PSObject.Properties[$namePropertyName]
+            if (-not $nameProperty) { continue }
+
+            $machineName = [string]$nameProperty.Value
+            if ([string]::IsNullOrWhiteSpace($machineName)) { continue }
+
+            $machineKey = $machineName.Trim().ToLowerInvariant()
+            if (-not $restorePointsByName.ContainsKey($machineKey)) {
+                $restorePointsByName[$machineKey] = New-Object System.Collections.ArrayList
+            }
+            [void]$restorePointsByName[$machineKey].Add($restorePointEntry)
+        }
+    }
+
+    # Reported once, so the log says what Veeam actually holds before the
+    # per-VM failures start scrolling past.
+    $availableMachineNames = @($restorePointsByName.Keys | Sort-Object)
+    Write-Output ([pscustomobject]@{
+        VMName        = $null
+        Started       = $false
+        RunAsync      = $false
+        Error         = $null
+        InventoryLine = "Veeam inventory for '$JobName': $($backups.Count) backup(s), $($restorePoints.Count) restore point(s) covering $($availableMachineNames.Count) machine(s)."
+    })
+
     $supportsRunAsync = (Get-Command -Name Start-VBRHvInstantRecovery).Parameters.ContainsKey('RunAsync')
 
     $taskIndex = 0
@@ -110,17 +146,29 @@ $startResults = @(Invoke-VeeamCommand -ScriptBlock {
         $taskIndex++
         $vmName = [string]$task.VMName
 
-        $restorePoint = $restorePoints |
-            Where-Object { $_.Name -eq $vmName } |
-            Sort-Object -Property CreationTime -Descending |
-            Select-Object -First 1
+        $vmKey = $vmName.Trim().ToLowerInvariant()
+        $restorePoint = $null
+        if ($restorePointsByName.ContainsKey($vmKey)) {
+            $restorePoint = @($restorePointsByName[$vmKey]) |
+                Sort-Object -Property CreationTime -Descending |
+                Select-Object -First 1
+        }
 
         if (-not $restorePoint) {
+            # Name what Veeam DOES hold: 'no restore point found' on its own cannot
+            # distinguish a VM missing from the job, a name that differs from the
+            # CSV, and a backup that has not produced a restore point yet.
+            $knownNames = if ($availableMachineNames.Count -gt 0) {
+                ($availableMachineNames | Select-Object -First 20) -join ', '
+            } else {
+                '<none>'
+            }
             [pscustomobject]@{
-                VMName   = $vmName
-                Started  = $false
-                RunAsync = $supportsRunAsync
-                Error    = "No restore point found for VM '$vmName' in job '$JobName'."
+                VMName        = $vmName
+                Started       = $false
+                RunAsync      = $supportsRunAsync
+                Error         = "No restore point found for VM '$vmName' in job '$JobName'. Machines with a restore point in this job: $knownNames."
+                InventoryLine = $null
             }
             continue
         }
@@ -146,10 +194,11 @@ $startResults = @(Invoke-VeeamCommand -ScriptBlock {
         }
 
         [pscustomobject]@{
-            VMName   = $vmName
-            Started  = (-not $startError)
-            RunAsync = $supportsRunAsync
-            Error    = $startError
+            VMName        = $vmName
+            Started       = (-not $startError)
+            RunAsync      = $supportsRunAsync
+            Error         = $startError
+            InventoryLine = $null
         }
 
         if ($DelaySeconds -gt 0 -and $taskIndex -lt $TaskList.Count) {
@@ -157,6 +206,14 @@ $startResults = @(Invoke-VeeamCommand -ScriptBlock {
         }
     }
 } -ArgumentList @($BackupJobName, $tasks, $StartDelaySeconds))
+
+# The scriptblock also emits one inventory record (VMName $null) describing what
+# Veeam holds for this job: log it first so the per-VM outcomes below read
+# against a known inventory.
+foreach ($inventoryRecord in @($startResults | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InventoryLine) })) {
+    Write-MigrationLog ([string]$inventoryRecord.InventoryLine) -LogFile $LogFile
+}
+$startResults = @($startResults | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.VMName) })
 
 $failedStarts = @($startResults | Where-Object { -not $_.Started })
 $startedVmNames = @($startResults | Where-Object { $_.Started } | ForEach-Object { [string]$_.VMName })
