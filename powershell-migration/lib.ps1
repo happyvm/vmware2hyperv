@@ -157,6 +157,27 @@ function Test-ExpectedIPv4Address {
 }
 
 # ---------------------------------------------------------------------------
+# ConvertTo-ScvmmMemoryGigabytes : SCVMM VM memory (MB) -> GB
+#
+# SCVMM exposes VirtualMachine.Memory in MEGABYTES (the setter is
+# Set-SCVirtualMachine -MemoryMB). Treating it as bytes rounds every VM down to
+# 0 GB. The >1e8 guard keeps the conversion correct should a VMM version ever
+# report bytes, using the same heuristic as ConvertTo-MemoryMegabytes in
+# scripts/Invoke-SCVMMHostPatchBaseline.ps1.
+#
+# Also inlined inside the step5 SCVMM scriptblock: that block executes in the
+# Windows PowerShell compatibility session, where lib.ps1 is not loaded.
+# ---------------------------------------------------------------------------
+function ConvertTo-ScvmmMemoryGigabytes {
+    param([AllowNull()][object]$Value)
+    $numeric = 0.0
+    if (-not [double]::TryParse([string]$Value, [ref]$numeric)) { return $null }
+    if ($numeric -lt 0) { return $null }
+    $megabytes = if ($numeric -gt 1e8) { $numeric / 1MB } else { $numeric }
+    return [math]::Round($megabytes / 1024, 1)
+}
+
+# ---------------------------------------------------------------------------
 # Write-MigrationLog : timestamped logging to streams + file
 # ---------------------------------------------------------------------------
 function Write-MigrationLog {

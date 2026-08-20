@@ -558,6 +558,43 @@ function Get-ScvmmInventoryCache {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Get-ScvmmSubnetRealVlanId
+# ══════════════════════════════════════════════════════════════════════════════
+function Get-ScvmmSubnetRealVlanId {
+    <#
+    .SYNOPSIS
+        Returns the real VLAN ID SCVMM stores on a VM subnet, or $null.
+
+    .DESCRIPTION
+        Reads SubnetVLans[].VLanID first, then the subnet's own VLanID. VLAN 0
+        means untagged in SCVMM and is never returned as a mapping key.
+        Property-guarded throughout: subnet objects differ between VMM versions
+        and a bare access throws under StrictMode.
+    #>
+    param(
+        [AllowNull()]
+        $Subnet
+    )
+
+    if (-not $Subnet) { return $null }
+
+    $subnetVlans = Get-ScvmmObjectPropertyValue -InputObject $Subnet -PropertyName 'SubnetVLans' -Context 'VMSubnet'
+    foreach ($subnetVlan in @($subnetVlans)) {
+        $rawVlanValue = [string](Get-ScvmmObjectPropertyValue -InputObject $subnetVlan -PropertyName 'VLanID' -Context 'VMSubnet VLAN')
+        if ($rawVlanValue -match '^\d+$' -and [int]$rawVlanValue -ne 0) {
+            return [string][int]$rawVlanValue
+        }
+    }
+
+    $rawVlanValue = [string](Get-ScvmmObjectPropertyValue -InputObject $Subnet -PropertyName 'VLanID' -Context 'VMSubnet')
+    if ($rawVlanValue -match '^\d+$' -and [int]$rawVlanValue -ne 0) {
+        return [string][int]$rawVlanValue
+    }
+
+    return $null
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Resolve-ScvmmVlanMapping
 # ══════════════════════════════════════════════════════════════════════════════
 function Resolve-ScvmmVlanMapping {
@@ -643,11 +680,67 @@ function Resolve-ScvmmVlanMapping {
         return $null
     }
 
+    # The two lists are independent: taking the first of each could pair a VMNetwork
+    # with a VMSubnet that belongs to a DIFFERENT network, so the adapter ended up on
+    # the wrong subnet (or Set-SCVirtualNetworkAdapter rejected the pair outright).
+    # Prefer the first candidate network that actually owns one of the candidate
+    # subnets, and only fall back to the unrelated pair when nothing matches.
+    # Property-guarded reads: SCVMM subnet objects do not all expose
+    # VMNetwork/VMNetworkID/VMNetworkName, and a bare access throws under StrictMode.
+    $getSubnetOwner = {
+        param($Subnet)
+        $subnetNetwork = Get-ScvmmObjectPropertyValue -InputObject $Subnet -PropertyName 'VMNetwork' -Context 'VMSubnet'
+        $ownerId = [string](Get-ScvmmObjectPropertyValue -InputObject $subnetNetwork -PropertyName 'ID' -Context 'VMSubnet VMNetwork')
+        if ([string]::IsNullOrWhiteSpace($ownerId)) {
+            $ownerId = [string](Get-ScvmmObjectPropertyValue -InputObject $Subnet -PropertyName 'VMNetworkID' -Context 'VMSubnet')
+        }
+        [pscustomobject]@{
+            Id   = $ownerId
+            Name = [string](Get-ScvmmObjectPropertyValue -InputObject $Subnet -PropertyName 'VMNetworkName' -Context 'VMSubnet')
+        }
+    }
+
+    $selectedNetwork = $null
+    $selectedSubnet = $null
+    foreach ($candidateNetwork in $matchingNetworks) {
+        $candidateNetworkId = [string](Get-ScvmmObjectPropertyValue -InputObject $candidateNetwork -PropertyName 'ID' -Context 'VMNetwork')
+        $candidateNetworkName = [string](Get-ScvmmObjectPropertyValue -InputObject $candidateNetwork -PropertyName 'Name' -Context 'VMNetwork')
+
+        $ownedSubnet = $matchingSubnets | Where-Object {
+            $owner = & $getSubnetOwner $_
+            (-not [string]::IsNullOrWhiteSpace($owner.Id) -and $owner.Id -eq $candidateNetworkId) -or
+            (-not [string]::IsNullOrWhiteSpace($owner.Name) -and $owner.Name -eq $candidateNetworkName)
+        } | Select-Object -First 1
+
+        if ($ownedSubnet) {
+            $selectedNetwork = $candidateNetwork
+            $selectedSubnet = $ownedSubnet
+            break
+        }
+    }
+
+    $pairedByOwnership = [bool]$selectedNetwork
+    if (-not $pairedByOwnership) {
+        $selectedNetwork = $matchingNetworks | Select-Object -First 1
+        $selectedSubnet = $matchingSubnets | Select-Object -First 1
+    }
+
+    # A subnet that names a DIFFERENT owning network is a mismatch the caller must
+    # be warned about, even when exactly one network and one subnet matched.
+    # A subnet that carries no ownership information at all stays non-ambiguous:
+    # there was no choice to make.
+    $ownershipConflict = $false
+    if (-not $pairedByOwnership) {
+        $selectedOwner = & $getSubnetOwner $selectedSubnet
+        $ownershipConflict = (-not [string]::IsNullOrWhiteSpace($selectedOwner.Id)) -or
+                             (-not [string]::IsNullOrWhiteSpace($selectedOwner.Name))
+    }
+
     [pscustomobject]@{
-        VMNetwork               = $matchingNetworks | Select-Object -First 1
-        VMSubnet                = $matchingSubnets | Select-Object -First 1
+        VMNetwork               = $selectedNetwork
+        VMSubnet                = $selectedSubnet
         Vlan                    = $VlanKey
-        Ambiguous               = ($matchingNetworks.Count -gt 1 -or $matchingSubnets.Count -gt 1)
+        Ambiguous               = ($ownershipConflict -or $matchingNetworks.Count -gt 1 -or $matchingSubnets.Count -gt 1)
         CandidateVMNetworkNames = @($matchingNetworks | ForEach-Object { [string]$_.Name })
         CandidateVMSubnetNames  = @($matchingSubnets  | ForEach-Object { [string]$_.Name })
         ResolutionMode          = 'name-parsed-vlan'

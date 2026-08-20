@@ -146,6 +146,15 @@ if (-not $DryRun -and -not $Force) {
 
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
 
+# Resolved once and passed to every SCVMM scriptblock below.
+$scvmmServerName = [string](Get-MigrationConfigValue -Config $Config -Path 'SCVMM.Server' -Default '')
+if ([string]::IsNullOrWhiteSpace($scvmmServerName)) {
+    $message = "SCVMM.Server is not configured; the rollback cannot tell whether the Hyper-V copy is still running."
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+    throw $message
+}
+Write-MigrationLog "SCVMM server for rollback lookups: $scvmmServerName" -LogFile $LogFile
+
 try {
     Import-RequiredModule -Name "VMware.VimAutomation.Core" -LogFile $LogFile -UseWindowsPowerShellFallback
     $vmwareAvailable = $true
@@ -189,7 +198,7 @@ function Get-VmwareVmState {
     return [pscustomobject]@{
         Found      = $true
         PowerState = [string]$vm.PowerState
-        VMHost     = [string]$vm.VMHost.Name
+        VMHost     = if ($vm.VMHost) { [string]$vm.VMHost.Name } else { $null }
         Datastore  = [string]$vm.DatastoreIdList
     }
 }
@@ -199,19 +208,47 @@ function Get-HyperVVmInfo {
         [string]$VMName
     )
 
-    return Invoke-SCVMMCommand -ScriptBlock {
-        param($Name)
-        $vm = Get-SCVirtualMachine -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $vm) {
-            return [pscustomobject]@{ Found = $false; Running = $false }
-        }
+    # Every SCVMM lookup goes through -VMMServer: without it the cmdlets target
+    # the local machine (or fail outright inside the WinPS compat session), the
+    # VM was reported as absent, nothing was stopped, and the VMware source was
+    # powered back on next to a still-running Hyper-V copy.
+    #
+    # A failed lookup is reported as QueryFailed, never as "not found": callers
+    # must not treat an unreachable SCVMM as proof that no Hyper-V copy runs.
+    try {
+        return Invoke-SCVMMCommand -ScriptBlock {
+            param($Name, $VmmServerName)
+            $server = Get-SCVMMServer -ComputerName $VmmServerName -ErrorAction Stop
+            if (-not $server) {
+                throw "SCVMM server '$VmmServerName' not reachable."
+            }
+
+            $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server -ErrorAction Stop | Select-Object -First 1
+            if (-not $vm) {
+                # Same shape as the found case: callers read .Host/.ID and a missing
+                # property throws under StrictMode.
+                return [pscustomobject]@{ Found = $false; Running = $false; Host = $null; ID = $null; QueryFailed = $false; Error = $null }
+            }
+            return [pscustomobject]@{
+                Found       = $true
+                Running     = [string]$vm.StatusString -match 'Running|Power.*On|En cours'
+                Host        = if ($vm.VMHost) { [string]$vm.VMHost.ComputerName } else { $null }
+                ID          = [string]$vm.ID
+                QueryFailed = $false
+                Error       = $null
+            }
+        } -ArgumentList @($VMName, $scvmmServerName)
+    } catch {
+        Write-MigrationLog "[$VMName] SCVMM lookup failed on '$scvmmServerName': $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
         return [pscustomobject]@{
-            Found   = $true
-            Running = [string]$vm.StatusString -match 'Running|Power.*On|En cours'
-            Host    = [string]$vm.VMHost.ComputerName
-            ID      = [string]$vm.ID
+            Found       = $false
+            Running     = $false
+            Host        = $null
+            ID          = $null
+            QueryFailed = $true
+            Error       = $_.Exception.Message
         }
-    } -ArgumentList @($VMName)
+    }
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -245,6 +282,20 @@ function Invoke-PowerOnRollback {
     # 2. Check Hyper-V VM state
     $hypervInfo = Get-HyperVVmInfo -VMName $VMName
 
+    # Fail closed: powering the VMware source on while the Hyper-V copy may still
+    # be running would put two VMs with the same identity/IP on the network.
+    if ($hypervInfo.QueryFailed) {
+        Write-MigrationLog "[$VMName] Hyper-V state unknown (SCVMM query failed) — refusing to power on the VMware VM." -Level ERROR -LogFile $LogFile
+        return [pscustomobject]@{
+            VMName      = $VMName
+            Layer       = 'PowerOn'
+            Success     = $false
+            Error       = "SCVMM state unknown ($($hypervInfo.Error)); VMware VM was not restarted."
+            VmwareState = $vmwareState
+            HyperVInfo  = $hypervInfo
+        }
+    }
+
     # 3. Stop Hyper-V VM
     if ($hypervInfo.Found -and $hypervInfo.Running) {
         Write-MigrationLog "[$VMName] Stopping Hyper-V VM on $($hypervInfo.Host)..." -LogFile $LogFile
@@ -252,11 +303,12 @@ function Invoke-PowerOnRollback {
         if (-not $DryRun) {
             try {
                 Invoke-SCVMMCommand -ScriptBlock {
-                    param($Name)
-                    $vm = Get-SCVirtualMachine -Name $Name -ErrorAction Stop | Select-Object -First 1
+                    param($Name, $VmmServerName)
+                    $server = Get-SCVMMServer -ComputerName $VmmServerName
+                    $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server -ErrorAction Stop | Select-Object -First 1
                     if (-not $vm) { throw "VM not found" }
                     Stop-SCVirtualMachine -VM $vm -Shutdown -ErrorAction Stop | Out-Null
-                } -ArgumentList @($VMName)
+                } -ArgumentList @($VMName, $scvmmServerName)
 
                 Write-MigrationLog "[$VMName] Hyper-V VM stopped." -Level SUCCESS -LogFile $LogFile
             } catch {
@@ -265,10 +317,11 @@ function Invoke-PowerOnRollback {
                 # Try force stop
                 try {
                     Invoke-SCVMMCommand -ScriptBlock {
-                        param($Name)
-                        $vm = Get-SCVirtualMachine -Name $Name -ErrorAction Stop | Select-Object -First 1
+                        param($Name, $VmmServerName)
+                        $server = Get-SCVMMServer -ComputerName $VmmServerName
+                        $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server -ErrorAction Stop | Select-Object -First 1
                         if ($vm) { Stop-SCVirtualMachine -VM $vm -Force -ErrorAction Stop | Out-Null }
-                    } -ArgumentList @($VMName)
+                    } -ArgumentList @($VMName, $scvmmServerName)
                     Write-MigrationLog "[$VMName] Hyper-V VM force-stopped." -Level SUCCESS -LogFile $LogFile
                 } catch {
                     Write-MigrationLog "[$VMName] Force stop also failed: $_" -Level ERROR -LogFile $LogFile

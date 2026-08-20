@@ -60,6 +60,12 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 |----------|-------------|
 | *(résolution VLAN intégrée dans `run-migration.ps1`)* | |
 
+### SCVMM
+
+| Fonction | Description |
+|----------|-------------|
+| `ConvertTo-ScvmmMemoryGigabytes` | Convertit la mémoire d'une VM SCVMM (`VirtualMachine.Memory`, exprimée en **Mo**) en Go ; tolère une valeur en octets. Un jumeau inline existe dans le scriptblock SCVMM de `step5-ValidateMigration.ps1`, qui s'exécute dans la session de compatibilité WinPS où `lib.ps1` n'est pas chargé |
+
 ### Ciblage migration
 
 | Fonction | Description |

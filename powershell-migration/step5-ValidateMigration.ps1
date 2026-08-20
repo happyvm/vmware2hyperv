@@ -161,6 +161,8 @@ function Get-HyperVVmInventory {
 
             function Test-ValidIPv4Address { param([AllowNull()][object]$Address) $text = if ($null -eq $Address) { '' } else { ([string]$Address).Trim() }; if ([string]::IsNullOrWhiteSpace($text)) { return $false }; $parsed = [System.Net.IPAddress]::None; if (-not [System.Net.IPAddress]::TryParse($text, [ref]$parsed)) { return $false }; return $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork }
             function Normalize-IPv4AddressList { param([AllowNull()][object[]]$Addresses) $diagnostic = @(); foreach ($address in @($Addresses)) { $text = if ($null -eq $address) { '' } else { ([string]$address).Trim() }; if ([string]::IsNullOrWhiteSpace($text)) { continue }; if (Test-ValidIPv4Address -Address $text) { $diagnostic += $text } }; [pscustomobject]@{ DiagnosticIPv4=@($diagnostic | Select-Object -Unique) } }
+            # Twin of the lib.ps1 helper: lib.ps1 is not loaded in the WinPS compat session.
+            function ConvertTo-ScvmmMemoryGigabytes { param([AllowNull()][object]$Value) $numeric = 0.0; if (-not [double]::TryParse([string]$Value, [ref]$numeric)) { return $null }; if ($numeric -lt 0) { return $null }; $megabytes = if ($numeric -gt 1e8) { $numeric / 1MB } else { $numeric }; return [math]::Round($megabytes / 1024, 1) }
 
             $server = Get-SCVMMServer -ComputerName $VmmServerName
             $nameLookup = @{}
@@ -192,7 +194,11 @@ function Get-HyperVVmInventory {
 
                 $running = [string]$vm.StatusString -match 'Running|Power.*On|En cours'
                 $cpuCount = [int]$vm.CPUCount
-                $memoryGB = [math]::Round([double]$vm.Memory / 1GB, 1)
+
+                # SCVMM exposes VM.Memory in MEGABYTES (Set-SCVirtualMachine -MemoryMB),
+                # so dividing it by 1GB rounded every VM down to 0 GB and made the
+                # MemoryGB check fail for every VM of the batch.
+                $memoryGB = ConvertTo-ScvmmMemoryGigabytes -Value $vm.Memory
 
                 $disks = @(Get-SCVirtualDiskDrive -VM $vm -ErrorAction SilentlyContinue)
                 $diskCount = $disks.Count
@@ -212,6 +218,11 @@ function Get-HyperVVmInventory {
 
                 $haEnabled = [bool]$vm.IsHighlyAvailable
 
+                # Null guard: a VM stored in the library or left in a broken cluster
+                # state has no VMHost, and $null.ComputerName throws under StrictMode,
+                # which used to abort the inventory for the whole batch.
+                $hostName = if ($vm.VMHost) { [string]$vm.VMHost.ComputerName } else { '' }
+
                 # Exact match after split (same rule as step4): a substring match would
                 # let a tag like 'Hyp' pass for 'HypMig'.
                 $tagPresent = if ([string]::IsNullOrWhiteSpace($BackupTag)) { $true }
@@ -224,7 +235,7 @@ function Get-HyperVVmInventory {
                     CPUCount         = $cpuCount
                     MemoryGB         = $memoryGB
                     DiskCount        = $diskCount
-                    HostName         = [string]$vm.VMHost.ComputerName
+                    HostName         = $hostName
                     IntegrationOK    = $integrationOk
                     NICsConnected    = $nicsConnected
                     IPAddresses      = @($ips)
