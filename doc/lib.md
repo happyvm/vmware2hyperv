@@ -30,7 +30,7 @@ Connect-VCenter -Server "vcenter.domain.local" -LogFile $LogFile
 
 | Fonction | Description |
 |----------|-------------|
-| `Connect-VCenter` | Connexion vCenter avec fallback credential prompt |
+| `Connect-VCenter` | Connexion vCenter avec fallback credential prompt, mis en cache en mémoire par serveur pour toute l'exécution |
 | `Disconnect-VCenter` | Déconnexion silencieuse |
 | `Import-RequiredModule` | Import de module avec stratégie de fallback PS7/WinPS |
 
@@ -45,6 +45,12 @@ Connect-VCenter -Server "vcenter.domain.local" -LogFile $LogFile
 | `Invoke-VeeamCommand` | Proxy Veeam via WinPS compat session |
 
 Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `FailoverClusters`) sont chargés prioritairement via la session de compatibilité Windows PowerShell pour éviter les erreurs .NET type-initializer dans PS7.
+
+`Connect-VCenter` essaie d'abord l'authentification intégrée Windows. Si elle
+échoue, la saisie explicite n'est demandée qu'une fois par vCenter et réutilisée
+par les étapes suivantes du même processus PowerShell. Le cache est uniquement
+en mémoire (aucun mot de passe n'est écrit dans la configuration ou sur disque)
+et les identifiants de deux vCenters différents ne sont jamais mélangés.
 
 ### Mapping OS
 

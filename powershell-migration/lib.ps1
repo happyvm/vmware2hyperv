@@ -593,7 +593,13 @@ function Assert-PathPresent {
 # ---------------------------------------------------------------------------
 # Connect-VCenter : vCenter connection using Multiple mode
 # ---------------------------------------------------------------------------
-$script:VCenterCredentialFallback = $null
+# Keep explicit credentials in process memory only.  lib.ps1 is dot-sourced by
+# several workflow scripts, so script-scoped state is recreated at every step
+# and used to cause a new prompt each time.  A global, per-server cache survives
+# those script-scope boundaries without writing a password to disk.
+if (-not (Get-Variable -Name 'Vmware2HyperVCredentialCache' -Scope Global -ErrorAction SilentlyContinue)) {
+    $global:Vmware2HyperVCredentialCache = @{}
+}
 
 function Get-VCenterPowerCLIConfiguration {
     return Get-PowerCLIConfiguration
@@ -642,6 +648,25 @@ function Connect-VCenter {
         Set-VCenterPowerCLIConfigurationMultipleMode
     }
 
+    $serverKey = $Server.Trim().ToLowerInvariant()
+    $cachedCredential = $global:Vmware2HyperVCredentialCache[$serverKey]
+
+    # Once pass-through has failed for this vCenter, do not repeat the known-to-
+    # fail SSO attempt at every workflow step.  Reuse only this server's cached
+    # credential; another vCenter may have a different local identity source.
+    if ($cachedCredential) {
+        try {
+            Invoke-VCenterVIServerConnection -Server $Server -Credential $cachedCredential
+            Write-MigrationLog "Connected to vCenter using cached fallback credentials: $Server" -Level SUCCESS -LogFile $LogFile
+            return
+        } catch {
+            # The password may have changed.  Remove it so the operator gets one
+            # fresh prompt rather than repeatedly retrying a stale credential.
+            $global:Vmware2HyperVCredentialCache.Remove($serverKey)
+            Write-MigrationLog "Cached credentials failed for vCenter $Server. Requesting updated credentials." -Level WARNING -LogFile $LogFile
+        }
+    }
+
     try {
         Invoke-VCenterVIServerConnection -Server $Server
         Write-MigrationLog "Connected to vCenter using current Windows credentials: $Server" -Level SUCCESS -LogFile $LogFile
@@ -650,18 +675,17 @@ function Connect-VCenter {
         Write-MigrationLog "Windows credential pass-through failed for vCenter $Server. Falling back to an explicit credential prompt." -Level WARNING -LogFile $LogFile
     }
 
-    if (-not $script:VCenterCredentialFallback) {
-        $script:VCenterCredentialFallback = Request-VCenterFallbackCredential -Server $Server
-    }
+    $fallbackCredential = Request-VCenterFallbackCredential -Server $Server
 
-    if (-not $script:VCenterCredentialFallback) {
+    if (-not $fallbackCredential) {
         $message = "Failed to connect to vCenter ${Server}: no fallback credential was provided."
         Write-MigrationLog $message -Level ERROR -LogFile $LogFile
         throw $message
     }
 
     try {
-        Invoke-VCenterVIServerConnection -Server $Server -Credential $script:VCenterCredentialFallback
+        Invoke-VCenterVIServerConnection -Server $Server -Credential $fallbackCredential
+        $global:Vmware2HyperVCredentialCache[$serverKey] = $fallbackCredential
         Write-MigrationLog "Connected to vCenter using fallback credentials: $Server" -Level SUCCESS -LogFile $LogFile
     } catch {
         $message = "Failed to connect to vCenter $Server with fallback credentials: $_"
