@@ -560,13 +560,8 @@ else {
     Write-ExecutionLog "WARNING: vCenter SSL certificate validation is disabled for this session (InvalidCertificateAction = Ignore, Scope Session)." -Level WARN
     Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Scope Session -Confirm:$false | Out-Null
 
-    try {
-        Connect-VIServer -Server $VCenter -ErrorAction Stop | Out-Null
-        $script:ConnectedByScript = $true
-    }
-    catch {
-        throw "Cannot connect to $VCenter : $_"
-    }
+    Connect-VCenter -Server $VCenter -LogFile $LogFile
+    $script:ConnectedByScript = $true
 }
 
 try {
