@@ -16,6 +16,125 @@ Set-StrictMode -Version Latest
 # Bounded-name restore session lookup to avoid prefix collisions
 # (e.g. WEB1 matching WEB10's session).
 # ============================================================================
+function Get-VeeamPropertyValue {
+    <#
+    .SYNOPSIS
+    First non-empty value among candidate property paths on a Veeam object.
+
+    .DESCRIPTION
+    Veeam object shapes differ across B&R versions and session types: the same
+    piece of information lives on 'State' or 'Status', on 'Progress' or on
+    'Progress.Percents'. Reading a single hard-coded name silently yields
+    nothing on the versions that name it differently -- which is how the
+    InstantRecovery and Progress columns of the step3 dashboard came to display
+    '<none>' and '-' forever.
+
+    Dotted paths are walked segment by segment, property-guarded throughout so
+    a missing segment returns $null instead of throwing under StrictMode.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$PropertyPaths
+    )
+
+    foreach ($propertyPath in $PropertyPaths) {
+        $current = $InputObject
+        $resolved = $true
+
+        foreach ($segment in ($propertyPath -split '\.')) {
+            if ($null -eq $current) { $resolved = $false; break }
+            $property = $current.PSObject.Properties[$segment]
+            if (-not $property) { $resolved = $false; break }
+            $current = $property.Value
+        }
+
+        if ($resolved -and $null -ne $current -and -not [string]::IsNullOrWhiteSpace([string]$current)) {
+            return $current
+        }
+    }
+
+    return $null
+}
+
+function Get-VeeamObjectPropertySummary {
+    <#
+    .SYNOPSIS
+    Type name and property names of a Veeam object, for diagnostics.
+
+    .DESCRIPTION
+    Emitted once when a dashboard column cannot be resolved, so the candidate
+    list above can be corrected against what this Veeam module really returns
+    instead of being guessed at.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $InputObject,
+
+        [int]$MaxProperties = 40
+    )
+
+    if ($null -eq $InputObject) { return '<null>' }
+
+    $names = @($InputObject.PSObject.Properties.Name | Sort-Object)
+    $shown = @($names | Select-Object -First $MaxProperties)
+    $suffix = if ($names.Count -gt $shown.Count) { " (+$($names.Count - $shown.Count) more)" } else { '' }
+
+    return "$($InputObject.GetType().Name) [$($shown -join ', ')]$suffix"
+}
+
+function Find-VmInstantRecoverySession {
+    <#
+    .SYNOPSIS
+    Finds the Instant Recovery session of a VM, whatever property carries its name.
+
+    .DESCRIPTION
+    Get-VBRInstantRecovery exposes the machine name as VmName, VMName,
+    MachineName or Name depending on the module version. Matching on a single
+    one of them left the session unresolved on every other version -- the
+    dashboard's InstantRecovery column then stayed '<none>' and the mount could
+    only ever be detected through the restore session log fallback.
+
+    Uses the same bounded pattern as Find-VmRestoreSession so WEB1 never matches
+    WEB10.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [object[]]$InstantRecoverySessions = @()
+    )
+
+    # Bounded pattern: ^{name}($|[^\w-]). It stops WEB1 matching WEB10 but, since
+    # '-' is excluded from the boundary class, it does NOT by itself allow the
+    # '-migrationhyp' suffix Veeam appends -- hence the explicit clause, exactly
+    # as in Find-VmRestoreSession.
+    $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($VmName)
+
+    foreach ($session in @($InstantRecoverySessions)) {
+        $candidateName = Get-VeeamPropertyValue -InputObject $session -PropertyPaths @(
+            'VmName', 'VMName', 'MachineName', 'Name', 'VmDisplayName'
+        )
+        if ($null -eq $candidateName) { continue }
+
+        $candidateText = [string]$candidateName
+        if ($candidateText -eq $VmName -or
+            $candidateText -eq "$VmName-migrationhyp" -or
+            $candidateText -match $vmSessionPattern) {
+            return $session
+        }
+    }
+
+    return $null
+}
+
 function Find-VmRestoreSession {
     <#
     .SYNOPSIS
@@ -47,8 +166,9 @@ function Find-VmRestoreSession {
         [object[]]$RestoreSessions
     )
 
-    # Bounded pattern: ^{name}($|[^\w-])
-    # Prevents WEB1 from matching WEB10, while still allowing WEB1-migrationhyp.
+    # Bounded pattern: ^{name}($|[^\w-]). Prevents WEB1 from matching WEB10.
+    # '-' is excluded from the boundary class, so WEB1-migrationhyp is allowed by
+    # the explicit equality clause below, not by this pattern.
     $vmSessionPattern = '^{0}($|[^\w-])' -f [regex]::Escape($VmName)
 
     if ($PSBoundParameters.ContainsKey('RestoreSessions')) {
@@ -60,9 +180,11 @@ function Find-VmRestoreSession {
 
     $restoreSession = $sessions |
         Where-Object {
-            $_.Name -eq $VmName -or
-            $_.Name -eq "$VmName-migrationhyp" -or
-            $_.Name -match $vmSessionPattern
+            # Property-guarded: a session without a Name would throw under StrictMode.
+            $sessionName = [string](Get-VeeamPropertyValue -InputObject $_ -PropertyPaths @('Name'))
+            $sessionName -eq $VmName -or
+            $sessionName -eq "$VmName-migrationhyp" -or
+            $sessionName -match $vmSessionPattern
         } |
         Sort-Object -Property CreationTime -Descending |
         Select-Object -First 1
@@ -152,18 +274,41 @@ function Start-VmInstantRecovery {
                 [string]$DestinationPath
             )
 
-            $backup = Get-VBRBackup | Where-Object { $_.Name -eq $JobName } | Select-Object -First 1
-            if (-not $backup) {
+            # Same rule as the bulk path in step3-StartInstantRecovery.ps1: consider
+            # EVERY backup carrying this name (a deleted-and-recreated job leaves the
+            # previous one behind), and match the machine on Name or VmName.
+            $backups = @(Get-VBRBackup | Where-Object { $_.Name -eq $JobName })
+            if ($backups.Count -eq 0) {
                 throw "Backup job '$JobName' not found in Veeam."
             }
 
-            $restorePoint = Get-VBRRestorePoint -Backup $backup |
-                Where-Object { $_.Name -eq $Vm } |
+            $restorePoints = @(foreach ($backupEntry in $backups) { Get-VBRRestorePoint -Backup $backupEntry })
+
+            $vmKey = $Vm.Trim().ToLowerInvariant()
+            $machineNames = New-Object System.Collections.Generic.List[string]
+            $matchingRestorePoints = @($restorePoints | Where-Object {
+                $matched = $false
+                foreach ($namePropertyName in @('Name', 'VmName')) {
+                    $nameProperty = $_.PSObject.Properties[$namePropertyName]
+                    if (-not $nameProperty) { continue }
+
+                    $machineName = [string]$nameProperty.Value
+                    if ([string]::IsNullOrWhiteSpace($machineName)) { continue }
+
+                    [void]$machineNames.Add($machineName.Trim())
+                    if ($machineName.Trim().ToLowerInvariant() -eq $vmKey) { $matched = $true }
+                }
+                $matched
+            })
+
+            $restorePoint = $matchingRestorePoints |
                 Sort-Object -Property CreationTime -Descending |
                 Select-Object -First 1
 
             if (-not $restorePoint) {
-                throw "No restore point found for VM '$Vm' in job '$JobName'."
+                $knownNames = @($machineNames | Sort-Object -Unique | Select-Object -First 20)
+                $knownHint = if ($knownNames.Count -gt 0) { $knownNames -join ', ' } else { '<none>' }
+                throw "No restore point found for VM '$Vm' in job '$JobName' ($($backups.Count) backup(s), $($restorePoints.Count) restore point(s)). Machines with a restore point in this job: $knownHint."
             }
 
             Start-VBRHvInstantRecovery -RestorePoint $restorePoint `

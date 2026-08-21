@@ -146,6 +146,15 @@ if (-not $DryRun -and -not $Force) {
 
 Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
 
+# Resolved once and passed to every SCVMM scriptblock below.
+$scvmmServerName = [string](Get-MigrationConfigValue -Config $Config -Path 'SCVMM.Server' -Default '')
+if ([string]::IsNullOrWhiteSpace($scvmmServerName)) {
+    $message = "SCVMM.Server is not configured; the rollback cannot tell whether the Hyper-V copy is still running."
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+    throw $message
+}
+Write-MigrationLog "SCVMM server for rollback lookups: $scvmmServerName" -LogFile $LogFile
+
 try {
     Import-RequiredModule -Name "VMware.VimAutomation.Core" -LogFile $LogFile -UseWindowsPowerShellFallback
     $vmwareAvailable = $true
@@ -180,6 +189,7 @@ function Get-VmwareVmState {
     if (-not $vm) {
         return [pscustomobject]@{
             Found      = $false
+            Id         = $null
             PowerState = $null
             VMHost     = $null
             Datastore  = $null
@@ -188,8 +198,13 @@ function Get-VmwareVmState {
 
     return [pscustomobject]@{
         Found      = $true
+        # The moref of the VM that was actually inspected. The power-on step
+        # re-resolves by Id rather than by name so it cannot act on a homonym
+        # in another folder/datacenter, nor on a different VM than the one whose
+        # power state was just read.
+        Id         = [string]$vm.Id
         PowerState = [string]$vm.PowerState
-        VMHost     = [string]$vm.VMHost.Name
+        VMHost     = if ($vm.VMHost) { [string]$vm.VMHost.Name } else { $null }
         Datastore  = [string]$vm.DatastoreIdList
     }
 }
@@ -199,19 +214,47 @@ function Get-HyperVVmInfo {
         [string]$VMName
     )
 
-    return Invoke-SCVMMCommand -ScriptBlock {
-        param($Name)
-        $vm = Get-SCVirtualMachine -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $vm) {
-            return [pscustomobject]@{ Found = $false; Running = $false }
-        }
+    # Every SCVMM lookup goes through -VMMServer: without it the cmdlets target
+    # the local machine (or fail outright inside the WinPS compat session), the
+    # VM was reported as absent, nothing was stopped, and the VMware source was
+    # powered back on next to a still-running Hyper-V copy.
+    #
+    # A failed lookup is reported as QueryFailed, never as "not found": callers
+    # must not treat an unreachable SCVMM as proof that no Hyper-V copy runs.
+    try {
+        return Invoke-SCVMMCommand -ScriptBlock {
+            param($Name, $VmmServerName)
+            $server = Get-SCVMMServer -ComputerName $VmmServerName -ErrorAction Stop
+            if (-not $server) {
+                throw "SCVMM server '$VmmServerName' not reachable."
+            }
+
+            $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server -ErrorAction Stop | Select-Object -First 1
+            if (-not $vm) {
+                # Same shape as the found case: callers read .Host/.ID and a missing
+                # property throws under StrictMode.
+                return [pscustomobject]@{ Found = $false; Running = $false; Host = $null; ID = $null; QueryFailed = $false; Error = $null }
+            }
+            return [pscustomobject]@{
+                Found       = $true
+                Running     = [string]$vm.StatusString -match 'Running|Power.*On|En cours'
+                Host        = if ($vm.VMHost) { [string]$vm.VMHost.ComputerName } else { $null }
+                ID          = [string]$vm.ID
+                QueryFailed = $false
+                Error       = $null
+            }
+        } -ArgumentList @($VMName, $scvmmServerName)
+    } catch {
+        Write-MigrationLog "[$VMName] SCVMM lookup failed on '$scvmmServerName': $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
         return [pscustomobject]@{
-            Found   = $true
-            Running = [string]$vm.StatusString -match 'Running|Power.*On|En cours'
-            Host    = [string]$vm.VMHost.ComputerName
-            ID      = [string]$vm.ID
+            Found       = $false
+            Running     = $false
+            Host        = $null
+            ID          = $null
+            QueryFailed = $true
+            Error       = $_.Exception.Message
         }
-    } -ArgumentList @($VMName)
+    }
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -245,6 +288,20 @@ function Invoke-PowerOnRollback {
     # 2. Check Hyper-V VM state
     $hypervInfo = Get-HyperVVmInfo -VMName $VMName
 
+    # Fail closed: powering the VMware source on while the Hyper-V copy may still
+    # be running would put two VMs with the same identity/IP on the network.
+    if ($hypervInfo.QueryFailed) {
+        Write-MigrationLog "[$VMName] Hyper-V state unknown (SCVMM query failed) — refusing to power on the VMware VM." -Level ERROR -LogFile $LogFile
+        return [pscustomobject]@{
+            VMName      = $VMName
+            Layer       = 'PowerOn'
+            Success     = $false
+            Error       = "SCVMM state unknown ($($hypervInfo.Error)); VMware VM was not restarted."
+            VmwareState = $vmwareState
+            HyperVInfo  = $hypervInfo
+        }
+    }
+
     # 3. Stop Hyper-V VM
     if ($hypervInfo.Found -and $hypervInfo.Running) {
         Write-MigrationLog "[$VMName] Stopping Hyper-V VM on $($hypervInfo.Host)..." -LogFile $LogFile
@@ -252,11 +309,12 @@ function Invoke-PowerOnRollback {
         if (-not $DryRun) {
             try {
                 Invoke-SCVMMCommand -ScriptBlock {
-                    param($Name)
-                    $vm = Get-SCVirtualMachine -Name $Name -ErrorAction Stop | Select-Object -First 1
+                    param($Name, $VmmServerName)
+                    $server = Get-SCVMMServer -ComputerName $VmmServerName
+                    $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server -ErrorAction Stop | Select-Object -First 1
                     if (-not $vm) { throw "VM not found" }
                     Stop-SCVirtualMachine -VM $vm -Shutdown -ErrorAction Stop | Out-Null
-                } -ArgumentList @($VMName)
+                } -ArgumentList @($VMName, $scvmmServerName)
 
                 Write-MigrationLog "[$VMName] Hyper-V VM stopped." -Level SUCCESS -LogFile $LogFile
             } catch {
@@ -265,10 +323,11 @@ function Invoke-PowerOnRollback {
                 # Try force stop
                 try {
                     Invoke-SCVMMCommand -ScriptBlock {
-                        param($Name)
-                        $vm = Get-SCVirtualMachine -Name $Name -ErrorAction Stop | Select-Object -First 1
+                        param($Name, $VmmServerName)
+                        $server = Get-SCVMMServer -ComputerName $VmmServerName
+                        $vm = Get-SCVirtualMachine -Name $Name -VMMServer $server -ErrorAction Stop | Select-Object -First 1
                         if ($vm) { Stop-SCVirtualMachine -VM $vm -Force -ErrorAction Stop | Out-Null }
-                    } -ArgumentList @($VMName)
+                    } -ArgumentList @($VMName, $scvmmServerName)
                     Write-MigrationLog "[$VMName] Hyper-V VM force-stopped." -Level SUCCESS -LogFile $LogFile
                 } catch {
                     Write-MigrationLog "[$VMName] Force stop also failed: $_" -Level ERROR -LogFile $LogFile
@@ -289,10 +348,22 @@ function Invoke-PowerOnRollback {
 
         if (-not $DryRun) {
             try {
-                $vm = VMware.VimAutomation.Core\Get-VM -Name $VMName |
+                $vm = VMware.VimAutomation.Core\Get-VM -Id $vmwareState.Id -Server $VcenterServer -ErrorAction SilentlyContinue |
                     Where-Object { $_.PowerState -eq 'PoweredOff' } |
                     Select-Object -First 1
                 if ($vm) {
+                    # step2 unplugs the source NICs and clears their
+                    # "connect at power on" flag so the migrated VM keeps the
+                    # identity to itself. Restoring the source means plugging
+                    # them back in FIRST, otherwise the VM boots with no network
+                    # and the rollback restores nothing usable.
+                    $reconnectResult = Set-VmwareVmNetworkAdapterConnection -VmName $VMName -VmObject $vm -Connected $true -LogFile $LogFile
+                    if ($reconnectResult.FailedCount -gt 0) {
+                        Write-MigrationLog "[$VMName] $($reconnectResult.FailedCount)/$($reconnectResult.AdapterCount) NIC(s) could not be reconnected; the VM will start without full network connectivity." -Level ERROR -LogFile $LogFile
+                    } elseif ($reconnectResult.ChangedCount -gt 0) {
+                        Write-MigrationLog "[$VMName] Reconnected $($reconnectResult.ChangedCount)/$($reconnectResult.AdapterCount) NIC(s) before power on." -Level SUCCESS -LogFile $LogFile
+                    }
+
                     Start-VM -VM $vm -ErrorAction Stop | Out-Null
                     Write-MigrationLog "[$VMName] VMware VM started." -Level SUCCESS -LogFile $LogFile
                 } else {
@@ -321,10 +392,27 @@ function Invoke-PowerOnRollback {
                 }
             }
         } else {
-            Write-MigrationLog "[DRY-RUN] Would start VMware VM on $($vmwareState.VMHost)" -LogFile $LogFile
+            Write-MigrationLog "[DRY-RUN] Would reconnect the NICs of VMware VM '$VMName' (including at power on), then start it on $($vmwareState.VMHost)" -LogFile $LogFile
         }
     } elseif ($vmwareState.PowerState -eq 'PoweredOn') {
         Write-MigrationLog "[$VMName] VMware VM is already powered on." -LogFile $LogFile
+
+        # It may still be running with the NICs step2 unplugged, which is not a
+        # restored service. Plug them back in here too.
+        if (-not $DryRun) {
+            $runningVm = VMware.VimAutomation.Core\Get-VM -Id $vmwareState.Id -Server $VcenterServer -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($runningVm) {
+                $reconnectResult = Set-VmwareVmNetworkAdapterConnection -VmName $VMName -VmObject $runningVm -Connected $true -LogFile $LogFile
+                if ($reconnectResult.FailedCount -gt 0) {
+                    Write-MigrationLog "[$VMName] $($reconnectResult.FailedCount)/$($reconnectResult.AdapterCount) NIC(s) could not be reconnected on the running VM." -Level ERROR -LogFile $LogFile
+                } elseif ($reconnectResult.ChangedCount -gt 0) {
+                    Write-MigrationLog "[$VMName] Reconnected $($reconnectResult.ChangedCount)/$($reconnectResult.AdapterCount) NIC(s) on the running VM." -Level SUCCESS -LogFile $LogFile
+                }
+            }
+        } else {
+            Write-MigrationLog "[DRY-RUN] Would reconnect the NICs of the already-running VMware VM '$VMName'" -LogFile $LogFile
+        }
     } else {
         # Suspended or any other unexpected power state: powering on blindly could
         # resume a stale workload — require manual handling and report a failure.

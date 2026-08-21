@@ -241,16 +241,26 @@ function Set-VmNetworkConfiguration {
         $networkMappingsBySourceNetworkName = @{}
         $networkMappingsByVlan[$Vlan] = $defaultMapping
 
+        # Keep every source adapter that carries usable information, not only those
+        # with a numeric VLAN. run-migration.ps1 stores 'PortGroup not found' as the
+        # VlanId when the port group cannot be resolved; dropping those entries lost
+        # their MAC and NetworkName mappings entirely AND shifted the index fallback,
+        # so the remaining NICs were paired with the wrong source adapters.
+        # Adapters that resolve to nothing still land on the default VLAN, as before.
         $adapterMappings = @()
         if ($AdapterVlanMappings) {
-            $adapterMappings = @($AdapterVlanMappings | Where-Object { $_.VlanId -match '^\d+$' })
+            $adapterMappings = @($AdapterVlanMappings | Where-Object {
+                ([string]$_.VlanId -match '^\d+$') -or
+                (-not [string]::IsNullOrWhiteSpace([string]$_.NetworkName)) -or
+                (-not [string]::IsNullOrWhiteSpace([string]$_.MacAddress))
+            })
         }
 
         foreach ($adapterMapping in $adapterMappings) {
             $mappingVlan = [string]$adapterMapping.VlanId
             $mappingNetworkName = [string]$adapterMapping.NetworkName
 
-            if (-not $networkMappingsByVlan.ContainsKey($mappingVlan)) {
+            if ($mappingVlan -match '^\d+$' -and -not $networkMappingsByVlan.ContainsKey($mappingVlan)) {
                 $resolvedMapping = Resolve-ScvmmVlanMapping -InventoryCache $inventoryCache -VlanKey $mappingVlan
                 if ($resolvedMapping) {
                     $networkMappingsByVlan[$mappingVlan] = $resolvedMapping
@@ -285,15 +295,33 @@ function Set-VmNetworkConfiguration {
                         @($inventoryCache.VMSubnetsByVmNetworkId[[string]$selectedByName.ID])
                     } else {
                         @($allVMSubnets | Where-Object {
-                            ($_.VMNetwork -and $_.VMNetwork.ID -eq $selectedByName.ID) -or
-                            ($_.VMNetworkName -and $_.VMNetworkName -eq $selectedByName.Name)
+                            # Property-guarded: not every VMM version exposes VMNetwork /
+                            # VMNetworkName on a subnet, and a bare access throws under StrictMode.
+                            $subnetNetwork = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'VMNetwork' -Context 'VMSubnet'
+                            $subnetNetworkName = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'VMNetworkName' -Context 'VMSubnet'
+                            ($subnetNetwork -and $subnetNetwork.ID -eq $selectedByName.ID) -or
+                            ($subnetNetworkName -and $subnetNetworkName -eq $selectedByName.Name)
                         })
                     })
                     if ($matchingSubnetByName.Count -gt 0) {
+                        $selectedSubnetByName = $matchingSubnetByName | Select-Object -First 1
+
+                        # The VLAN tag must come from the subnet the NIC is actually
+                        # attached to. Falling back to the VM's default VLAN here tagged
+                        # the adapter with one VLAN while placing it on another subnet.
+                        $selectedSubnetRealVlan = Get-ScvmmSubnetRealVlanId -Subnet $selectedSubnetByName
+                        $resolvedVlanForName = if ($selectedSubnetRealVlan) {
+                            $selectedSubnetRealVlan
+                        } elseif ($mappingVlan -match '^\d+$') {
+                            $mappingVlan
+                        } else {
+                            $Vlan
+                        }
+
                         $networkMappingsBySourceNetworkName[$mappingNetworkName] = [pscustomobject]@{
                             VMNetwork               = $selectedByName
-                            VMSubnet                = $matchingSubnetByName | Select-Object -First 1
-                            Vlan                    = if ($mappingVlan -match '^\d+$') { $mappingVlan } else { $Vlan }
+                            VMSubnet                = $selectedSubnetByName
+                            Vlan                    = $resolvedVlanForName
                             Ambiguous               = ($matchingByName.Count -gt 1 -or $matchingSubnetByName.Count -gt 1)
                             CandidateVMNetworkNames = @($matchingByName     | ForEach-Object { [string]$_.Name })
                             CandidateVMSubnetNames  = @($matchingSubnetByName | ForEach-Object { [string]$_.Name })

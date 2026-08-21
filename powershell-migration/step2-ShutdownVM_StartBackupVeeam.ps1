@@ -89,70 +89,100 @@ if ($rowsWithTag) {
 }
 
 function Disconnect-VmNetworkAdapters {
+    <#
+    .SYNOPSIS
+        Unplug every NIC of a migrated source VM, now AND at every future boot.
+
+    .DESCRIPTION
+        Clearing only the live link state (Set-NetworkAdapter -Connected:$false)
+        leaves StartConnected untouched, so the source VM rejoins the network as
+        soon as anybody powers it back on -- colliding with the migrated Hyper-V
+        VM, which now owns the same identity and IP. StartConnected is therefore
+        always written; the runtime flag only applies while the VM is running.
+
+        This also has to run on VMs that were ALREADY powered off: their live
+        link state is meaningless, but their StartConnected flag is exactly what
+        needs clearing.
+
+        Invoke-Rollback.ps1 plugs the NICs back in when it restores the VMware
+        source (Set-VmwareVmNetworkAdapterConnection -Connected $true).
+    #>
     param(
         [Parameter(Mandatory = $true)]
         [string]$VmName,
 
+        # The VM object resolved by the caller. Re-resolving by name here would
+        # re-open the homonym hole this step guards against upstream, and would
+        # cost an extra vCenter round-trip per VM.
+        [Parameter(Mandatory = $true)]
+        $VmObject,
+
         [string]$LogFile
     )
 
-    $vmObj = VMware.VimAutomation.Core\Get-VM -Name $VmName -ErrorAction SilentlyContinue
-    if (-not $vmObj) {
-        Write-MigrationLog "Unable to disconnect NICs: VM not found ($VmName)." -Level WARNING -LogFile $LogFile
+    $result = Set-VmwareVmNetworkAdapterConnection -VmName $VmName -VmObject $VmObject -Connected $false -LogFile $LogFile
+
+    if ($result.AdapterCount -eq 0) {
         return
     }
 
-    $networkAdapters = VMware.VimAutomation.Core\Get-NetworkAdapter -VM $vmObj -ErrorAction SilentlyContinue
-    if (-not $networkAdapters) {
-        Write-MigrationLog "No network adapter found on VM $VmName." -Level WARNING -LogFile $LogFile
-        return
+    if ($result.FailedCount -gt 0) {
+        Write-MigrationLog "$($result.FailedCount)/$($result.AdapterCount) NIC(s) on VM $VmName could NOT be unplugged: this VM may rejoin the network if it is powered on again. Disconnect them manually in vCenter before validating the batch." -Level ERROR -LogFile $LogFile
     }
 
-    # @(): a single connected adapter is a scalar and .Count on it throws under StrictMode.
-    # PowerCLI adapter objects differ by version; some expose Connected only on
-    # ExtensionData.Connectable. Guard property access so StrictMode does not
-    # turn a disconnected/older adapter shape into a hard failure.
-    $connectedAdapters = @($networkAdapters | Where-Object {
-        if ($_.PSObject.Properties['Connected']) {
-            return [bool]$_.Connected
-        }
-
-        if (
-            $_.PSObject.Properties['ExtensionData'] -and $_.ExtensionData -and
-            $_.ExtensionData.PSObject.Properties['Connectable'] -and $_.ExtensionData.Connectable -and
-            $_.ExtensionData.Connectable.PSObject.Properties['Connected']
-        ) {
-            return [bool]$_.ExtensionData.Connectable.Connected
-        }
-
-        $availableProperties = @($_.PSObject.Properties.Name | Sort-Object) -join ', '
-        Write-Verbose "PowerCLI debug: adapter for VM '$VmName' has no direct Connected property and no ExtensionData.Connectable.Connected value. Available properties: $availableProperties"
-        return $false
-    })
-    if (-not $connectedAdapters) {
-        Write-MigrationLog "All NICs are already disconnected on VM $VmName." -Level INFO -LogFile $LogFile
-        return
+    if ($result.ChangedCount -gt 0) {
+        Write-MigrationLog "Disconnected $($result.ChangedCount)/$($result.AdapterCount) NIC(s) on VM $VmName (also cleared 'connect at power on')." -Level SUCCESS -LogFile $LogFile
+    } elseif ($result.FailedCount -eq 0) {
+        Write-MigrationLog "All NICs on VM $VmName are already disconnected, including at power on." -Level INFO -LogFile $LogFile
     }
-
-    foreach ($adapter in $connectedAdapters) {
-        VMware.VimAutomation.Core\Set-NetworkAdapter -NetworkAdapter $adapter -Connected:$false -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-    }
-
-    Write-MigrationLog "Disconnected $($connectedAdapters.Count) NIC(s) on VM $VmName." -Level SUCCESS -LogFile $LogFile
 }
 
 $vmStates = @{}
 $timeoutSeconds = [int](Get-MigrationConfigValue -Config $Config -Path 'Timeouts.Shutdown.GracefulShutdownSeconds' -Default 300)
 $pollIntervalSeconds = 10
+
+# Resolve every VM BEFORE touching any of them. Get-VM -Name returns one object
+# per match, and vCenter allows the same VM name in several folders or
+# datacenters (step0-precheck refuses such names outright). Passing that array
+# straight to Stop-VMGuest / Set-NetworkAdapter shut down and unplugged EVERY
+# homonym, and '$vmObj.PowerState -eq "PoweredOff"' on an array returns the
+# matching subset -- truthy as soon as ONE homonym was off -- so the VM that was
+# actually running could be reported as already stopped and backed up live.
+$resolvedVms = @{}
+$ambiguousVmNames = @()
+
+foreach ($vmEntry in $vmList) {
+    $vmName = $vmEntry.VMName
+    $vmMatches = @(VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue)
+
+    if ($vmMatches.Count -eq 0) {
+        Write-MigrationLog "VM not found: $vmName" -Level WARNING -LogFile $LogFile
+        continue
+    }
+
+    if ($vmMatches.Count -gt 1) {
+        $ambiguousVmNames += $vmName
+        Write-MigrationLog "Ambiguous VM name '$vmName': $($vmMatches.Count) VMs share it in vCenter." -Level ERROR -LogFile $LogFile
+        continue
+    }
+
+    $resolvedVms[$vmName] = $vmMatches[0]
+}
+
+if ($ambiguousVmNames) {
+    $message = "Ambiguous VM name(s) in vCenter: $($ambiguousVmNames -join ', '). Refusing to shut down VMs that cannot be identified unambiguously."
+    Write-MigrationLog $message -Level ERROR -LogFile $LogFile
+    throw $message
+}
+
 $startTime = Get-Date
 
 foreach ($vmEntry in $vmList) {
     $vmName = $vmEntry.VMName
-    $vmObj = VMware.VimAutomation.Core\Get-VM -Name $vmName -ErrorAction SilentlyContinue
-    if (-not $vmObj) {
-        Write-MigrationLog "VM not found: $vmName" -Level WARNING -LogFile $LogFile
+    if (-not $resolvedVms.ContainsKey($vmName)) {
         continue
     }
+    $vmObj = $resolvedVms[$vmName]
 
     $vmStates[$vmName] = [PSCustomObject]@{
         Name            = $vmName
@@ -164,7 +194,7 @@ foreach ($vmEntry in $vmList) {
     if ($vmObj.PowerState -eq "PoweredOff") {
         Write-MigrationLog "VM $vmName is already powered off." -Level SUCCESS -LogFile $LogFile
         $vmStates[$vmName].PoweredOffLogged = $true
-        Disconnect-VmNetworkAdapters -VmName $vmName -LogFile $LogFile
+        Disconnect-VmNetworkAdapters -VmName $vmName -VmObject $vmObj -LogFile $LogFile
         $vmStates[$vmName].NetworkDisconnected = $true
         continue
     }
@@ -204,7 +234,7 @@ if ($vmStates.Count -gt 0) {
                 Write-MigrationLog "VM $vmName powered off." -Level SUCCESS -LogFile $LogFile
                 $vmStates[$vmName].PoweredOffLogged = $true
                 if (-not $vmStates[$vmName].NetworkDisconnected) {
-                    Disconnect-VmNetworkAdapters -VmName $vmName -LogFile $LogFile
+                    Disconnect-VmNetworkAdapters -VmName $vmName -VmObject $vmObj -LogFile $LogFile
                     $vmStates[$vmName].NetworkDisconnected = $true
                 }
                 continue
@@ -246,7 +276,7 @@ if (-not (Get-MigrationConfigValue -Config $Config -Path 'Smtp.Enabled' -Default
 
         $mailTaggedVmIds = @(
             Get-TagAssignment -Tag $mailTagObj -ErrorAction SilentlyContinue |
-                Where-Object { $_.Entity -and $_.Entity.GetType().Name -eq 'VirtualMachine' } |
+                Where-Object { Test-VmwareVirtualMachineEntity -Entity $_.Entity } |
                 ForEach-Object { $_.Entity.Id }
         )
         $mailTaggedVms = if ($mailTaggedVmIds) { @(VMware.VimAutomation.Core\Get-VM -Id $mailTaggedVmIds) } else { @() }

@@ -208,6 +208,13 @@ function Get-ScvmmLogicalSwitchLogicalNetworkIds {
         belongs to a LogicalNetwork, and the logical switch exposes its logical networks
         through the uplink port profiles attached to it. This function resolves that chain
         instead of guessing from object properties.
+
+    .OUTPUTS
+        A HashSet[string], emitted with -NoEnumerate. A bare 'return $set' would let
+        PowerShell UNROLL the set on the way out: zero elements arrive as $null and a
+        single element arrives as a bare [string]. The caller's .Count then throws
+        (StrictMode) or, worse, its .Contains() silently degrades to a substring test
+        on that one string.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -225,12 +232,13 @@ function Get-ScvmmLogicalSwitchLogicalNetworkIds {
     try {
         $scLogicalSwitch = Get-SCLogicalSwitch -Name $LogicalSwitchName -VMMServer $Server -ErrorAction Stop | Select-Object -First 1
     } catch {
-        if ($WarningSink) { [void]$WarningSink.Add("Logical switch lookup failed for '$LogicalSwitchName': $($_.Exception.Message)") }
+        if ($null -ne $WarningSink) { [void]$WarningSink.Add("Logical switch lookup failed for '$LogicalSwitchName': $($_.Exception.Message)") }
     }
 
     if (-not $scLogicalSwitch) {
-        if ($WarningSink) { [void]$WarningSink.Add("Logical switch '$LogicalSwitchName' not found in SCVMM; VM network discovery will use the unfiltered inventory.") }
-        return $logicalNetworkIds
+        if ($null -ne $WarningSink) { [void]$WarningSink.Add("Logical switch '$LogicalSwitchName' not found in SCVMM; VM network discovery will use the unfiltered inventory.") }
+        Write-Output -InputObject $logicalNetworkIds -NoEnumerate
+        return
     }
 
     try {
@@ -252,14 +260,17 @@ function Get-ScvmmLogicalSwitchLogicalNetworkIds {
             }
         }
     } catch {
-        if ($WarningSink) { [void]$WarningSink.Add("Unable to enumerate uplink port profiles of logical switch '$LogicalSwitchName': $($_.Exception.Message)") }
+        if ($null -ne $WarningSink) { [void]$WarningSink.Add("Unable to enumerate uplink port profiles of logical switch '$LogicalSwitchName': $($_.Exception.Message)") }
     }
 
-    if ($logicalNetworkIds.Count -eq 0 -and $WarningSink) {
+    # $null -ne, never a truthiness test: an EMPTY List is falsy in PowerShell, so
+    # 'if ($WarningSink)' silently discarded every warning this function raises --
+    # the sink only becomes truthy once it already holds something.
+    if ($logicalNetworkIds.Count -eq 0 -and $null -ne $WarningSink) {
         [void]$WarningSink.Add("No logical network resolved behind logical switch '$LogicalSwitchName'; VM network discovery will use the unfiltered inventory.")
     }
 
-    return $logicalNetworkIds
+    Write-Output -InputObject $logicalNetworkIds -NoEnumerate
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -376,45 +387,64 @@ function Get-ScvmmInventoryCache {
 
         if (-not [string]::IsNullOrWhiteSpace([string]$LogicalSwitch)) {
             $targetLogicalSwitchName = [string]$LogicalSwitch
-            $switchLogicalNetworkIds = Get-ScvmmLogicalSwitchLogicalNetworkIds -Server $Server -LogicalSwitchName $targetLogicalSwitchName -WarningSink $WarningSink
+            # Rebuilt into a set whatever comes back: this filter decides which
+            # VMNetworks a NIC may be attached to, so it must never be skipped by a
+            # non-terminating .Count error, nor fall back to String.Contains.
+            $resolvedLogicalNetworkIds = Get-ScvmmLogicalSwitchLogicalNetworkIds -Server $Server -LogicalSwitchName $targetLogicalSwitchName -WarningSink $WarningSink
+            $switchLogicalNetworkIds = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($resolvedLogicalNetworkId in @($resolvedLogicalNetworkIds)) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$resolvedLogicalNetworkId)) {
+                    [void]$switchLogicalNetworkIds.Add([string]$resolvedLogicalNetworkId)
+                }
+            }
 
             if ($switchLogicalNetworkIds.Count -gt 0) {
+                # Every read below goes through Get-ScvmmObjectPropertyValue: SCVMM
+                # network/subnet objects do not all expose LogicalNetwork,
+                # VMNetworkID or VMNetworkName, and a bare access throws under
+                # StrictMode. This block never ran before (the caller's .Count read
+                # aborted the enclosing if statement), so the gap went unnoticed.
                 $filteredNetworks = @($allVMNetworks | Where-Object {
-                    $_.LogicalNetwork -and $_.LogicalNetwork.ID -and $switchLogicalNetworkIds.Contains([string]$_.LogicalNetwork.ID)
+                    $logicalNetwork = Get-ScvmmObjectPropertyValue -InputObject $_ -PropertyName 'LogicalNetwork' -Context 'VMNetwork'
+                    $logicalNetworkId = [string](Get-ScvmmObjectPropertyValue -InputObject $logicalNetwork -PropertyName 'ID' -Context 'VMNetwork LogicalNetwork')
+                    (-not [string]::IsNullOrWhiteSpace($logicalNetworkId)) -and $switchLogicalNetworkIds.Contains($logicalNetworkId)
                 })
 
                 $vmNetworkIdSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
                 $vmNetworkNameSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
                 foreach ($networkEntry in $filteredNetworks) {
-                    if ($networkEntry.ID) {
-                        [void]$vmNetworkIdSet.Add([string]$networkEntry.ID)
+                    $networkEntryId = [string](Get-ScvmmObjectPropertyValue -InputObject $networkEntry -PropertyName 'ID' -Context 'VMNetwork')
+                    if (-not [string]::IsNullOrWhiteSpace($networkEntryId)) {
+                        [void]$vmNetworkIdSet.Add($networkEntryId)
                     }
-                    if (-not [string]::IsNullOrWhiteSpace([string]$networkEntry.Name)) {
-                        [void]$vmNetworkNameSet.Add([string]$networkEntry.Name)
+
+                    $networkEntryName = [string](Get-ScvmmObjectPropertyValue -InputObject $networkEntry -PropertyName 'Name' -Context 'VMNetwork')
+                    if (-not [string]::IsNullOrWhiteSpace($networkEntryName)) {
+                        [void]$vmNetworkNameSet.Add($networkEntryName)
                     }
                 }
 
                 $filteredSubnets = @($allVMSubnets | Where-Object {
                     $subnet = $_
 
-                    $subnetVmNetworkId = $null
-                    if ($subnet.VMNetwork -and $subnet.VMNetwork.ID) {
-                        $subnetVmNetworkId = [string]$subnet.VMNetwork.ID
-                    } elseif ($subnet.VMNetworkID) {
-                        $subnetVmNetworkId = [string]$subnet.VMNetworkID
+                    $subnetVmNetwork = Get-ScvmmObjectPropertyValue -InputObject $subnet -PropertyName 'VMNetwork' -Context 'VMSubnet'
+                    $subnetVmNetworkId = [string](Get-ScvmmObjectPropertyValue -InputObject $subnetVmNetwork -PropertyName 'ID' -Context 'VMSubnet VMNetwork')
+                    if ([string]::IsNullOrWhiteSpace($subnetVmNetworkId)) {
+                        $subnetVmNetworkId = [string](Get-ScvmmObjectPropertyValue -InputObject $subnet -PropertyName 'VMNetworkID' -Context 'VMSubnet')
                     }
 
                     if (-not [string]::IsNullOrWhiteSpace($subnetVmNetworkId) -and $vmNetworkIdSet.Contains($subnetVmNetworkId)) {
                         return $true
                     }
 
-                    return ($subnet.VMNetworkName -and $vmNetworkNameSet.Contains([string]$subnet.VMNetworkName))
+                    $subnetVmNetworkName = [string](Get-ScvmmObjectPropertyValue -InputObject $subnet -PropertyName 'VMNetworkName' -Context 'VMSubnet')
+                    return ((-not [string]::IsNullOrWhiteSpace($subnetVmNetworkName)) -and $vmNetworkNameSet.Contains($subnetVmNetworkName))
                 })
 
                 if ($filteredNetworks.Count -gt 0 -and $filteredSubnets.Count -gt 0) {
                     $allVMNetworks = $filteredNetworks
                     $allVMSubnets = $filteredSubnets
-                } elseif ($WarningSink) {
+                } elseif ($null -ne $WarningSink) {
                     [void]$WarningSink.Add("Logical switch '$targetLogicalSwitchName' resolves to $($switchLogicalNetworkIds.Count) logical network(s) but no VMNetwork/VMSubnet pair belongs to them; VM network discovery falls back to the unfiltered inventory.")
                 }
             }
@@ -558,6 +588,43 @@ function Get-ScvmmInventoryCache {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Get-ScvmmSubnetRealVlanId
+# ══════════════════════════════════════════════════════════════════════════════
+function Get-ScvmmSubnetRealVlanId {
+    <#
+    .SYNOPSIS
+        Returns the real VLAN ID SCVMM stores on a VM subnet, or $null.
+
+    .DESCRIPTION
+        Reads SubnetVLans[].VLanID first, then the subnet's own VLanID. VLAN 0
+        means untagged in SCVMM and is never returned as a mapping key.
+        Property-guarded throughout: subnet objects differ between VMM versions
+        and a bare access throws under StrictMode.
+    #>
+    param(
+        [AllowNull()]
+        $Subnet
+    )
+
+    if (-not $Subnet) { return $null }
+
+    $subnetVlans = Get-ScvmmObjectPropertyValue -InputObject $Subnet -PropertyName 'SubnetVLans' -Context 'VMSubnet'
+    foreach ($subnetVlan in @($subnetVlans)) {
+        $rawVlanValue = [string](Get-ScvmmObjectPropertyValue -InputObject $subnetVlan -PropertyName 'VLanID' -Context 'VMSubnet VLAN')
+        if ($rawVlanValue -match '^\d+$' -and [int]$rawVlanValue -ne 0) {
+            return [string][int]$rawVlanValue
+        }
+    }
+
+    $rawVlanValue = [string](Get-ScvmmObjectPropertyValue -InputObject $Subnet -PropertyName 'VLanID' -Context 'VMSubnet')
+    if ($rawVlanValue -match '^\d+$' -and [int]$rawVlanValue -ne 0) {
+        return [string][int]$rawVlanValue
+    }
+
+    return $null
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Resolve-ScvmmVlanMapping
 # ══════════════════════════════════════════════════════════════════════════════
 function Resolve-ScvmmVlanMapping {
@@ -643,11 +710,67 @@ function Resolve-ScvmmVlanMapping {
         return $null
     }
 
+    # The two lists are independent: taking the first of each could pair a VMNetwork
+    # with a VMSubnet that belongs to a DIFFERENT network, so the adapter ended up on
+    # the wrong subnet (or Set-SCVirtualNetworkAdapter rejected the pair outright).
+    # Prefer the first candidate network that actually owns one of the candidate
+    # subnets, and only fall back to the unrelated pair when nothing matches.
+    # Property-guarded reads: SCVMM subnet objects do not all expose
+    # VMNetwork/VMNetworkID/VMNetworkName, and a bare access throws under StrictMode.
+    $getSubnetOwner = {
+        param($Subnet)
+        $subnetNetwork = Get-ScvmmObjectPropertyValue -InputObject $Subnet -PropertyName 'VMNetwork' -Context 'VMSubnet'
+        $ownerId = [string](Get-ScvmmObjectPropertyValue -InputObject $subnetNetwork -PropertyName 'ID' -Context 'VMSubnet VMNetwork')
+        if ([string]::IsNullOrWhiteSpace($ownerId)) {
+            $ownerId = [string](Get-ScvmmObjectPropertyValue -InputObject $Subnet -PropertyName 'VMNetworkID' -Context 'VMSubnet')
+        }
+        [pscustomobject]@{
+            Id   = $ownerId
+            Name = [string](Get-ScvmmObjectPropertyValue -InputObject $Subnet -PropertyName 'VMNetworkName' -Context 'VMSubnet')
+        }
+    }
+
+    $selectedNetwork = $null
+    $selectedSubnet = $null
+    foreach ($candidateNetwork in $matchingNetworks) {
+        $candidateNetworkId = [string](Get-ScvmmObjectPropertyValue -InputObject $candidateNetwork -PropertyName 'ID' -Context 'VMNetwork')
+        $candidateNetworkName = [string](Get-ScvmmObjectPropertyValue -InputObject $candidateNetwork -PropertyName 'Name' -Context 'VMNetwork')
+
+        $ownedSubnet = $matchingSubnets | Where-Object {
+            $owner = & $getSubnetOwner $_
+            (-not [string]::IsNullOrWhiteSpace($owner.Id) -and $owner.Id -eq $candidateNetworkId) -or
+            (-not [string]::IsNullOrWhiteSpace($owner.Name) -and $owner.Name -eq $candidateNetworkName)
+        } | Select-Object -First 1
+
+        if ($ownedSubnet) {
+            $selectedNetwork = $candidateNetwork
+            $selectedSubnet = $ownedSubnet
+            break
+        }
+    }
+
+    $pairedByOwnership = [bool]$selectedNetwork
+    if (-not $pairedByOwnership) {
+        $selectedNetwork = $matchingNetworks | Select-Object -First 1
+        $selectedSubnet = $matchingSubnets | Select-Object -First 1
+    }
+
+    # A subnet that names a DIFFERENT owning network is a mismatch the caller must
+    # be warned about, even when exactly one network and one subnet matched.
+    # A subnet that carries no ownership information at all stays non-ambiguous:
+    # there was no choice to make.
+    $ownershipConflict = $false
+    if (-not $pairedByOwnership) {
+        $selectedOwner = & $getSubnetOwner $selectedSubnet
+        $ownershipConflict = (-not [string]::IsNullOrWhiteSpace($selectedOwner.Id)) -or
+                             (-not [string]::IsNullOrWhiteSpace($selectedOwner.Name))
+    }
+
     [pscustomobject]@{
-        VMNetwork               = $matchingNetworks | Select-Object -First 1
-        VMSubnet                = $matchingSubnets | Select-Object -First 1
+        VMNetwork               = $selectedNetwork
+        VMSubnet                = $selectedSubnet
         Vlan                    = $VlanKey
-        Ambiguous               = ($matchingNetworks.Count -gt 1 -or $matchingSubnets.Count -gt 1)
+        Ambiguous               = ($ownershipConflict -or $matchingNetworks.Count -gt 1 -or $matchingSubnets.Count -gt 1)
         CandidateVMNetworkNames = @($matchingNetworks | ForEach-Object { [string]$_.Name })
         CandidateVMSubnetNames  = @($matchingSubnets  | ForEach-Object { [string]$_.Name })
         ResolutionMode          = 'name-parsed-vlan'

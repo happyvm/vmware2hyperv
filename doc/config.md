@@ -54,7 +54,49 @@ SCVMM = @{
 }
 ```
 
-The OS mapping is used by `step3-MigrateVM.ps1` to apply the correct SCVMM OS. Source labels are normalized before lookup (case-insensitive, separators, `Microsoft` prefix).
+The OS mapping is used by `step3-MigrateVM.ps1` to apply the correct SCVMM OS.
+
+Resolution happens in two passes:
+
+1. **Exact match** after normalization (case, `_ - /` separators, `Microsoft` prefix).
+2. **Family default** on `"<distribution> <major version>"`, when no exact key matches.
+
+The family key is derived by dropping what varies between inventories for the
+same machine: parenthesised qualifiers (`(64-bit)` from a vCenter guest id,
+`(Ootpa)` from VMware Tools), bitness tokens, and the `ES` / `Server` /
+`release` edition words. So all of these resolve through the single key
+`"Red Hat Enterprise Linux 8"`:
+
+| Source label | Origin |
+|---|---|
+| `Red Hat Enterprise Linux 8.6` | CMDB / batch CSV |
+| `Red Hat Enterprise Linux 8 (64-bit)` | vCenter `Config.GuestFullName` |
+| `Red Hat Enterprise Linux release 8.9 (Ootpa)` | vCenter `Guest.GuestFullName` (VMware Tools) |
+| `Red Hat Enterprise Linux Server 8.2` | CMDB variant |
+
+Only a **trailing** version counts, so Windows labels (`Windows Server 2019
+Datacenter`) have no family key and keep resolving by exact match alone — the
+edition, not the version, is what distinguishes their SCVMM name.
+
+Because exact matches are tried first, a minor-specific entry still overrides
+the family default:
+
+```powershell
+"Red Hat Enterprise Linux 8"      = "Red Hat Enterprise Linux 8 (64 bit)"    # covers every 8.x
+"Red Hat Enterprise Linux ES 7.3" = "Red Hat Enterprise Linux 7.3 (64 bit)"  # except this one
+```
+
+> The **value** must match an SCVMM operating system name character for
+> character (`Get-SCOperatingSystem`). A near-miss such as `(64-bit)` instead of
+> `(64 bit)` makes the OS phase fail with a warning; the log then lists the
+> closest SCVMM names so the config can be corrected.
+
+When nothing matches, the log names both keys that were looked up:
+
+```
+[SRV-APP01] No SCVMM OS mapping found for 'ubuntu 22.04' (no family default 'ubuntu 22' either).
+            Add an entry to SCVMM.OperatingSystemMap in config.psd1.
+```
 
 `AllowedVmNetworkNames` / `AllowedVmSubnetNames` limit SCVMM network discovery to configured objects.
 

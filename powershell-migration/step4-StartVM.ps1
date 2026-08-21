@@ -380,7 +380,7 @@ function Get-SCVMMVmInventory {
                     HypervConfiguredOs      = [string]$vm.OperatingSystem
                     Status                  = [string]$vm.Status
                     StatusString            = [string]$vm.StatusString
-                    VMHostComputerName      = [string]$vm.VMHost.ComputerName
+                    VMHostComputerName      = if ($vm.VMHost) { [string]$vm.VMHost.ComputerName } else { $null }
                     IntegrationReady        = [bool]$integrationStatus.Ready
                     IntegrationDetails      = [string]$integrationStatus.Summary
                     NetworkConnected        = [bool]$networkConnected
@@ -1121,9 +1121,13 @@ while ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $
         Update-WinRmActionState -VmItem $vmItem
     }
 
+    # Deliberately NOT filtered on VmFound: a VM that SCVMM had not registered yet
+    # when the initial snapshot was taken would otherwise never be queried again,
+    # and — since it can never become compliant — the default unlimited loop
+    # (IntegrationMaxIterations = 0) would spin forever without ever noticing it.
     $namesToRefresh = @(
         $vmInventory |
-            Where-Object { $_.VmFound -and -not $_.DisplayCompleted } |
+            Where-Object { -not $_.DisplayCompleted } |
             Select-Object -ExpandProperty VMName
     )
 
@@ -1153,11 +1157,23 @@ while ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $
             $snapshotByName[[string]$snapshot.VMName] = $snapshot
         }
 
-        foreach ($vmItem in @($vmInventory | Where-Object { $_.VmFound -and -not $_.DisplayCompleted })) {
+        $vmsAppearedInScvmm = @()
+        foreach ($vmItem in @($vmInventory | Where-Object { -not $_.DisplayCompleted })) {
             $snapshot = $snapshotByName[$vmItem.VMName]
             if (-not $snapshot) {
                 continue
             }
+
+            if ((-not $vmItem.VmFound) -and [bool]$snapshot.Exists) {
+                $vmsAppearedInScvmm += $vmItem
+                # The initial inventory marked it 'Skipped' because it did not exist;
+                # now that it does, it becomes eligible for WinRM remediation again.
+                if ($vmItem.ActionState -eq 'Skipped') {
+                    $vmItem.ActionState = 'Queued'
+                }
+                Write-MigrationLog "[$($vmItem.VMName)] VM now registered in SCVMM." -Level SUCCESS -LogFile $LogFile
+            }
+            $vmItem.VmFound = [bool]$snapshot.Exists
 
             $vmItem.Started = [bool]$snapshot.Running
             if (-not [string]::IsNullOrWhiteSpace([string]$snapshot.HypervConfiguredOs)) {
@@ -1203,6 +1219,29 @@ while ($refreshNeeded -and ($IntegrationMaxIterations -le 0 -or $iteration -lt $
                 $vmItem.ActionJobId = $job.Id
                 $vmItem.ActionState = 'Queued'
                 Write-MigrationLog "[$($vmItem.VMName)] WinRM job restarted." -LogFile $LogFile
+            }
+        }
+
+        # VMs that only showed up in SCVMM after the initial start pass still need
+        # to be started, otherwise they stay non-compliant for every iteration.
+        # Restricted to VMs that just appeared: starting every non-running VM on
+        # every poll would hammer SCVMM for VMs that simply fail to boot.
+        $lateVmsToStart = @($vmsAppearedInScvmm | Where-Object { -not $_.Started -and -not $_.DisplayCompleted })
+        if ($lateVmsToStart) {
+            $lateStartResults = @(Start-SCVMMVms -ServerName $Config.SCVMM.Server -VMNames ($lateVmsToStart.VMName) -BatchInventoryThreshold $inventoryBatchThreshold)
+            $lateStartResultByName = @{}
+            foreach ($lateStartResult in $lateStartResults) {
+                $lateStartResultByName[[string]$lateStartResult.VMName] = $lateStartResult
+            }
+
+            foreach ($vmItem in $lateVmsToStart) {
+                $lateStartResult = $lateStartResultByName[$vmItem.VMName]
+                if ($lateStartResult -and $lateStartResult.Started) {
+                    $vmItem.StartError = $null
+                    Write-MigrationLog "[$($vmItem.VMName)] Start requested in SCVMM." -Level SUCCESS -LogFile $LogFile
+                } elseif ($lateStartResult) {
+                    $vmItem.StartError = [string]$lateStartResult.Error
+                }
             }
         }
     }

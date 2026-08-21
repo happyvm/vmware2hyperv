@@ -157,6 +157,374 @@ function Test-ExpectedIPv4Address {
 }
 
 # ---------------------------------------------------------------------------
+# Get-VmwareTagCategoryName : category name of a tag, whatever shape it has
+#
+# Tag.Category is a TagCategory object on some PowerCLI versions and a bare
+# string on others. Reading .Name blindly throws under StrictMode against the
+# string form; comparing the object form to a string only works when PowerCLI
+# happens to supply a type converter. Resolve the name explicitly instead.
+# ---------------------------------------------------------------------------
+function Get-VmwareTagCategoryName {
+    param(
+        [AllowNull()]
+        $Category
+    )
+
+    if ($null -eq $Category) { return '' }
+    if ($Category -is [string]) { return $Category }
+
+    $nameProperty = $Category.PSObject.Properties['Name']
+    if ($nameProperty -and -not [string]::IsNullOrWhiteSpace([string]$nameProperty.Value)) {
+        return [string]$nameProperty.Value
+    }
+
+    return [string]$Category
+}
+
+# ---------------------------------------------------------------------------
+# Get-VmwareAdapterConnectionState : read a NIC's link state, defensively
+#
+# A vSphere NIC carries TWO independent flags:
+#   - Connected      : the live link state. Only meaningful while the VM runs.
+#   - StartConnected : whether the NIC is plugged in AT POWER ON. This is the
+#                      one that decides whether a powered-off VM rejoins the
+#                      network the next time somebody boots it.
+#
+# PowerCLI exposes them in three different shapes depending on the version, so
+# every read is property-guarded (a bare access throws under StrictMode).
+# ---------------------------------------------------------------------------
+function Get-VmwareAdapterConnectionState {
+    param(
+        [AllowNull()]
+        $Adapter
+    )
+
+    $state = [pscustomobject]@{
+        Connected      = $null
+        StartConnected = $null
+        Source         = 'unknown'
+    }
+
+    if (-not $Adapter) { return $state }
+
+    $readFlag = {
+        param($Container, [string]$FlagName)
+        if (-not $Container) { return $null }
+        $property = $Container.PSObject.Properties[$FlagName]
+        if (-not $property -or $null -eq $property.Value) { return $null }
+        return [bool]$property.Value
+    }
+
+    # 1. PowerCLI NicConnectionState (Get-NetworkAdapter on current versions)
+    $connectionStateProperty = $Adapter.PSObject.Properties['ConnectionState']
+    if ($connectionStateProperty -and $connectionStateProperty.Value) {
+        $state.Connected = & $readFlag $connectionStateProperty.Value 'Connected'
+        $state.StartConnected = & $readFlag $connectionStateProperty.Value 'StartConnected'
+        if ($null -ne $state.Connected -or $null -ne $state.StartConnected) {
+            $state.Source = 'ConnectionState'
+            return $state
+        }
+    }
+
+    # 2. Flattened properties on the adapter itself
+    $flatConnected = & $readFlag $Adapter 'Connected'
+    $flatStartConnected = & $readFlag $Adapter 'StartConnected'
+    if ($null -ne $flatConnected -or $null -ne $flatStartConnected) {
+        $state.Connected = $flatConnected
+        $state.StartConnected = $flatStartConnected
+        $state.Source = 'Adapter'
+        return $state
+    }
+
+    # 3. Raw vSphere API object
+    $extensionDataProperty = $Adapter.PSObject.Properties['ExtensionData']
+    if ($extensionDataProperty -and $extensionDataProperty.Value) {
+        $connectableProperty = $extensionDataProperty.Value.PSObject.Properties['Connectable']
+        if ($connectableProperty -and $connectableProperty.Value) {
+            $state.Connected = & $readFlag $connectableProperty.Value 'Connected'
+            $state.StartConnected = & $readFlag $connectableProperty.Value 'StartConnected'
+            if ($null -ne $state.Connected -or $null -ne $state.StartConnected) {
+                $state.Source = 'ExtensionData'
+                return $state
+            }
+        }
+    }
+
+    $availableProperties = @($Adapter.PSObject.Properties.Name | Sort-Object) -join ', '
+    Write-Verbose "PowerCLI debug: no Connected/StartConnected flag found on adapter. Available properties: $availableProperties"
+    return $state
+}
+
+# ---------------------------------------------------------------------------
+# Set-VmwareVmNetworkAdapterConnection : plug or unplug every NIC of a VM
+#
+# Always writes StartConnected -- that is what survives a power cycle. The live
+# link state is only written when the VM is actually running: vSphere rejects
+# (or ignores) a runtime connect/disconnect on a powered-off VM.
+#
+# Returns a summary so the caller can report precisely what changed, and so the
+# failure of a NIC the operator is counting on is never silent.
+# ---------------------------------------------------------------------------
+function Set-VmwareVmNetworkAdapterConnection {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $VmObject,
+
+        # $false unplugs the NIC (now and at every future boot), $true plugs it back.
+        [Parameter(Mandatory = $true)]
+        [bool]$Connected,
+
+        [string]$LogFile
+    )
+
+    $summary = [pscustomobject]@{
+        VMName         = $VmName
+        AdapterCount   = 0
+        ChangedCount   = 0
+        UnchangedCount = 0
+        FailedCount    = 0
+    }
+
+    if (-not $VmObject) {
+        Write-MigrationLog "Unable to change NIC state: VM not found ($VmName)." -Level WARNING -LogFile $LogFile
+        return $summary
+    }
+
+    $networkAdapters = @(Get-NetworkAdapter -VM $VmObject -ErrorAction SilentlyContinue)
+    if ($networkAdapters.Count -eq 0) {
+        Write-MigrationLog "No network adapter found on VM $VmName." -Level WARNING -LogFile $LogFile
+        return $summary
+    }
+    $summary.AdapterCount = $networkAdapters.Count
+
+    $powerStateProperty = $VmObject.PSObject.Properties['PowerState']
+    $isPoweredOn = $powerStateProperty -and ([string]$powerStateProperty.Value -eq 'PoweredOn')
+
+    $action = if ($Connected) { 'connect' } else { 'disconnect' }
+
+    foreach ($adapter in $networkAdapters) {
+        $adapterName = [string]$adapter.Name
+        $currentState = Get-VmwareAdapterConnectionState -Adapter $adapter
+
+        $startConnectedAlreadySet = ($null -ne $currentState.StartConnected -and $currentState.StartConnected -eq $Connected)
+        $runtimeAlreadySet = (-not $isPoweredOn) -or ($null -ne $currentState.Connected -and $currentState.Connected -eq $Connected)
+
+        if ($startConnectedAlreadySet -and $runtimeAlreadySet) {
+            $summary.UnchangedCount++
+            continue
+        }
+
+        $setParameters = @{
+            NetworkAdapter = $adapter
+            StartConnected = $Connected
+            Confirm        = $false
+            ErrorAction    = 'Stop'
+        }
+        if ($isPoweredOn) {
+            $setParameters['Connected'] = $Connected
+        }
+
+        try {
+            Set-NetworkAdapter @setParameters | Out-Null
+            $summary.ChangedCount++
+        } catch {
+            $summary.FailedCount++
+            Write-MigrationLog "Failed to $action NIC '$adapterName' on VM ${VmName}: $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
+        }
+    }
+
+    return $summary
+}
+
+# ---------------------------------------------------------------------------
+# Resolve-AdapterVlanId : VMware port group -> VLAN id
+#
+# Used by run-migration.ps1 to build the per-adapter VLAN map handed to step3.
+# Lives here rather than inline in the orchestrator so the Pester suite can
+# exercise the real implementation.
+# ---------------------------------------------------------------------------
+function Resolve-AdapterVlanId {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Adapter,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$DistributedPortGroupCache,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$StandardPortGroupCache
+    )
+
+    $networkName = [string]$Adapter.NetworkName
+    if ([string]::IsNullOrWhiteSpace($networkName)) {
+        return "Not connected to a network"
+    }
+
+    # Shared guard for every resolution path below. VLAN 0 means "untagged" on a
+    # port group and is not a usable mapping key on the SCVMM side either
+    # (Get-ScvmmInventoryCache drops it explicitly), so it must never be
+    # returned as if it were a real VLAN.
+    $isUsableVlanId = {
+        param($Candidate)
+        $parsed = 0
+        if (-not [int]::TryParse([string]$Candidate, [ref]$parsed)) { return $false }
+        return ($parsed -ge 1 -and $parsed -le 4094)
+    }
+
+    # A trunk port group carries a RANGE, not a VLAN. Its string form
+    # ('Trunk (0-4094)') used to be scraped by the loose \d+ fallback below and
+    # yielded '0' -- or '1' -- as if it were the VM's VLAN.
+    $isTrunkConfiguration = {
+        param($Configuration)
+        if (-not $Configuration) { return $false }
+        if ($Configuration.PSObject.Properties['Ranges']) { return $true }
+        return ([string]$Configuration -match 'Trunk')
+    }
+
+    if (-not $DistributedPortGroupCache.ContainsKey($networkName)) {
+        $DistributedPortGroupCache[$networkName] = @(Get-VDPortgroup -Name $networkName -ErrorAction SilentlyContinue)
+    }
+    $distributedPortGroups = @($DistributedPortGroupCache[$networkName])
+    foreach ($distributedPortGroup in $distributedPortGroups) {
+        # Prefer direct integer property on the DVS VLAN spec (avoids string-parsing ambiguity)
+        try {
+            $vlanSpec = $distributedPortGroup.ExtensionData.Config.DefaultPortConfig.Vlan
+            if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
+                $rawId = [int]$vlanSpec.VlanId
+                if (& $isUsableVlanId $rawId) {
+                    return [string]$rawId
+                }
+
+                # An explicit VlanId that is out of range (typically 0 = untagged)
+                # is an answer, not a miss: do not let the looser fallbacks below
+                # re-invent a VLAN for this port group.
+                continue
+            }
+        } catch {
+            Write-Verbose "DVS VLAN spec unavailable for port group '$networkName': $($_.Exception.Message)"
+        }
+
+        $vlanConfiguration = $null
+        if ($distributedPortGroup.PSObject.Properties['VlanConfiguration']) {
+            $vlanConfiguration = $distributedPortGroup.VlanConfiguration
+        }
+
+        if (& $isTrunkConfiguration $vlanConfiguration) {
+            Write-Verbose "Port group '$networkName' is a trunk: no single VLAN to map."
+            continue
+        }
+
+        if ($vlanConfiguration -and $vlanConfiguration.PSObject.Properties['VlanId']) {
+            if (& $isUsableVlanId $vlanConfiguration.VlanId) {
+                return [string][int]$vlanConfiguration.VlanId
+            }
+            continue
+        }
+
+        if ([string]$vlanConfiguration -match '(\d+)' -and (& $isUsableVlanId $matches[1])) {
+            return [string][int]$matches[1]
+        }
+    }
+
+    if (-not $StandardPortGroupCache.ContainsKey($networkName)) {
+        $StandardPortGroupCache[$networkName] = @(Get-VirtualPortGroup -Name $networkName -ErrorAction SilentlyContinue)
+    }
+    $standardPortGroups = @($StandardPortGroupCache[$networkName])
+    foreach ($standardPortGroup in $standardPortGroups) {
+        # 4095 is the "all VLANs" trunk value on a standard port group, and 0 is
+        # untagged: neither is a VLAN this VM can be mapped onto.
+        if (& $isUsableVlanId $standardPortGroup.VLanId) {
+            return [string][int]$standardPortGroup.VLanId
+        }
+    }
+
+    $backing = $null
+    try { $backing = $Adapter.ExtensionData.Backing } catch {
+        Write-Verbose "Adapter backing data unavailable: $($_.Exception.Message)"
+    }
+    if ($backing -and $backing.PSObject.Properties['Port'] -and $backing.Port -and $backing.Port.PortgroupKey) {
+        $portGroupView = Get-View -Id $backing.Port.PortgroupKey -ErrorAction SilentlyContinue
+        if ($portGroupView -and $portGroupView.Config) {
+            try {
+                $vlanSpec = $portGroupView.Config.DefaultPortConfig.Vlan
+                if ($vlanSpec -and $vlanSpec.PSObject.Properties['VlanId']) {
+                    $rawId = [int]$vlanSpec.VlanId
+                    if (& $isUsableVlanId $rawId) {
+                        return [string]$rawId
+                    }
+                }
+            } catch {
+                Write-Verbose "Port group view VLAN spec unavailable: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    # Last resort: extract VLAN from port group name (e.g. "dvPG-LAN_1816" → "1816")
+    if ($networkName -match '_(\d{1,4})$') {
+        return $matches[1]
+    }
+
+    return "PortGroup not found"
+}
+
+# ---------------------------------------------------------------------------
+# Test-VmwareVirtualMachineEntity : is a tag assignment attached to a VM?
+#
+# Get-TagAssignment returns entities whose runtime type is the PowerCLI *impl*
+# class -- 'UniversalVirtualMachineImpl' or 'VirtualMachineImpl' depending on
+# the PowerCLI/vSphere version -- never the bare interface name
+# 'VirtualMachine'. Comparing GetType().Name with -eq 'VirtualMachine' is
+# therefore always false and silently discards every assignment.
+# (Get-VMwareClusterNameForVm in run-migration.ps1 already matches impl names
+# with -match for exactly this reason.)
+#
+# Two independent signals are accepted so the check survives a PowerCLI type
+# rename: the impl type name, and the entity Id, which vSphere always prefixes
+# with the managed object type ('VirtualMachine-vm-1234').
+# ---------------------------------------------------------------------------
+function Test-VmwareVirtualMachineEntity {
+    param(
+        [AllowNull()]
+        $Entity
+    )
+
+    if (-not $Entity) { return $false }
+
+    $typeName = [string]$Entity.GetType().Name
+    if ($typeName -match 'VirtualMachine') { return $true }
+
+    $idProperty = $Entity.PSObject.Properties['Id']
+    if ($idProperty -and [string]$idProperty.Value -match '^VirtualMachine-') { return $true }
+
+    return $false
+}
+
+# ---------------------------------------------------------------------------
+# ConvertTo-ScvmmMemoryGigabytes : SCVMM VM memory (MB) -> GB
+#
+# SCVMM exposes VirtualMachine.Memory in MEGABYTES (the setter is
+# Set-SCVirtualMachine -MemoryMB). Treating it as bytes rounds every VM down to
+# 0 GB. The >1e8 guard keeps the conversion correct should a VMM version ever
+# report bytes, using the same heuristic as ConvertTo-MemoryMegabytes in
+# scripts/Invoke-SCVMMHostPatchBaseline.ps1.
+#
+# Also inlined inside the step5 SCVMM scriptblock: that block executes in the
+# Windows PowerShell compatibility session, where lib.ps1 is not loaded.
+# ---------------------------------------------------------------------------
+function ConvertTo-ScvmmMemoryGigabytes {
+    param([AllowNull()][object]$Value)
+    $numeric = 0.0
+    if (-not [double]::TryParse([string]$Value, [ref]$numeric)) { return $null }
+    if ($numeric -lt 0) { return $null }
+    $megabytes = if ($numeric -gt 1e8) { $numeric / 1MB } else { $numeric }
+    return [math]::Round($megabytes / 1024, 1)
+}
+
+# ---------------------------------------------------------------------------
 # Write-MigrationLog : timestamped logging to streams + file
 # ---------------------------------------------------------------------------
 function Write-MigrationLog {
@@ -177,7 +545,13 @@ function Write-MigrationLog {
 
     switch ($Level) {
         "ERROR" {
-            Write-Error -Message $entry -ErrorAction Continue
+            # NOT Write-Error: an ERROR *log line* is a reported outcome, not a
+            # PowerShell error record. Write-Error decorated every one of them with
+            # 'Write-Error: <script>:<line>' plus the source of the logging call and
+            # a squiggle underline, which buried the actual message -- a batch with
+            # a handful of failures produced a screenful of noise pointing at the
+            # logger instead of at the failure.
+            $Host.UI.WriteErrorLine($entry)
         }
         "WARNING" {
             Write-Warning -Message $entry
@@ -796,7 +1170,74 @@ function ConvertTo-NormalizedOperatingSystemName {
 }
 
 # ---------------------------------------------------------------------------
+# Get-OperatingSystemFamilyKey : '<distribution> <major version>' for an OS label
+#
+# Linux inventories name the same OS a dozen ways -- 'Red Hat Enterprise Linux
+# 8.6', 'Red Hat Enterprise Linux ES 7.9', 'Red Hat Enterprise Linux 8
+# (64-bit)' (vCenter guest id), 'Red Hat Enterprise Linux release 8.9 (Ootpa)'
+# (VMware Tools) -- while the SCVMM side only ever distinguishes the MAJOR
+# version. Reducing a label to '<family> <major>' gives the mapping table a
+# single key per distribution family instead of one key per minor release.
+#
+# Windows labels carry their version in the MIDDLE ('windows server 2019
+# datacenter'), so only a TRAILING version is recognised: Windows entries
+# return $null here and keep resolving by exact match alone, where the edition
+# (Datacenter vs Standard) is what distinguishes them.
+# ---------------------------------------------------------------------------
+function Get-OperatingSystemFamilyKey {
+    param(
+        [AllowNull()]
+        [string]$Name
+    )
+
+    $normalized = ConvertTo-NormalizedOperatingSystemName -Name $Name
+    if ([string]::IsNullOrWhiteSpace($normalized)) {
+        return $null
+    }
+
+    # Parenthesised qualifiers: bitness '(64-bit)' from vCenter guest ids and
+    # release code names '(Ootpa)' from VMware Tools.
+    $stripped = $normalized -replace '\([^)]*\)', ' '
+
+    # Bare architecture/bitness tokens.
+    $stripped = $stripped -replace '\b(?:x86 64|amd64|i386|x64|x86|32 bit|64 bit|bit)\b', ' '
+
+    # Edition/noise tokens that differ between inventories for the same OS:
+    # 'ES 7.9', 'Server 7.9' and 'release 7.9' all mean RHEL 7.
+    $stripped = $stripped -replace '\b(?:release|edition|es|as|ws|server)\b', ' '
+
+    $stripped = ($stripped -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($stripped)) {
+        return $null
+    }
+
+    # [regex]::Match with named groups rather than -match/$Matches: $Matches is a
+    # shared automatic variable, and reading it a few lines after the test is a
+    # needless dependency on nothing else having written to it in between.
+    $versionMatch = [regex]::Match($stripped, '^(?<family>.*?)\s+(?<version>\d+(?:\.\d+)*)$')
+    if (-not $versionMatch.Success) {
+        return $null
+    }
+
+    $family = $versionMatch.Groups['family'].Value.Trim()
+    if ([string]::IsNullOrWhiteSpace($family)) {
+        return $null
+    }
+
+    $major = ($versionMatch.Groups['version'].Value -split '\.')[0]
+    return "$family $major"
+}
+
+# ---------------------------------------------------------------------------
 # Resolve-OperatingSystemMapping : resolve a source OS value to an SCVMM OS name
+#
+# Two passes, in order:
+#   1. Exact match after normalisation. Config always wins, so a minor-specific
+#      entry ('Red Hat Enterprise Linux ES 7.3' -> 'Red Hat Enterprise Linux
+#      7.3 (64 bit)') keeps overriding the family default.
+#   2. Family fallback on '<distribution> <major>'. Without it, the table had to
+#      enumerate EVERY minor release, and any RHEL minor the operator had not
+#      listed silently resolved to nothing.
 # ---------------------------------------------------------------------------
 function Resolve-OperatingSystemMapping {
     param(
@@ -814,6 +1255,18 @@ function Resolve-OperatingSystemMapping {
     foreach ($entry in $OperatingSystemMap.GetEnumerator()) {
         $entryKey = ConvertTo-NormalizedOperatingSystemName -Name ([string]$entry.Key)
         if ($entryKey -eq $normalized) {
+            return [string]$entry.Value
+        }
+    }
+
+    $familyKey = Get-OperatingSystemFamilyKey -Name $OperatingSystem
+    if ([string]::IsNullOrWhiteSpace($familyKey)) {
+        return $null
+    }
+
+    foreach ($entry in $OperatingSystemMap.GetEnumerator()) {
+        $entryKey = ConvertTo-NormalizedOperatingSystemName -Name ([string]$entry.Key)
+        if ($entryKey -eq $familyKey) {
             return [string]$entry.Value
         }
     }

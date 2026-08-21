@@ -51,7 +51,8 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 | Fonction | Description |
 |----------|-------------|
 | `ConvertTo-NormalizedOperatingSystemName` | Normalise un label OS (case, séparateurs, préfixe Microsoft) |
-| `Resolve-OperatingSystemMapping` | Mappe un OS source vers un OS SCVMM |
+| `Get-OperatingSystemFamilyKey` | Réduit un label OS à `"<distribution> <version majeure>"` (`RHEL 8.6`, `RHEL 8 (64-bit)`, `RHEL release 8.9 (Ootpa)` → `red hat enterprise linux 8`). Retourne `$null` pour Windows, dont la version n'est pas en fin de label |
+| `Resolve-OperatingSystemMapping` | Mappe un OS source vers un OS SCVMM : correspondance exacte, puis repli sur la clé de famille. Voir [config.md](config.md#operatingsystemmap) |
 | `Get-OsGeneration` | Extrait l'année de release (2003-2025) d'un nom d'OS |
 
 ### VLAN
@@ -59,6 +60,21 @@ Les modules Windows-only (`VirtualMachineManager`, `Veeam.Backup.PowerShell`, `F
 | Fonction | Description |
 |----------|-------------|
 | *(résolution VLAN intégrée dans `run-migration.ps1`)* | |
+
+### VMware
+
+| Fonction | Description |
+|----------|-------------|
+| `Test-VmwareVirtualMachineEntity` | Teste si une entité de `Get-TagAssignment` est une VM. PowerCLI renvoie le type d'implémentation (`UniversalVirtualMachineImpl`, `VirtualMachineImpl`), jamais `VirtualMachine` : la fonction accepte le nom de type **ou** le préfixe de l'`Id` managé (`VirtualMachine-vm-…`) |
+| `Get-VmwareAdapterConnectionState` | Lit les drapeaux `Connected` (lien en cours) et `StartConnected` (branchée au démarrage) d'une NIC, quelle que soit la forme exposée par PowerCLI (`ConnectionState`, propriétés à plat, ou `ExtensionData.Connectable`) |
+| `Set-VmwareVmNetworkAdapterConnection` | Branche ou débranche toutes les NICs d'une VM. Écrit **toujours** `StartConnected` (c'est lui qui survit à un cycle d'alimentation), et `Connected` seulement si la VM tourne. Retourne un récapitulatif (`ChangedCount`, `UnchangedCount`, `FailedCount`) pour qu'un échec ne soit jamais silencieux |
+| `Resolve-AdapterVlanId` | Résout le VLAN d'une carte réseau VMware (port group distribué, puis standard, puis backing, puis suffixe de nom). Rejette VLAN 0 (untagged), 4095 et les port groups trunk : retourne `PortGroup not found` plutôt qu'un VLAN inventé. Définie ici et non dans `run-migration.ps1` pour que la suite Pester exerce l'implémentation réelle |
+
+### SCVMM
+
+| Fonction | Description |
+|----------|-------------|
+| `ConvertTo-ScvmmMemoryGigabytes` | Convertit la mémoire d'une VM SCVMM (`VirtualMachine.Memory`, exprimée en **Mo**) en Go ; tolère une valeur en octets. Un jumeau inline existe dans le scriptblock SCVMM de `step5-ValidateMigration.ps1`, qui s'exécute dans la session de compatibilité WinPS où `lib.ps1` n'est pas chargé |
 
 ### Ciblage migration
 
