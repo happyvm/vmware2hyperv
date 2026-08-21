@@ -1,5 +1,47 @@
 Set-StrictMode -Version Latest
 
+Describe 'PowerShell file format startup guard' {
+    BeforeAll {
+        $runMigrationPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'powershell-migration/run-migration.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($runMigrationPath, [ref]$tokens, [ref]$errors)
+        foreach ($functionName in @('Get-UnixFormatPowerShellFiles', 'Assert-WindowsPowerShellFileFormat')) {
+            $functionAst = $ast.Find({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
+                }, $true)
+            Set-Item -Path "function:script:$functionName" -Value $functionAst.Body.GetScriptBlock()
+        }
+    }
+
+    It 'accepts PowerShell files containing Windows CRLF line endings' {
+        $folder = Join-Path $TestDrive 'windows-format'
+        New-Item -ItemType Directory -Path $folder | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $folder 'valid.ps1'), [byte[]](65, 13, 10, 66, 13, 10))
+
+        { Assert-WindowsPowerShellFileFormat -Path $folder } | Should -Not -Throw
+    }
+
+    It 'stops and identifies files containing Unix or mixed line endings' {
+        $folder = Join-Path $TestDrive 'unix-format'
+        New-Item -ItemType Directory -Path $folder | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $folder 'unix.ps1'), [byte[]](65, 10, 66, 10))
+        [System.IO.File]::WriteAllBytes((Join-Path $folder 'mixed.psd1'), [byte[]](65, 13, 10, 66, 10))
+
+        { Assert-WindowsPowerShellFileFormat -Path $folder } |
+            Should -Throw '*Unix (LF) or mixed line endings*mixed.psd1*unix.ps1*'
+    }
+
+    It 'ignores Unix line endings in non-PowerShell files' {
+        $folder = Join-Path $TestDrive 'documentation'
+        New-Item -ItemType Directory -Path $folder | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $folder 'README.md'), [byte[]](65, 10, 66, 10))
+
+        { Assert-WindowsPowerShellFileFormat -Path $folder } | Should -Not -Throw
+    }
+}
+
 Describe 'Convert-ToSafeFileName' {
     BeforeAll {
         function script:Convert-ToSafeFileName {

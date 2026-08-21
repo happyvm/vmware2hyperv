@@ -124,7 +124,7 @@ Describe 'Resolve-MigrationTarget' {
 
 Describe 'Connect-VCenter credential fallback' {
     BeforeEach {
-        $script:VCenterCredentialFallback = $null
+        $global:Vmware2HyperVCredentialCache = @{}
         $script:ConnectVIServerCalls = @()
         $script:GetCredentialCalls = 0
 
@@ -150,13 +150,30 @@ Describe 'Connect-VCenter credential fallback' {
         }
     }
 
-    It 'prompts only once and reuses the fallback credential for subsequent vCenter connections' {
+    It 'prompts only once and skips repeated SSO attempts for the same vCenter' {
         Connect-VCenter -Server 'vcenter-a.domain.local'
-        Connect-VCenter -Server 'vcenter-b.domain.local'
+        Connect-VCenter -Server 'VCENTER-A.domain.local'
 
         $script:GetCredentialCalls | Should -Be 1
         @($script:ConnectVIServerCalls | Where-Object HasCredential) | Should -HaveCount 2
-        @($script:ConnectVIServerCalls | Where-Object { -not $_.HasCredential }) | Should -HaveCount 2
+        @($script:ConnectVIServerCalls | Where-Object { -not $_.HasCredential }) | Should -HaveCount 1
+    }
+
+    It 'keeps fallback credentials isolated per vCenter' {
+        Connect-VCenter -Server 'vcenter-a.domain.local'
+        Connect-VCenter -Server 'vcenter-b.domain.local'
+
+        $script:GetCredentialCalls | Should -Be 2
+        @($global:Vmware2HyperVCredentialCache.Keys) | Should -HaveCount 2
+    }
+
+    It 'preserves the cache when the shared library is dot-sourced again' {
+        Connect-VCenter -Server 'vcenter-a.domain.local'
+        . (Join-Path -Path $repoRoot -ChildPath 'powershell-migration/lib.ps1')
+        Connect-VCenter -Server 'vcenter-a.domain.local'
+
+        $script:GetCredentialCalls | Should -Be 1
+        @($script:ConnectVIServerCalls | Where-Object { -not $_.HasCredential }) | Should -HaveCount 1
     }
 }
 
