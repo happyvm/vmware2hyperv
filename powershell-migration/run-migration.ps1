@@ -110,6 +110,46 @@ param (
 
 Set-StrictMode -Version Latest
 
+function Get-UnixFormatPowerShellFiles {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    foreach ($file in @(Get-ChildItem -Path $Path -File -Recurse -ErrorAction Stop |
+            Where-Object { $_.Extension -in @('.ps1', '.psd1', '.psm1') })) {
+        $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+        for ($index = 0; $index -lt $bytes.Length; $index++) {
+            # Unix LF, including mixed line endings, is invalid. A Windows line
+            # ending always has CR immediately before LF.
+            if ($bytes[$index] -eq 0x0A -and ($index -eq 0 -or $bytes[$index - 1] -ne 0x0D)) {
+                $file.FullName
+                break
+            }
+        }
+    }
+}
+
+function Assert-WindowsPowerShellFileFormat {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $unixFiles = @(Get-UnixFormatPowerShellFiles -Path $Path)
+    if ($unixFiles.Count -gt 0) {
+        $fileList = ($unixFiles | ForEach-Object { " - $_" }) -join [Environment]::NewLine
+        throw "Migration stopped: PowerShell files use Unix (LF) or mixed line endings. Convert them to Windows CRLF and retry:$([Environment]::NewLine)$fileList"
+    }
+}
+
+# This toolkit runs on Windows management servers and is distributed with CRLF
+# PowerShell files. Fail before loading any supporting script so a Unix-formatted
+# or partially converted copy cannot start a migration.
+Assert-WindowsPowerShellFileFormat -Path $PSScriptRoot
+
 # Remove Mark-of-the-Web from every file in the toolkit (recursively, including step3\ modules
 # and config.psd1) before anything is dot-sourced or invoked. Must run first: files copied from a
 # zip download or a network share are flagged "downloaded from the internet" and, under a
