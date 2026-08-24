@@ -142,14 +142,31 @@
             "Windows 2003 Standard"                            = "Windows Server 2003 Standard Edition (32-bit x86)"
             "Windows 2003 Enterprise"                          = "Windows Server 2003 Enterprise Edition (32-bit x86)"
 
-            # NOTE: this CMDB export stores Linux distribution and version in two
-            # separate columns ("Operating System" = "Linux Red Hat" / "Linux CentOS" /
-            # "Linux SuSE" / "Linux Rocky" / "Linux Ubuntu" / "GNU/Linux", "OS Version" =
-            # "8.10", "15.6", ...). Neither column alone is enough to resolve an SCVMM
-            # OS: merge the two into a single value (e.g. "Linux Red Hat" + "8.10" ->
-            # "Red Hat Enterprise Linux 8.10") in the CmdbExtractCsv before it reaches
-            # this pipeline, otherwise those VMs fail to resolve and keep whatever guest
-            # OS SCVMM guessed (see doc/config.md).
+            # ServiceNow cmdb_ci_server splits Linux distribution ("Operating System" =
+            # "Linux Red Hat", "Linux CentOS", ...) and version ("OS Version" = "8.10",
+            # "7.9.2009", ...) across two columns instead of one self-contained label.
+            # CMDB.OsVersionColumns + Merge-CmdbOperatingSystemVersion (lib.ps1) rebuild
+            # "<Operating System> <OS Version>" before it reaches this map -- e.g.
+            # "Linux Red Hat" + "8.10" -> "Linux Red Hat 8.10", whose family key is
+            # "linux red hat 8". These entries are that scheme's family defaults, same
+            # targets as the "Red Hat Enterprise Linux <major>" / "CentOS Linux 7"
+            # entries above.
+            "Linux Red Hat 6"                                  = "Red Hat Enterprise Linux 6 (64 bit)"
+            "Linux Red Hat 7"                                  = "Red Hat Enterprise Linux 7 (64 bit)"
+            "Linux Red Hat 8"                                  = "Red Hat Enterprise Linux 8 (64 bit)"
+            "Linux Red Hat 9"                                  = "Red Hat Enterprise Linux 9 (64 bit)"
+            "Linux CentOS 6"                                   = "CentOS Linux 6 (64 bit)"
+            "Linux CentOS 7"                                   = "CentOS Linux 7 (64 bit)"
+
+            # Also seen in "Operating System" with a separate "OS Version" (15.6, 8.8,
+            # 9.5, 22.04.5, ...) but left unmapped: verify the exact Get-SCOperatingSystem
+            # name in your SCVMM before uncommenting -- guessing wrong here fails the OS
+            # phase (loudly, with the closest SCVMM names logged) instead of just skipping it.
+            # "Linux SuSE 15"     = "SUSE Linux Enterprise Server 15 (64 bit)"
+            # "Linux Rocky 8"     = "Rocky Linux 8 (64 bit)"
+            # "Linux Rocky 9"     = "Rocky Linux 9 (64 bit)"
+            # "Linux Ubuntu 22"   = "Ubuntu Server 22.04 LTS (64 bit)"
+            # "Linux Ubuntu 18"   = "Ubuntu Server 18.04 LTS (64 bit)"
         }
     }
 
@@ -220,12 +237,20 @@
         CsvDelimiter           = ";"
         VmNameColumns          = @("VMName", "Name")
         OperatingSystemColumns = @("OperatingSystem", "Operating system", "Operating System")
+        # "OS Version" is where a ServiceNow cmdb_ci_server export puts the version when
+        # OperatingSystemColumns only has the family ("Linux Red Hat", "Linux CentOS").
+        # Merge-CmdbOperatingSystemVersion (lib.ps1) appends it -- only when the OS label
+        # doesn't already carry a version of its own -- before OS mapping resolves it.
+        OsVersionColumns       = @("OS Version", "OSVersion", "Version")
         # "Used for" is the environment column name in a ServiceNow cmdb_ci_server export.
         EnvironmentColumns     = @("Environment", "Environnement", "Used for")
         # "Support Level" is the SLA column name in a ServiceNow cmdb_ci_server export
         # (values there are typically "1 - Gold" / "2 - Silver" / "3 - Bronze").
         SlaColumns             = @("SLA", "Sla", "Support Level")
         ApplicationColumns     = @("Application", "ApplicationName", "NomApplication")
+        # "DRP Criticality" is the DR criticality column name in a ServiceNow
+        # cmdb_ci_server export (values there look like "Level 1 : Major Critical").
+        DrpColumns             = @("DRP", "DrpLevel", "DRP Criticality")
         # Values found in "Used for" seen in practice: Production, Test, Validation,
         # Development, UAT, Pre-Production, Training, Sandbox, Archive, Disaster recovery.
         # Only "production"/"prod" (case-insensitive) count as production; every other
@@ -237,6 +262,7 @@
         Environment = "CMDB Environment"
         SLA         = "CMDB SLA"
         Application = "CMDB Application"
+        Drp         = "CMDB DRP"
         CreateIfMissing = $true
     }
 

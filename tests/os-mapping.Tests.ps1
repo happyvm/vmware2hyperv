@@ -174,6 +174,50 @@ Describe 'Shipped SCVMM.OperatingSystemMap' {
         Resolve-OperatingSystemMapping -OperatingSystem 'CentOS 6' -OperatingSystemMap $script:ShippedMap |
             Should -Be 'CentOS Linux 6 (64 bit)'
     }
+
+    # ServiceNow cmdb_ci_server splits the Linux family ("Operating System" =
+    # "Linux Red Hat") and the version ("OS Version" = "8.10") across two
+    # columns; Merge-CmdbOperatingSystemVersion recombines them upstream into
+    # "Linux Red Hat 8.10" before it reaches this map.
+    It 'resolves the merged "Linux family + version" labels this CMDB export produces' {
+        $expectations = @{
+            'Linux Red Hat 8.10'   = 'Red Hat Enterprise Linux 8 (64 bit)'
+            'Linux Red Hat 7.6'    = 'Red Hat Enterprise Linux 7 (64 bit)'
+            'Linux Red Hat 9.4'    = 'Red Hat Enterprise Linux 9 (64 bit)'
+            'Linux CentOS 7.9.2009' = 'CentOS Linux 7 (64 bit)'
+            'Linux CentOS 6.5'     = 'CentOS Linux 6 (64 bit)'
+        }
+
+        foreach ($sourceLabel in $expectations.Keys) {
+            Resolve-OperatingSystemMapping -OperatingSystem $sourceLabel -OperatingSystemMap $script:ShippedMap |
+                Should -Be $expectations[$sourceLabel] -Because "'$sourceLabel' must map"
+        }
+    }
+}
+
+Describe 'Merge-CmdbOperatingSystemVersion' {
+
+    It 'appends the OS Version column when the OS label carries no version of its own' {
+        Merge-CmdbOperatingSystemVersion -OperatingSystem 'Linux Red Hat' -OsVersion '8.10' | Should -Be 'Linux Red Hat 8.10'
+        Merge-CmdbOperatingSystemVersion -OperatingSystem 'Linux CentOS' -OsVersion '7.9.2009' | Should -Be 'Linux CentOS 7.9.2009'
+    }
+
+    It 'leaves an already-versioned OS label untouched' {
+        Merge-CmdbOperatingSystemVersion -OperatingSystem 'Windows 2019 Datacenter' -OsVersion '10.0.17763' |
+            Should -Be 'Windows 2019 Datacenter'
+        Merge-CmdbOperatingSystemVersion -OperatingSystem 'Red Hat Enterprise Linux 8 (64-bit)' -OsVersion '8.6' |
+            Should -Be 'Red Hat Enterprise Linux 8 (64-bit)'
+    }
+
+    It 'does not guess from a non-numeric version string (kernel build, service pack code)' {
+        Merge-CmdbOperatingSystemVersion -OperatingSystem 'GNU/Linux' -OsVersion '6.1.166-1-generic' | Should -Be 'GNU/Linux'
+        Merge-CmdbOperatingSystemVersion -OperatingSystem 'Linux SuSE' -OsVersion '15-sp5' | Should -Be 'Linux SuSE'
+    }
+
+    It 'returns the OS label unchanged when either input is empty' {
+        Merge-CmdbOperatingSystemVersion -OperatingSystem 'Linux Red Hat' -OsVersion '' | Should -Be 'Linux Red Hat'
+        Merge-CmdbOperatingSystemVersion -OperatingSystem $null -OsVersion '8.10' | Should -BeNullOrEmpty
+    }
 }
 
 Describe 'ConvertTo-NormalizedOperatingSystemName trademark and separator handling' {

@@ -310,6 +310,7 @@ function Set-VmCmdbCustomProperties {
         Environment = [string]$Context.CmdbEnvironment
         SLA         = [string]$Context.CmdbSLA
         Application = [string]$Context.CmdbApplication
+        Drp         = [string]$Context.CmdbDrp
     }
     $configuredProperties = Get-MigrationConfigValue -Config $Context.Config -Path 'SCVMMCustomProperties' -Default @{}
     $createIfMissing = [bool](Get-MigrationConfigValue -Config $configuredProperties -Path 'CreateIfMissing' -Default $true)

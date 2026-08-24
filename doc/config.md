@@ -282,11 +282,13 @@ Settings for `step4-StartVM.ps1`. `IntegrationMaxIterations = 0` makes the scrip
 ## Enrichissement CMDB et sauvegarde selon l'environnement
 
 Le fichier `Paths.CmdbExtractCsv` peut contenir, en plus de l'OS,
-l'environnement, le SLA et le nom de l'application. Le délimiteur et les noms
-de colonnes acceptés sont configurables dans `CMDB` (`CsvDelimiter`,
-`VmNameColumns`, `OperatingSystemColumns`, `EnvironmentColumns`, `SlaColumns`
-et `ApplicationColumns`). Step 3 copie les trois valeurs métier dans les
-propriétés personnalisées SCVMM nommées par `SCVMMCustomProperties`.
+l'environnement, le SLA, le nom de l'application et le niveau de criticité
+DRP. Le délimiteur et les noms de colonnes acceptés sont configurables dans
+`CMDB` (`CsvDelimiter`, `VmNameColumns`, `OperatingSystemColumns`,
+`OsVersionColumns`, `EnvironmentColumns`, `SlaColumns`, `ApplicationColumns`
+et `DrpColumns`). Step 3 copie les quatre valeurs métier dans les propriétés
+personnalisées SCVMM nommées par `SCVMMCustomProperties`
+(`Environment`, `SLA`, `Application`, `Drp`).
 
 Les valeurs de `CMDB.ProductionValues` sont considérées comme de la production
 et reçoivent `Tags.BackupProductionTag`. Toute autre valeur d'environnement non
@@ -305,8 +307,15 @@ colonnes : `Name`, `Operational status`, `IP Address`, `Operating System`,
 |---|---|
 | `Name`            | `VmNameColumns` |
 | `Operating System`| `OperatingSystemColumns` |
+| `OS Version`      | `OsVersionColumns` (fusionnée avec `Operating System`, voir plus bas) |
 | `Used for`        | `EnvironmentColumns` |
 | `Support Level`   | `SlaColumns` (valeurs du type `1 - Gold` / `2 - Silver` / `3 - Bronze`) |
+| `DRP Criticality` | `DrpColumns` (valeurs du type `Level 1 : Major Critical`) |
+
+`DRP Criticality` est copiée telle quelle dans la propriété personnalisée
+SCVMM `SCVMMCustomProperties.Drp` -- contrairement à l'environnement, il n'y a
+pas de classification (pas de tag de sauvegarde associé au niveau de
+criticité).
 
 `Used for` contient en pratique : `Production`, `Test`, `Validation`,
 `Development`, `UAT`, `Pre-Production`, `Training`, `Sandbox`, `Archive`,
@@ -324,8 +333,15 @@ longues (`Windows Server 2022 Standard`, etc.).
 > deux colonnes (`Operating System` = `Linux Red Hat` / `Linux CentOS` /
 > `Linux SuSE` / `Linux Rocky` / `Linux Ubuntu` / `GNU/Linux`, `OS Version` =
 > `8.10`, `15.6`...). Ni l'une ni l'autre ne suffit seule à résoudre un OS
-> SCVMM : fusionnez les deux colonnes dans le CSV produit pour
-> `Paths.CmdbExtractCsv` (par exemple `Linux Red Hat` + `8.10` ->
-> `Red Hat Enterprise Linux 8.10`) avant de l'utiliser, sans quoi ces VM ne
-> seront pas résolues et garderont l'OS deviné par SCVMM (voir le diagnostic
-> décrit plus haut).
+> SCVMM. Pas besoin de fusionner ces colonnes dans le CSV : `run-migration.ps1`
+> le fait automatiquement via `Merge-CmdbOperatingSystemVersion` (`lib.ps1`,
+> lu à partir de `CMDB.OsVersionColumns`) avant de résoudre l'OS -- seulement
+> quand `Operating System` ne porte pas déjà de version, donc les labels déjà
+> complets (Windows, `Red Hat Enterprise Linux 8 (64-bit)`...) ne sont pas
+> touchés. `SCVMM.OperatingSystemMap` contient les entrées `"Linux Red Hat
+> <majeur>"` / `"Linux CentOS <majeur>"` correspondantes ; SuSE, Rocky et
+> Ubuntu sont présents en commentaire dans `config.psd1` mais désactivés --
+> leur nom SCVMM exact n'a pas pu être vérifié, à confirmer avec
+> `Get-SCOperatingSystem` avant de les activer. Sans mapping, ces VM ne sont
+> pas résolues et gardent l'OS deviné par SCVMM (voir le diagnostic décrit
+> plus haut).
