@@ -39,6 +39,9 @@ param (
 
     [string]$AdapterVlanMapJson,
     [string]$OperatingSystem,
+    [string]$CmdbEnvironment,
+    [string]$CmdbSLA,
+    [string]$CmdbApplication,
     [string]$Remark,
     [string]$SCVMMServer,
     [string]$HyperVHost,
@@ -61,7 +64,7 @@ param (
     [switch]$SkipNetworkAndPostConfig,
 
     # ── Futur : sélection explicite de phases ────────────────────────────
-    [ValidateSet('IRStart', 'IRCommit', 'Network', 'IntegrationServices', 'OS', 'HA', 'LiveMigration', 'BackupTag')]
+    [ValidateSet('IRStart', 'IRCommit', 'Network', 'IntegrationServices', 'OS', 'HA', 'LiveMigration', 'CustomProperties', 'BackupTag')]
     [string[]]$Phases,
 
     [string]$LogFile
@@ -94,6 +97,13 @@ if (-not $HyperVHost2)   { $HyperVHost2   = $target.HyperVHost2 }
 if (-not $HyperVCluster) { $HyperVCluster = $target.HyperVCluster }
 if (-not $ClusterStorage){ $ClusterStorage = $target.ClusterStorage }
 if (-not $BackupTag)     { $BackupTag     = $Config.Tags.BackupTag }
+$productionValues = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.ProductionValues' -Default @('production', 'prod'))
+$normalizedProductionValues = @($productionValues | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
+$isProduction = -not [string]::IsNullOrWhiteSpace($CmdbEnvironment) -and ($normalizedProductionValues -contains $CmdbEnvironment.Trim().ToLowerInvariant())
+if (-not $PSBoundParameters.ContainsKey('BackupTag') -and -not [string]::IsNullOrWhiteSpace($CmdbEnvironment)) {
+    $backupTagPath = if ($isProduction) { 'Tags.BackupProductionTag' } else { 'Tags.BackupNonProductionTag' }
+    $BackupTag = [string](Get-MigrationConfigValue -Config $Config -Path $backupTagPath -Default $BackupTag)
+}
 
 if ($ForceNetworkConfigOnly) {
     $SkipInstantRecoveryStart = $true
@@ -131,6 +141,7 @@ $context = @{
     SCVMMServer = $SCVMMServer; HyperVHost = $HyperVHost; HyperVHost2 = $HyperVHost2
     HyperVCluster = $HyperVCluster; ClusterStorage = $ClusterStorage; BackupTag = $BackupTag
     OperatingSystem = $OperatingSystem; Remark = $Remark
+    CmdbEnvironment = $CmdbEnvironment; CmdbSLA = $CmdbSLA; CmdbApplication = $CmdbApplication
     AdapterVlanMapJson = $AdapterVlanMapJson
     WaitingTimeoutSeconds = $WaitingTimeoutSeconds
     WaitingPollIntervalSeconds = $WaitingPollIntervalSeconds
@@ -196,6 +207,9 @@ Invoke-Phase -Name 'HA' -DisplayName 'HighAvailability' -NonBlocking -Action {
 }
 Invoke-Phase -Name 'LiveMigration' -DisplayName 'LiveMigration' -NonBlocking -Action {
     Move-VmToSecondHost -Context $context -Result $result
+}
+Invoke-Phase -Name 'CustomProperties' -DisplayName 'CMDBCustomProperties' -NonBlocking -Action {
+    Set-VmCmdbCustomProperties -Context $context -Result $result
 }
 Invoke-Phase -Name 'BackupTag' -DisplayName 'BackupTag' -NonBlocking -Action {
     Set-VmBackupTag -Context $context -Result $result

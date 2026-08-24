@@ -1371,6 +1371,19 @@ $script:MigrationConfigSchema = @(
     @{ Section = 'Veeam';      Key = 'BackupProxy';    Question = 'Proxy de backup Veeam'; Optional = $true }
     @{ Section = 'Tags';       Key = 'Category';       Question = 'Catégorie de tag vSphere pour les lots de migration' }
     @{ Section = 'Tags';       Key = 'BackupTag';      Question = 'Tag appliqué aux VMs après migration' }
+    @{ Section = 'Tags';       Key = 'BackupProductionTag'; Question = 'Tag de sauvegarde appliqué aux VMs de production' }
+    @{ Section = 'Tags';       Key = 'BackupNonProductionTag'; Question = 'Tag de sauvegarde appliqué aux VMs hors production' }
+    @{ Section = 'CMDB';       Key = 'CsvDelimiter'; Question = "Délimiteur CSV de l'extrait CMDB" }
+    @{ Section = 'CMDB';       Key = 'VmNameColumns'; Question = 'Colonnes CMDB possibles pour le nom de VM'; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'OperatingSystemColumns'; Question = "Colonnes CMDB possibles pour l'OS"; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'EnvironmentColumns'; Question = "Colonnes CMDB possibles pour l'environnement"; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'SlaColumns'; Question = 'Colonnes CMDB possibles pour le SLA'; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'ApplicationColumns'; Question = "Colonnes CMDB possibles pour l'application"; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'ProductionValues'; Question = 'Valeurs CMDB identifiant la production'; Type = 'StringList' }
+    @{ Section = 'SCVMMCustomProperties'; Key = 'Environment'; Question = "Nom de la propriété SCVMM pour l'environnement CMDB" }
+    @{ Section = 'SCVMMCustomProperties'; Key = 'SLA'; Question = 'Nom de la propriété SCVMM pour le SLA CMDB' }
+    @{ Section = 'SCVMMCustomProperties'; Key = 'Application'; Question = "Nom de la propriété SCVMM pour l'application CMDB" }
+    @{ Section = 'SCVMMCustomProperties'; Key = 'CreateIfMissing'; Question = 'Créer les propriétés personnalisées SCVMM absentes ? (o/n)'; Type = 'Bool' }
     @{ Section = 'Smtp';       Key = 'Server';         Question = 'Serveur SMTP' }
     @{ Section = 'Smtp';       Key = 'Port';           Question = 'Port SMTP'; Type = 'Int' }
     @{ Section = 'Smtp';       Key = 'From';           Question = 'Adresse expéditeur des emails' }

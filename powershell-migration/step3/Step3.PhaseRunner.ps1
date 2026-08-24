@@ -57,7 +57,7 @@ function Should-RunPhase {
     switch ($Name) {
         'IRStart'  { return -not $SkipInstantRecoveryStart }
         'IRCommit' { return -not $SkipInstantRecoveryFinalization }
-        { $_ -in @('Network', 'IntegrationServices', 'OS', 'HA', 'LiveMigration', 'BackupTag') } {
+        { $_ -in @('Network', 'IntegrationServices', 'OS', 'HA', 'LiveMigration', 'CustomProperties', 'BackupTag') } {
             return -not $SkipNetworkAndPostConfig
         }
         default { return $true }

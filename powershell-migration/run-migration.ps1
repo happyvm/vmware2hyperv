@@ -371,6 +371,9 @@ function Get-VMwareClusterNameForVm {
 $vmVlans = @{}
 $vmAdapterVlans = @{}
 $vmOperatingSystems = @{}
+$vmEnvironments = @{}
+$vmSlas = @{}
+$vmApplications = @{}
 $vmRemarks = @{}
 $vmwareClusters = @{}
 $migrationTargets = @{}
@@ -378,36 +381,46 @@ $distributedPortGroupCache = @{}
 $standardPortGroupCache = @{}
 
 $cmdbPath = Get-MigrationConfigValue -Config $Config -Path 'Paths.CmdbExtractCsv' -Default ''
-$cmdbOperatingSystems = @{}
+$cmdbData = @{}
 if (-not [string]::IsNullOrWhiteSpace($cmdbPath) -and (Test-Path $cmdbPath)) {
-    $cmdbRows = Import-Csv -Path $cmdbPath -Delimiter ";"
+    $cmdbDelimiter = [string](Get-MigrationConfigValue -Config $Config -Path 'CMDB.CsvDelimiter' -Default ';')
+    $cmdbVmNameColumns = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.VmNameColumns' -Default @('VMName', 'Name'))
+    $cmdbOsColumns = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.OperatingSystemColumns' -Default @('OperatingSystem', 'Operating system'))
+    $cmdbEnvironmentColumns = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.EnvironmentColumns' -Default @('Environment', 'Environnement'))
+    $cmdbSlaColumns = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.SlaColumns' -Default @('SLA', 'Sla'))
+    $cmdbApplicationColumns = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.ApplicationColumns' -Default @('Application', 'ApplicationName'))
+    $cmdbRows = Import-Csv -Path $cmdbPath -Delimiter $cmdbDelimiter
     foreach ($cmdbRow in $cmdbRows) {
-        $cmdbVmName = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames @("VMName", "Name")
-        if ([string]::IsNullOrWhiteSpace($cmdbVmName) -or $cmdbOperatingSystems.ContainsKey($cmdbVmName)) {
+        $cmdbVmName = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames $cmdbVmNameColumns
+        if ([string]::IsNullOrWhiteSpace($cmdbVmName) -or $cmdbData.ContainsKey($cmdbVmName)) {
             continue
         }
-
-        $cmdbOperatingSystem = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames @("OperatingSystem", "Operating system")
-        if (-not [string]::IsNullOrWhiteSpace($cmdbOperatingSystem)) {
-            $cmdbOperatingSystems[$cmdbVmName] = $cmdbOperatingSystem
+        $cmdbData[$cmdbVmName] = @{
+            OperatingSystem = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames $cmdbOsColumns
+            Environment     = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames $cmdbEnvironmentColumns
+            SLA             = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames $cmdbSlaColumns
+            Application     = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames $cmdbApplicationColumns
         }
     }
 
-    Write-MigrationLog "Loaded $($cmdbOperatingSystems.Count) operating system entries from CMDB extract '$cmdbPath'." -LogFile $LogFile
+    Write-MigrationLog "Loaded $($cmdbData.Count) VM entries (OS, environment, SLA, application) from CMDB extract '$cmdbPath'." -LogFile $LogFile
 } elseif (-not [string]::IsNullOrWhiteSpace($cmdbPath)) {
     Write-MigrationLog "CMDB extract not found at '$cmdbPath'; falling back to OperatingSystem values from the batch CSV only." -Level WARNING -LogFile $LogFile
 }
 
 foreach ($row in $vmRows) {
     if (-not $vmOperatingSystems.ContainsKey($row.VMName)) {
-        $vmOperatingSystems[$row.VMName] = if ($cmdbOperatingSystems.ContainsKey($row.VMName)) {
-            $cmdbOperatingSystems[$row.VMName]
+        $vmOperatingSystems[$row.VMName] = if ($cmdbData.ContainsKey($row.VMName) -and $cmdbData[$row.VMName].OperatingSystem) {
+            $cmdbData[$row.VMName].OperatingSystem
         } else {
             # Property-guarded read: the OperatingSystem CSV column is optional
             # and a bare access throws under StrictMode when it is absent.
             Get-FirstPropertyValue -InputObject $row -PropertyNames @('OperatingSystem', 'Operating system')
         }
     }
+    $vmEnvironments[$row.VMName] = if ($cmdbData.ContainsKey($row.VMName)) { $cmdbData[$row.VMName].Environment } else { Get-FirstPropertyValue -InputObject $row -PropertyNames @('Environment', 'Environnement') }
+    $vmSlas[$row.VMName] = if ($cmdbData.ContainsKey($row.VMName)) { $cmdbData[$row.VMName].SLA } else { Get-FirstPropertyValue -InputObject $row -PropertyNames @('SLA', 'Sla') }
+    $vmApplications[$row.VMName] = if ($cmdbData.ContainsKey($row.VMName)) { $cmdbData[$row.VMName].Application } else { Get-FirstPropertyValue -InputObject $row -PropertyNames @('Application', 'ApplicationName', 'NomApplication') }
 }
 
 $vmObjectsByName = @{}
@@ -632,6 +645,9 @@ foreach ($vmName in $vmNames) {
         VlanId                 = $vmVlans[$vmName]
         AdapterVlanMapJson     = $adapterVlanMapJson
         OperatingSystem        = $vmOperatingSystems[$vmName]
+        CmdbEnvironment        = $vmEnvironments[$vmName]
+        CmdbSLA                = $vmSlas[$vmName]
+        CmdbApplication        = $vmApplications[$vmName]
         Remark                 = $vmRemarks[$vmName]
         VmwareCluster          = $vmwareClusters[$vmName]
         HyperVHost             = $migrationTargets[$vmName].HyperVHost

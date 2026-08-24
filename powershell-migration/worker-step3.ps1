@@ -202,6 +202,9 @@ while ($true) {
             -VlanId ([string]$task.VlanId) `
             -AdapterVlanMapJson ([string]$task.AdapterVlanMapJson) `
             -OperatingSystem ([string]$task.OperatingSystem) `
+            -CmdbEnvironment ([string]$task.CmdbEnvironment) `
+            -CmdbSLA ([string]$task.CmdbSLA) `
+            -CmdbApplication ([string]$task.CmdbApplication) `
             -Remark ([string]$task.Remark) `
             -VmwareCluster ([string]$task.VmwareCluster) `
             -HyperVHost ([string]$task.HyperVHost) `
