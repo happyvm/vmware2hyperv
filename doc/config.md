@@ -282,13 +282,41 @@ Settings for `step4-StartVM.ps1`. `IntegrationMaxIterations = 0` makes the scrip
 ## Enrichissement CMDB et sauvegarde selon l'environnement
 
 Le fichier `Paths.CmdbExtractCsv` peut contenir, en plus de l'OS,
-l'environnement, le SLA, le nom de l'application et le niveau de criticité
-DRP. Le délimiteur et les noms de colonnes acceptés sont configurables dans
-`CMDB` (`CsvDelimiter`, `VmNameColumns`, `OperatingSystemColumns`,
-`OsVersionColumns`, `EnvironmentColumns`, `SlaColumns`, `ApplicationColumns`
-et `DrpColumns`). Step 3 copie les quatre valeurs métier dans les propriétés
-personnalisées SCVMM nommées par `SCVMMCustomProperties`
-(`Environment`, `SLA`, `Application`, `Drp`).
+l'environnement, le SLA, le nom de l'application, le niveau de criticité DRP
+et l'outil de DRP. Le délimiteur et les noms de colonnes acceptés sont
+configurables dans `CMDB` (`CsvDelimiter`, `VmNameColumns`,
+`OperatingSystemColumns`, `OsVersionColumns`, `EnvironmentColumns`,
+`SlaColumns`, `ApplicationColumns`, `DrpColumns` et `DrpToolColumns`). Step 3
+copie ces valeurs métier dans les propriétés personnalisées SCVMM nommées par
+`SCVMMCustomProperties` (`Environment`, `SLA`, `Application`, `Drp`,
+`DrpTool`).
+
+### Outil de DRP (`CMDB.DrpToolColumns` / `CMDB.DrpToolMap`)
+
+`DrpTool` identifie le mécanisme de reprise utilisé pour la VM. Contrairement
+aux autres propriétés CMDB, sa valeur n'est pas copiée telle quelle : elle est
+d'abord résolue via `CMDB.DrpToolMap` vers l'une des trois catégories
+`CMDB.DrpToolValues` :
+
+```powershell
+DrpToolValues = @("storage réplication", "VM réplication", "backup restore")
+
+# Vide par défaut -- à remplir avec les valeurs réelles de votre CMDB
+# (nom de produit, technologie de réplication...) dans config.local.psd1 :
+DrpToolMap = @{
+    "SRDF"      = "storage réplication"
+    "Zerto"     = "VM réplication"
+    "Veeam B&R" = "backup restore"
+}
+```
+
+`DrpToolMap` est livré vide intentionnellement : les valeurs brutes de votre
+CMDB restent à saisir vous-même (elles ne figurent pas dans ce dépôt).
+`Resolve-CmdbDrpTool` (`lib.ps1`) fait une correspondance exacte (insensible à
+la casse et aux espaces superflus, sans repli par famille contrairement à l'OS
+-- ce sont des libellés métier, pas des versions). Une valeur CMDB sans entrée
+correspondante déclenche un avertissement dans le log de step3 et laisse la
+propriété `SCVMMCustomProperties.DrpTool` non renseignée pour cette VM.
 
 Les valeurs de `CMDB.ProductionValues` sont considérées comme de la production
 et reçoivent `Tags.BackupProductionTag`. Toute autre valeur d'environnement non
@@ -311,6 +339,10 @@ colonnes : `Name`, `Operational status`, `IP Address`, `Operating System`,
 | `Used for`        | `EnvironmentColumns` |
 | `Support Level`   | `SlaColumns` (valeurs du type `1 - Gold` / `2 - Silver` / `3 - Bronze`) |
 | `DRP Criticality` | `DrpColumns` (valeurs du type `Level 1 : Major Critical`) |
+
+Cet export ne contient pas de colonne dédiée à l'outil de DRP (voir
+"Outil de DRP" plus bas) -- si votre CMDB en a une, ajoutez son nom à
+`CMDB.DrpToolColumns`.
 
 `DRP Criticality` est copiée telle quelle dans la propriété personnalisée
 SCVMM `SCVMMCustomProperties.Drp` -- contrairement à l'environnement, il n'y a

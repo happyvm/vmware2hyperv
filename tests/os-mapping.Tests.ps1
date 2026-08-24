@@ -220,6 +220,45 @@ Describe 'Merge-CmdbOperatingSystemVersion' {
     }
 }
 
+Describe 'Resolve-CmdbDrpTool' {
+
+    BeforeAll {
+        # DrpToolMap is shipped empty in config.psd1 (the operator fills it in with
+        # their own CMDB's real values), so tests exercise the resolver directly
+        # against a representative map instead of the shipped one.
+        $script:DrpToolTestMap = @{
+            'SRDF'      = 'storage réplication'
+            'Zerto'     = 'VM réplication'
+            'Veeam B&R' = 'backup restore'
+        }
+    }
+
+    It 'resolves a raw CMDB value to its mapped category' {
+        Resolve-CmdbDrpTool -DrpTool 'SRDF' -DrpToolMap $script:DrpToolTestMap | Should -Be 'storage réplication'
+        Resolve-CmdbDrpTool -DrpTool 'Zerto' -DrpToolMap $script:DrpToolTestMap | Should -Be 'VM réplication'
+        Resolve-CmdbDrpTool -DrpTool 'Veeam B&R' -DrpToolMap $script:DrpToolTestMap | Should -Be 'backup restore'
+    }
+
+    It 'matches case-insensitively and ignores surrounding whitespace' {
+        Resolve-CmdbDrpTool -DrpTool '  srdf  ' -DrpToolMap $script:DrpToolTestMap | Should -Be 'storage réplication'
+        Resolve-CmdbDrpTool -DrpTool 'ZERTO' -DrpToolMap $script:DrpToolTestMap | Should -Be 'VM réplication'
+    }
+
+    It 'returns null for a value with no matching entry' {
+        Resolve-CmdbDrpTool -DrpTool 'SomeOtherTool' -DrpToolMap $script:DrpToolTestMap | Should -BeNullOrEmpty
+    }
+
+    It 'returns null for an empty value or an empty map' {
+        Resolve-CmdbDrpTool -DrpTool '' -DrpToolMap $script:DrpToolTestMap | Should -BeNullOrEmpty
+        Resolve-CmdbDrpTool -DrpTool 'SRDF' -DrpToolMap @{} | Should -BeNullOrEmpty
+    }
+
+    It 'ships with an empty DrpToolMap, left for the operator to fill in' {
+        $shippedDrpToolMap = (Import-PowerShellDataFile (Join-Path $script:MigrationRoot 'config.psd1')).CMDB.DrpToolMap
+        $shippedDrpToolMap.Count | Should -Be 0
+    }
+}
+
 Describe 'ConvertTo-NormalizedOperatingSystemName trademark and separator handling' {
 
     It 'strips a trailing registered-trademark symbol' {

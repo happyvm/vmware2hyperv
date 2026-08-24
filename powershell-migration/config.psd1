@@ -251,6 +251,21 @@
         # "DRP Criticality" is the DR criticality column name in a ServiceNow
         # cmdb_ci_server export (values there look like "Level 1 : Major Critical").
         DrpColumns             = @("DRP", "DrpLevel", "DRP Criticality")
+        # Column holding which DR mechanism protects the VM (backup product name,
+        # replication technology...). Adjust to match your CMDB's actual column name.
+        DrpToolColumns         = @("DRP Tool", "DrpTool", "Outil DRP", "Outil de reprise")
+        # The three DR mechanisms DrpToolMap values must resolve to.
+        DrpToolValues          = @("storage réplication", "VM réplication", "backup restore")
+        # Maps a raw CMDB.DrpToolColumns value to one of CMDB.DrpToolValues above.
+        # Left empty on purpose: fill in with your own CMDB's real values (product
+        # names, technology labels...) in config.local.psd1, e.g.:
+        #   "SRDF"       = "storage réplication"
+        #   "Zerto"      = "VM réplication"
+        #   "Veeam B&R"  = "backup restore"
+        # A CMDB value with no matching key here logs a warning during step3 and
+        # leaves the SCVMMCustomProperties.DrpTool property unset for that VM.
+        DrpToolMap             = @{
+        }
         # Values found in "Used for" seen in practice: Production, Test, Validation,
         # Development, UAT, Pre-Production, Training, Sandbox, Archive, Disaster recovery.
         # Only "production"/"prod" (case-insensitive) count as production; every other
@@ -263,6 +278,7 @@
         SLA         = "CMDB SLA"
         Application = "CMDB Application"
         Drp         = "CMDB DRP"
+        DrpTool     = "CMDB DRP Tool"
         CreateIfMissing = $true
     }
 

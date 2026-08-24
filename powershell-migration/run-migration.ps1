@@ -375,6 +375,7 @@ $vmEnvironments = @{}
 $vmSlas = @{}
 $vmApplications = @{}
 $vmDrps = @{}
+$vmDrpTools = @{}
 $vmRemarks = @{}
 $vmwareClusters = @{}
 $migrationTargets = @{}
@@ -392,6 +393,7 @@ if (-not [string]::IsNullOrWhiteSpace($cmdbPath) -and (Test-Path $cmdbPath)) {
     $cmdbSlaColumns = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.SlaColumns' -Default @('SLA', 'Sla'))
     $cmdbApplicationColumns = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.ApplicationColumns' -Default @('Application', 'ApplicationName'))
     $cmdbDrpColumns = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.DrpColumns' -Default @('DRP', 'DrpLevel', 'DRP Criticality'))
+    $cmdbDrpToolColumns = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.DrpToolColumns' -Default @('DRP Tool', 'DrpTool'))
     $cmdbRows = Import-Csv -Path $cmdbPath -Delimiter $cmdbDelimiter
     foreach ($cmdbRow in $cmdbRows) {
         $cmdbVmName = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames $cmdbVmNameColumns
@@ -409,10 +411,11 @@ if (-not [string]::IsNullOrWhiteSpace($cmdbPath) -and (Test-Path $cmdbPath)) {
             SLA             = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames $cmdbSlaColumns
             Application     = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames $cmdbApplicationColumns
             Drp             = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames $cmdbDrpColumns
+            DrpTool         = Get-FirstPropertyValue -InputObject $cmdbRow -PropertyNames $cmdbDrpToolColumns
         }
     }
 
-    Write-MigrationLog "Loaded $($cmdbData.Count) VM entries (OS, environment, SLA, application, DRP) from CMDB extract '$cmdbPath'." -LogFile $LogFile
+    Write-MigrationLog "Loaded $($cmdbData.Count) VM entries (OS, environment, SLA, application, DRP, DRP tool) from CMDB extract '$cmdbPath'." -LogFile $LogFile
 } elseif (-not [string]::IsNullOrWhiteSpace($cmdbPath)) {
     Write-MigrationLog "CMDB extract not found at '$cmdbPath'; falling back to OperatingSystem values from the batch CSV only." -Level WARNING -LogFile $LogFile
 }
@@ -431,6 +434,7 @@ foreach ($row in $vmRows) {
     $vmSlas[$row.VMName] = if ($cmdbData.ContainsKey($row.VMName)) { $cmdbData[$row.VMName].SLA } else { Get-FirstPropertyValue -InputObject $row -PropertyNames @('SLA', 'Sla') }
     $vmApplications[$row.VMName] = if ($cmdbData.ContainsKey($row.VMName)) { $cmdbData[$row.VMName].Application } else { Get-FirstPropertyValue -InputObject $row -PropertyNames @('Application', 'ApplicationName', 'NomApplication') }
     $vmDrps[$row.VMName] = if ($cmdbData.ContainsKey($row.VMName)) { $cmdbData[$row.VMName].Drp } else { Get-FirstPropertyValue -InputObject $row -PropertyNames @('DRP', 'DrpLevel', 'DRP Criticality') }
+    $vmDrpTools[$row.VMName] = if ($cmdbData.ContainsKey($row.VMName)) { $cmdbData[$row.VMName].DrpTool } else { Get-FirstPropertyValue -InputObject $row -PropertyNames @('DRP Tool', 'DrpTool') }
 }
 
 $vmObjectsByName = @{}
@@ -659,6 +663,7 @@ foreach ($vmName in $vmNames) {
         CmdbSLA                = $vmSlas[$vmName]
         CmdbApplication        = $vmApplications[$vmName]
         CmdbDrp                = $vmDrps[$vmName]
+        CmdbDrpTool            = $vmDrpTools[$vmName]
         Remark                 = $vmRemarks[$vmName]
         VmwareCluster          = $vmwareClusters[$vmName]
         HyperVHost             = $migrationTargets[$vmName].HyperVHost

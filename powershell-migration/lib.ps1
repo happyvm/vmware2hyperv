@@ -1344,6 +1344,37 @@ function Merge-CmdbOperatingSystemVersion {
 }
 
 # ---------------------------------------------------------------------------
+# Resolve-CmdbDrpTool : resolve a raw CMDB DRP tool value to one of the
+# canonical CMDB.DrpToolValues categories via CMDB.DrpToolMap
+#
+# Unlike Resolve-OperatingSystemMapping, there is no family-key fallback here:
+# DrpToolMap keys are business labels (backup product names, replication
+# technology...), not OS labels with a recognizable version structure, so an
+# exact match (trimmed, case-insensitive) is all that makes sense.
+# ---------------------------------------------------------------------------
+function Resolve-CmdbDrpTool {
+    param(
+        [AllowNull()]
+        [string]$DrpTool,
+
+        $DrpToolMap
+    )
+
+    if ([string]::IsNullOrWhiteSpace($DrpTool) -or -not $DrpToolMap) {
+        return $null
+    }
+
+    $normalized = $DrpTool.Trim().ToLowerInvariant()
+    foreach ($entry in $DrpToolMap.GetEnumerator()) {
+        if (([string]$entry.Key).Trim().ToLowerInvariant() -eq $normalized) {
+            return [string]$entry.Value
+        }
+    }
+
+    return $null
+}
+
+# ---------------------------------------------------------------------------
 # Initialize-ScvmmSessionFunction : push function definitions into the WinPS compat session
 # ---------------------------------------------------------------------------
 <#
@@ -1426,11 +1457,14 @@ $script:MigrationConfigSchema = @(
     @{ Section = 'CMDB';       Key = 'SlaColumns'; Question = 'Colonnes CMDB possibles pour le SLA'; Type = 'StringList' }
     @{ Section = 'CMDB';       Key = 'ApplicationColumns'; Question = "Colonnes CMDB possibles pour l'application"; Type = 'StringList' }
     @{ Section = 'CMDB';       Key = 'DrpColumns'; Question = 'Colonnes CMDB possibles pour le niveau de criticité DRP'; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'DrpToolColumns'; Question = "Colonnes CMDB possibles pour l'outil de DRP"; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'DrpToolValues'; Question = 'Valeurs autorisées en sortie du mapping CMDB.DrpToolMap'; Type = 'StringList' }
     @{ Section = 'CMDB';       Key = 'ProductionValues'; Question = 'Valeurs CMDB identifiant la production'; Type = 'StringList' }
     @{ Section = 'SCVMMCustomProperties'; Key = 'Environment'; Question = "Nom de la propriété SCVMM pour l'environnement CMDB" }
     @{ Section = 'SCVMMCustomProperties'; Key = 'SLA'; Question = 'Nom de la propriété SCVMM pour le SLA CMDB' }
     @{ Section = 'SCVMMCustomProperties'; Key = 'Application'; Question = "Nom de la propriété SCVMM pour l'application CMDB" }
     @{ Section = 'SCVMMCustomProperties'; Key = 'Drp'; Question = 'Nom de la propriété SCVMM pour le niveau de criticité DRP CMDB' }
+    @{ Section = 'SCVMMCustomProperties'; Key = 'DrpTool'; Question = "Nom de la propriété SCVMM pour l'outil de DRP CMDB" }
     @{ Section = 'SCVMMCustomProperties'; Key = 'CreateIfMissing'; Question = 'Créer les propriétés personnalisées SCVMM absentes ? (o/n)'; Type = 'Bool' }
     @{ Section = 'Smtp';       Key = 'Server';         Question = 'Serveur SMTP' }
     @{ Section = 'Smtp';       Key = 'Port';           Question = 'Port SMTP'; Type = 'Int' }
