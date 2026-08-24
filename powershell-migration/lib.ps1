@@ -1187,7 +1187,10 @@ function ConvertTo-NormalizedOperatingSystemName {
     }
 
     $normalized = $Name.Trim().ToLowerInvariant()
-    $normalized = $normalized -replace '[\/_-]+', ' '
+    # Trademark/registered marks: 'Windows(R)', 'Windows®' (ServiceNow/CMDB discovery exports).
+    $normalized = $normalized -replace '\((?:r|tm|c)\)', ' '
+    $normalized = $normalized -replace '[®™©]', ' '
+    $normalized = $normalized -replace '[\/_,-]+', ' '
     $normalized = $normalized -replace '\s+', ' '
     $normalized = $normalized -replace '^microsoft\s+', ''
     return $normalized.Trim()
@@ -1299,6 +1302,79 @@ function Resolve-OperatingSystemMapping {
 }
 
 # ---------------------------------------------------------------------------
+# Merge-CmdbOperatingSystemVersion : combine a CMDB "Operating System" column
+# with a separate "OS Version" column when the source keeps them apart
+#
+# Some CMDB exports (e.g. ServiceNow cmdb_ci_server) report the OS family in
+# one column ("Linux Red Hat", "Linux CentOS") and the version in another
+# ("8.10", "7.9.2009"), instead of a single self-contained label. Neither
+# column alone carries enough information for Resolve-OperatingSystemMapping
+# (no trailing version -> no family key). This appends the version only when
+# the OS label doesn't already carry one of its own, so it never disturbs
+# labels that are already complete (Windows editions, "Red Hat Enterprise
+# Linux 8 (64-bit)"...).
+# ---------------------------------------------------------------------------
+function Merge-CmdbOperatingSystemVersion {
+    param(
+        [AllowNull()]
+        [string]$OperatingSystem,
+
+        [AllowNull()]
+        [string]$OsVersion
+    )
+
+    if ([string]::IsNullOrWhiteSpace($OperatingSystem) -or [string]::IsNullOrWhiteSpace($OsVersion)) {
+        return $OperatingSystem
+    }
+
+    if ($OperatingSystem -match '\d') {
+        # Already versioned (e.g. "Windows 2019 Datacenter"): appending would
+        # break its exact match instead of completing a bare distro name.
+        return $OperatingSystem
+    }
+
+    if ($OsVersion.Trim() -notmatch '^\d+(\.\d+)*$') {
+        # Not a plain dotted version (e.g. a kernel build string like
+        # "6.1.166-1-generic", or "15-sp5") -- guessing a family key out of
+        # non-numeric flavor text would be more likely wrong than absent.
+        return $OperatingSystem
+    }
+
+    return "$($OperatingSystem.Trim()) $($OsVersion.Trim())"
+}
+
+# ---------------------------------------------------------------------------
+# Resolve-CmdbDrpTool : resolve a raw CMDB DRP tool value to one of the
+# canonical CMDB.DrpToolValues categories via CMDB.DrpToolMap
+#
+# Unlike Resolve-OperatingSystemMapping, there is no family-key fallback here:
+# DrpToolMap keys are business labels (backup product names, replication
+# technology...), not OS labels with a recognizable version structure, so an
+# exact match (trimmed, case-insensitive) is all that makes sense.
+# ---------------------------------------------------------------------------
+function Resolve-CmdbDrpTool {
+    param(
+        [AllowNull()]
+        [string]$DrpTool,
+
+        $DrpToolMap
+    )
+
+    if ([string]::IsNullOrWhiteSpace($DrpTool) -or -not $DrpToolMap) {
+        return $null
+    }
+
+    $normalized = $DrpTool.Trim().ToLowerInvariant()
+    foreach ($entry in $DrpToolMap.GetEnumerator()) {
+        if (([string]$entry.Key).Trim().ToLowerInvariant() -eq $normalized) {
+            return [string]$entry.Value
+        }
+    }
+
+    return $null
+}
+
+# ---------------------------------------------------------------------------
 # Initialize-ScvmmSessionFunction : push function definitions into the WinPS compat session
 # ---------------------------------------------------------------------------
 <#
@@ -1376,13 +1452,19 @@ $script:MigrationConfigSchema = @(
     @{ Section = 'CMDB';       Key = 'CsvDelimiter'; Question = "Délimiteur CSV de l'extrait CMDB" }
     @{ Section = 'CMDB';       Key = 'VmNameColumns'; Question = 'Colonnes CMDB possibles pour le nom de VM'; Type = 'StringList' }
     @{ Section = 'CMDB';       Key = 'OperatingSystemColumns'; Question = "Colonnes CMDB possibles pour l'OS"; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'OsVersionColumns'; Question = "Colonnes CMDB possibles pour la version de l'OS (fusionnée avec l'OS quand celui-ci n'en porte pas)"; Type = 'StringList' }
     @{ Section = 'CMDB';       Key = 'EnvironmentColumns'; Question = "Colonnes CMDB possibles pour l'environnement"; Type = 'StringList' }
     @{ Section = 'CMDB';       Key = 'SlaColumns'; Question = 'Colonnes CMDB possibles pour le SLA'; Type = 'StringList' }
     @{ Section = 'CMDB';       Key = 'ApplicationColumns'; Question = "Colonnes CMDB possibles pour l'application"; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'DrpColumns'; Question = 'Colonnes CMDB possibles pour le niveau de criticité DRP'; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'DrpToolColumns'; Question = "Colonnes CMDB possibles pour l'outil de DRP"; Type = 'StringList' }
+    @{ Section = 'CMDB';       Key = 'DrpToolValues'; Question = 'Valeurs autorisées en sortie du mapping CMDB.DrpToolMap'; Type = 'StringList' }
     @{ Section = 'CMDB';       Key = 'ProductionValues'; Question = 'Valeurs CMDB identifiant la production'; Type = 'StringList' }
     @{ Section = 'SCVMMCustomProperties'; Key = 'Environment'; Question = "Nom de la propriété SCVMM pour l'environnement CMDB" }
     @{ Section = 'SCVMMCustomProperties'; Key = 'SLA'; Question = 'Nom de la propriété SCVMM pour le SLA CMDB' }
     @{ Section = 'SCVMMCustomProperties'; Key = 'Application'; Question = "Nom de la propriété SCVMM pour l'application CMDB" }
+    @{ Section = 'SCVMMCustomProperties'; Key = 'Drp'; Question = 'Nom de la propriété SCVMM pour le niveau de criticité DRP CMDB' }
+    @{ Section = 'SCVMMCustomProperties'; Key = 'DrpTool'; Question = "Nom de la propriété SCVMM pour l'outil de DRP CMDB" }
     @{ Section = 'SCVMMCustomProperties'; Key = 'CreateIfMissing'; Question = 'Créer les propriétés personnalisées SCVMM absentes ? (o/n)'; Type = 'Bool' }
     @{ Section = 'Smtp';       Key = 'Server';         Question = 'Serveur SMTP' }
     @{ Section = 'Smtp';       Key = 'Port';           Question = 'Port SMTP'; Type = 'Int' }

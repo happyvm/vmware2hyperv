@@ -19,7 +19,7 @@
     Install-RsatHyperV, Get-SCVMMVmRuntimeState, Start-SCVMMHostMigration,
     Get-SCVMMHostMigrationJobState, ConvertTo-NormalizedHostName,
     ConvertTo-NormalizedOperatingSystemName,
-    Resolve-OperatingSystemMapping).
+    Resolve-OperatingSystemMapping, Resolve-CmdbDrpTool).
 #>
 
 Set-StrictMode -Version Latest
@@ -306,10 +306,22 @@ function Set-VmCmdbCustomProperties {
         [Parameter(Mandatory = $false)] [PSObject]$Result
     )
 
+    # DrpTool is resolved (raw CMDB value -> one of CMDB.DrpToolValues) before it
+    # reaches the custom property, same as OS mapping: the property must only ever
+    # hold one of the three canonical categories, never an unmapped raw CMDB label.
+    $drpToolMap = Get-MigrationConfigValue -Config $Context.Config -Path 'CMDB.DrpToolMap' -Default @{}
+    $rawDrpTool = [string]$Context.CmdbDrpTool
+    $resolvedDrpTool = Resolve-CmdbDrpTool -DrpTool $rawDrpTool -DrpToolMap $drpToolMap
+    if (-not [string]::IsNullOrWhiteSpace($rawDrpTool) -and [string]::IsNullOrWhiteSpace($resolvedDrpTool)) {
+        Write-MigrationLog "[$($Context.VMName)] No DRP tool mapping found for '$rawDrpTool'. Add an entry to CMDB.DrpToolMap in config.psd1." -Level WARNING -LogFile $Context.LogFile
+    }
+
     $propertyValues = [ordered]@{
         Environment = [string]$Context.CmdbEnvironment
         SLA         = [string]$Context.CmdbSLA
         Application = [string]$Context.CmdbApplication
+        Drp         = [string]$Context.CmdbDrp
+        DrpTool     = [string]$resolvedDrpTool
     }
     $configuredProperties = Get-MigrationConfigValue -Config $Context.Config -Path 'SCVMMCustomProperties' -Default @{}
     $createIfMissing = [bool](Get-MigrationConfigValue -Config $configuredProperties -Path 'CreateIfMissing' -Default $true)

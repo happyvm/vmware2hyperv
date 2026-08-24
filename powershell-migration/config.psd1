@@ -114,6 +114,59 @@
             "Red Hat Enterprise Linux ES 6.10"                 = "Red Hat Enterprise Linux 6 (64 bit)"
             "Red Hat Enterprise Linux ES 6.6"                  = "Red Hat Enterprise Linux 6 (64 bit)"
             "CentOS Linux 7"                                   = "CentOS Linux 7 (64 bit)"
+            # Same naming pattern as "CentOS Linux 7" above; verify against
+            # Get-SCOperatingSystem before relying on it in production.
+            "CentOS 6"                                         = "CentOS Linux 6 (64 bit)"
+
+            # ServiceNow cmdb_ci_server short forms: "Windows <year> <edition>"
+            # without the word "Server" (Discovery/CMDB "Operating System" field).
+            # Targets reuse the exact SCVMM names already validated above.
+            "Windows 2025 Datacenter"                          = "Windows Server 2025 Datacenter"
+            "Windows 2025 Standard"                            = "Windows Server 2025 Standard"
+            "Windows 2022 Datacenter"                          = "Windows Server 2022 Datacenter"
+            "Windows 2022 Standard"                            = "Windows Server 2022 Standard"
+            "Windows 2019 Datacenter"                          = "Windows Server 2019 Datacenter"
+            "Windows 2019 Standard"                            = "Windows Server 2019 Standard"
+            "Windows 2016 Datacenter"                          = "Windows Server 2016 Datacenter"
+            "Windows 2016 Standard"                            = "Windows Server 2016 Standard"
+            "Windows 2012 R2 Datacenter"                       = "Windows Server 2012 R2 Datacenter"
+            "Windows 2012 R2 Standard"                         = "Windows Server 2012 R2 Standard"
+            "Windows 2012 Datacenter"                          = "64-bit edition of Windows Server 2012 Datacenter"
+            "Windows 2012 Standard"                            = "64-bit edition of Windows Server 2012 Standard"
+            "Windows 2008 R2 Standard"                         = "64-bit edition of Windows Server 2008 R2 Standard"
+            "Windows 2008 R2 Enterprise"                       = "64-bit edition of Windows Server 2008 R2 Enterprise"
+            "Windows 2008 R2 Datacenter"                       = "64-bit edition of Windows Server 2008 R2 Datacenter"
+            # Also matches "Windows (R) 2008 Standard" once trademark symbols are stripped.
+            "Windows 2008 Standard"                            = "Windows Server 2008 Standard 32-Bit"
+            "Windows 2008 Standard without Hyper-V"            = "Windows Server 2008 Standard 32-Bit"
+            "Windows 2003 Standard"                            = "Windows Server 2003 Standard Edition (32-bit x86)"
+            "Windows 2003 Enterprise"                          = "Windows Server 2003 Enterprise Edition (32-bit x86)"
+
+            # ServiceNow cmdb_ci_server splits Linux distribution ("Operating System" =
+            # "Linux Red Hat", "Linux CentOS", ...) and version ("OS Version" = "8.10",
+            # "7.9.2009", ...) across two columns instead of one self-contained label.
+            # CMDB.OsVersionColumns + Merge-CmdbOperatingSystemVersion (lib.ps1) rebuild
+            # "<Operating System> <OS Version>" before it reaches this map -- e.g.
+            # "Linux Red Hat" + "8.10" -> "Linux Red Hat 8.10", whose family key is
+            # "linux red hat 8". These entries are that scheme's family defaults, same
+            # targets as the "Red Hat Enterprise Linux <major>" / "CentOS Linux 7"
+            # entries above.
+            "Linux Red Hat 6"                                  = "Red Hat Enterprise Linux 6 (64 bit)"
+            "Linux Red Hat 7"                                  = "Red Hat Enterprise Linux 7 (64 bit)"
+            "Linux Red Hat 8"                                  = "Red Hat Enterprise Linux 8 (64 bit)"
+            "Linux Red Hat 9"                                  = "Red Hat Enterprise Linux 9 (64 bit)"
+            "Linux CentOS 6"                                   = "CentOS Linux 6 (64 bit)"
+            "Linux CentOS 7"                                   = "CentOS Linux 7 (64 bit)"
+
+            # Also seen in "Operating System" with a separate "OS Version" (15.6, 8.8,
+            # 9.5, 22.04.5, ...) but left unmapped: verify the exact Get-SCOperatingSystem
+            # name in your SCVMM before uncommenting -- guessing wrong here fails the OS
+            # phase (loudly, with the closest SCVMM names logged) instead of just skipping it.
+            # "Linux SuSE 15"     = "SUSE Linux Enterprise Server 15 (64 bit)"
+            # "Linux Rocky 8"     = "Rocky Linux 8 (64 bit)"
+            # "Linux Rocky 9"     = "Rocky Linux 9 (64 bit)"
+            # "Linux Ubuntu 22"   = "Ubuntu Server 22.04 LTS (64 bit)"
+            # "Linux Ubuntu 18"   = "Ubuntu Server 18.04 LTS (64 bit)"
         }
     }
 
@@ -183,10 +236,40 @@
     CMDB = @{
         CsvDelimiter           = ";"
         VmNameColumns          = @("VMName", "Name")
-        OperatingSystemColumns = @("OperatingSystem", "Operating system")
-        EnvironmentColumns     = @("Environment", "Environnement")
-        SlaColumns             = @("SLA", "Sla")
+        OperatingSystemColumns = @("OperatingSystem", "Operating system", "Operating System")
+        # "OS Version" is where a ServiceNow cmdb_ci_server export puts the version when
+        # OperatingSystemColumns only has the family ("Linux Red Hat", "Linux CentOS").
+        # Merge-CmdbOperatingSystemVersion (lib.ps1) appends it -- only when the OS label
+        # doesn't already carry a version of its own -- before OS mapping resolves it.
+        OsVersionColumns       = @("OS Version", "OSVersion", "Version")
+        # "Used for" is the environment column name in a ServiceNow cmdb_ci_server export.
+        EnvironmentColumns     = @("Environment", "Environnement", "Used for")
+        # "Support Level" is the SLA column name in a ServiceNow cmdb_ci_server export
+        # (values there are typically "1 - Gold" / "2 - Silver" / "3 - Bronze").
+        SlaColumns             = @("SLA", "Sla", "Support Level")
         ApplicationColumns     = @("Application", "ApplicationName", "NomApplication")
+        # "DRP Criticality" is the DR criticality column name in a ServiceNow
+        # cmdb_ci_server export (values there look like "Level 1 : Major Critical").
+        DrpColumns             = @("DRP", "DrpLevel", "DRP Criticality")
+        # Column holding which DR mechanism protects the VM (backup product name,
+        # replication technology...). Adjust to match your CMDB's actual column name.
+        DrpToolColumns         = @("DRP Tool", "DrpTool", "Outil DRP", "Outil de reprise")
+        # The three DR mechanisms DrpToolMap values must resolve to.
+        DrpToolValues          = @("storage réplication", "VM réplication", "backup restore")
+        # Maps a raw CMDB.DrpToolColumns value to one of CMDB.DrpToolValues above.
+        # Left empty on purpose: fill in with your own CMDB's real values (product
+        # names, technology labels...) in config.local.psd1, e.g.:
+        #   "SRDF"       = "storage réplication"
+        #   "Zerto"      = "VM réplication"
+        #   "Veeam B&R"  = "backup restore"
+        # A CMDB value with no matching key here logs a warning during step3 and
+        # leaves the SCVMMCustomProperties.DrpTool property unset for that VM.
+        DrpToolMap             = @{
+        }
+        # Values found in "Used for" seen in practice: Production, Test, Validation,
+        # Development, UAT, Pre-Production, Training, Sandbox, Archive, Disaster recovery.
+        # Only "production"/"prod" (case-insensitive) count as production; every other
+        # non-empty value -- Pre-Production included -- gets Tags.BackupNonProductionTag.
         ProductionValues       = @("production", "prod")
     }
 
@@ -194,6 +277,8 @@
         Environment = "CMDB Environment"
         SLA         = "CMDB SLA"
         Application = "CMDB Application"
+        Drp         = "CMDB DRP"
+        DrpTool     = "CMDB DRP Tool"
         CreateIfMissing = $true
     }
 

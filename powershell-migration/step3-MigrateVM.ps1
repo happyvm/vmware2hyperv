@@ -42,6 +42,8 @@ param (
     [string]$CmdbEnvironment,
     [string]$CmdbSLA,
     [string]$CmdbApplication,
+    [string]$CmdbDrp,
+    [string]$CmdbDrpTool,
     [string]$Remark,
     [string]$SCVMMServer,
     [string]$HyperVHost,
@@ -142,6 +144,7 @@ $context = @{
     HyperVCluster = $HyperVCluster; ClusterStorage = $ClusterStorage; BackupTag = $BackupTag
     OperatingSystem = $OperatingSystem; Remark = $Remark
     CmdbEnvironment = $CmdbEnvironment; CmdbSLA = $CmdbSLA; CmdbApplication = $CmdbApplication
+    CmdbDrp = $CmdbDrp; CmdbDrpTool = $CmdbDrpTool
     AdapterVlanMapJson = $AdapterVlanMapJson
     WaitingTimeoutSeconds = $WaitingTimeoutSeconds
     WaitingPollIntervalSeconds = $WaitingPollIntervalSeconds

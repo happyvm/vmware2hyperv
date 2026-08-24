@@ -282,14 +282,98 @@ Settings for `step4-StartVM.ps1`. `IntegrationMaxIterations = 0` makes the scrip
 ## Enrichissement CMDB et sauvegarde selon l'environnement
 
 Le fichier `Paths.CmdbExtractCsv` peut contenir, en plus de l'OS,
-l'environnement, le SLA et le nom de l'application. Le délimiteur et les noms
-de colonnes acceptés sont configurables dans `CMDB` (`CsvDelimiter`,
-`VmNameColumns`, `OperatingSystemColumns`, `EnvironmentColumns`, `SlaColumns`
-et `ApplicationColumns`). Step 3 copie les trois valeurs métier dans les
-propriétés personnalisées SCVMM nommées par `SCVMMCustomProperties`.
+l'environnement, le SLA, le nom de l'application, le niveau de criticité DRP
+et l'outil de DRP. Le délimiteur et les noms de colonnes acceptés sont
+configurables dans `CMDB` (`CsvDelimiter`, `VmNameColumns`,
+`OperatingSystemColumns`, `OsVersionColumns`, `EnvironmentColumns`,
+`SlaColumns`, `ApplicationColumns`, `DrpColumns` et `DrpToolColumns`). Step 3
+copie ces valeurs métier dans les propriétés personnalisées SCVMM nommées par
+`SCVMMCustomProperties` (`Environment`, `SLA`, `Application`, `Drp`,
+`DrpTool`).
+
+### Outil de DRP (`CMDB.DrpToolColumns` / `CMDB.DrpToolMap`)
+
+`DrpTool` identifie le mécanisme de reprise utilisé pour la VM. Contrairement
+aux autres propriétés CMDB, sa valeur n'est pas copiée telle quelle : elle est
+d'abord résolue via `CMDB.DrpToolMap` vers l'une des trois catégories
+`CMDB.DrpToolValues` :
+
+```powershell
+DrpToolValues = @("storage réplication", "VM réplication", "backup restore")
+
+# Vide par défaut -- à remplir avec les valeurs réelles de votre CMDB
+# (nom de produit, technologie de réplication...) dans config.local.psd1 :
+DrpToolMap = @{
+    "SRDF"      = "storage réplication"
+    "Zerto"     = "VM réplication"
+    "Veeam B&R" = "backup restore"
+}
+```
+
+`DrpToolMap` est livré vide intentionnellement : les valeurs brutes de votre
+CMDB restent à saisir vous-même (elles ne figurent pas dans ce dépôt).
+`Resolve-CmdbDrpTool` (`lib.ps1`) fait une correspondance exacte (insensible à
+la casse et aux espaces superflus, sans repli par famille contrairement à l'OS
+-- ce sont des libellés métier, pas des versions). Une valeur CMDB sans entrée
+correspondante déclenche un avertissement dans le log de step3 et laisse la
+propriété `SCVMMCustomProperties.DrpTool` non renseignée pour cette VM.
 
 Les valeurs de `CMDB.ProductionValues` sont considérées comme de la production
 et reçoivent `Tags.BackupProductionTag`. Toute autre valeur d'environnement non
 vide reçoit `Tags.BackupNonProductionTag`. Sans environnement,
 `Tags.BackupTag` conserve le comportement historique. Toutes ces clés peuvent
 être surchargées dans `config.local.psd1`.
+
+### Exemple : export ServiceNow `cmdb_ci_server`
+
+Un export ServiceNow de la table `cmdb_ci_server` fournit typiquement ces
+colonnes : `Name`, `Operational status`, `IP Address`, `Operating System`,
+`Support Level`, `Used for`, `Location`, `DRP Criticality`, `OS Service Pack`,
+`OS Version`. Correspondance avec `CMDB` :
+
+| Colonne ServiceNow | Clé `CMDB` déjà configurée |
+|---|---|
+| `Name`            | `VmNameColumns` |
+| `Operating System`| `OperatingSystemColumns` |
+| `OS Version`      | `OsVersionColumns` (fusionnée avec `Operating System`, voir plus bas) |
+| `Used for`        | `EnvironmentColumns` |
+| `Support Level`   | `SlaColumns` (valeurs du type `1 - Gold` / `2 - Silver` / `3 - Bronze`) |
+| `DRP Criticality` | `DrpColumns` (valeurs du type `Level 1 : Major Critical`) |
+
+Cet export ne contient pas de colonne dédiée à l'outil de DRP (voir
+"Outil de DRP" plus bas) -- si votre CMDB en a une, ajoutez son nom à
+`CMDB.DrpToolColumns`.
+
+`DRP Criticality` est copiée telle quelle dans la propriété personnalisée
+SCVMM `SCVMMCustomProperties.Drp` -- contrairement à l'environnement, il n'y a
+pas de classification (pas de tag de sauvegarde associé au niveau de
+criticité).
+
+`Used for` contient en pratique : `Production`, `Test`, `Validation`,
+`Development`, `UAT`, `Pre-Production`, `Training`, `Sandbox`, `Archive`,
+`Disaster recovery`. Seule la valeur `Production` (insensible à la casse)
+déclenche `Tags.BackupProductionTag` ; toutes les autres -- `Pre-Production`
+compris -- reçoivent `Tags.BackupNonProductionTag`.
+
+`Operating System` y donne des libellés courts sans le mot « Server »
+(`Windows 2022 Standard`, `Windows 2012 R2 Datacenter`, `Windows ® 2008
+Standard`...) : `SCVMM.OperatingSystemMap` contient déjà les entrées
+correspondantes, qui pointent vers les mêmes noms SCVMM que leurs formes
+longues (`Windows Server 2022 Standard`, etc.).
+
+> Pour les serveurs Linux, cet export sépare la distribution et la version sur
+> deux colonnes (`Operating System` = `Linux Red Hat` / `Linux CentOS` /
+> `Linux SuSE` / `Linux Rocky` / `Linux Ubuntu` / `GNU/Linux`, `OS Version` =
+> `8.10`, `15.6`...). Ni l'une ni l'autre ne suffit seule à résoudre un OS
+> SCVMM. Pas besoin de fusionner ces colonnes dans le CSV : `run-migration.ps1`
+> le fait automatiquement via `Merge-CmdbOperatingSystemVersion` (`lib.ps1`,
+> lu à partir de `CMDB.OsVersionColumns`) avant de résoudre l'OS -- seulement
+> quand `Operating System` ne porte pas déjà de version, donc les labels déjà
+> complets (Windows, `Red Hat Enterprise Linux 8 (64-bit)`...) ne sont pas
+> touchés. `SCVMM.OperatingSystemMap` contient les entrées `"Linux Red Hat
+> <majeur>"` / `"Linux CentOS <majeur>"` correspondantes ; SuSE, Rocky et
+> Ubuntu sont présents en commentaire dans `config.psd1` mais désactivés --
+> leur nom SCVMM exact n'a pas pu être vérifié, à confirmer avec
+> `Get-SCOperatingSystem` avant de les activer. Sans mapping, ces VM ne sont
+> pas résolues et gardent l'OS deviné par SCVMM (voir le diagnostic décrit
+> plus haut).

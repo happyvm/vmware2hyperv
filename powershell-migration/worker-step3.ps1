@@ -205,6 +205,8 @@ while ($true) {
             -CmdbEnvironment ([string]$task.CmdbEnvironment) `
             -CmdbSLA ([string]$task.CmdbSLA) `
             -CmdbApplication ([string]$task.CmdbApplication) `
+            -CmdbDrp ([string]$task.CmdbDrp) `
+            -CmdbDrpTool ([string]$task.CmdbDrpTool) `
             -Remark ([string]$task.Remark) `
             -VmwareCluster ([string]$task.VmwareCluster) `
             -HyperVHost ([string]$task.HyperVHost) `
