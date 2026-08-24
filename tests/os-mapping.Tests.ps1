@@ -138,6 +138,57 @@ Describe 'Shipped SCVMM.OperatingSystemMap' {
                 Should -Not -BeNullOrEmpty -Because "RHEL $major needs a family default"
         }
     }
+
+    # Labels actually produced by a ServiceNow cmdb_ci_server export's "Operating
+    # System" column: "Windows <year> <edition>" without the word "Server", and
+    # trademark-symbol / comma variants from Discovery.
+    It 'maps the ServiceNow short forms onto the same SCVMM names as their long forms' {
+        $expectations = @{
+            'Windows 2025 Standard'      = 'Windows Server 2025 Standard'
+            'Windows 2022 Datacenter'    = 'Windows Server 2022 Datacenter'
+            'Windows 2019 Datacenter'    = 'Windows Server 2019 Datacenter'
+            'Windows 2016 Standard'      = 'Windows Server 2016 Standard'
+            'Windows 2012 R2 Standard'   = 'Windows Server 2012 R2 Standard'
+            'Windows 2012 Standard'      = '64-bit edition of Windows Server 2012 Standard'
+            'Windows 2008 R2 Standard'   = '64-bit edition of Windows Server 2008 R2 Standard'
+            'Windows 2003 Standard'      = 'Windows Server 2003 Standard Edition (32-bit x86)'
+        }
+
+        foreach ($sourceLabel in $expectations.Keys) {
+            Resolve-OperatingSystemMapping -OperatingSystem $sourceLabel -OperatingSystemMap $script:ShippedMap |
+                Should -Be $expectations[$sourceLabel] -Because "'$sourceLabel' must map"
+        }
+    }
+
+    It 'maps the trademark-symbol variant Discovery reports for Windows 2008 Standard' {
+        Resolve-OperatingSystemMapping -OperatingSystem 'Windows ® 2008 Standard' -OperatingSystemMap $script:ShippedMap |
+            Should -Be 'Windows Server 2008 Standard 32-Bit'
+    }
+
+    It 'maps the comma-separated edition Discovery reports for Windows 2003' {
+        Resolve-OperatingSystemMapping -OperatingSystem 'Microsoft Windows Server 2003, Standard' -OperatingSystemMap $script:ShippedMap |
+            Should -BeNullOrEmpty -Because 'the edition wording (no trailing "Edition") does not match any configured key'
+    }
+
+    It 'extends CentOS with the same naming pattern as the shipped CentOS Linux 7 entry' {
+        Resolve-OperatingSystemMapping -OperatingSystem 'CentOS 6' -OperatingSystemMap $script:ShippedMap |
+            Should -Be 'CentOS Linux 6 (64 bit)'
+    }
+}
+
+Describe 'ConvertTo-NormalizedOperatingSystemName trademark and separator handling' {
+
+    It 'strips a trailing registered-trademark symbol' {
+        ConvertTo-NormalizedOperatingSystemName -Name 'Windows ® 2008 Standard' | Should -Be 'windows 2008 standard'
+    }
+
+    It 'strips the "(R)" text form Discovery sometimes reports instead of the symbol' {
+        ConvertTo-NormalizedOperatingSystemName -Name 'Microsoft(R) Windows(R) Server 2003' | Should -Be 'windows server 2003'
+    }
+
+    It 'treats a comma as a separator, same as slash/underscore/hyphen' {
+        ConvertTo-NormalizedOperatingSystemName -Name 'Windows Server 2003, Standard' | Should -Be 'windows server 2003 standard'
+    }
 }
 
 Describe 'OS mapping diagnostics' {

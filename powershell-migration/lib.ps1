@@ -1187,7 +1187,10 @@ function ConvertTo-NormalizedOperatingSystemName {
     }
 
     $normalized = $Name.Trim().ToLowerInvariant()
-    $normalized = $normalized -replace '[\/_-]+', ' '
+    # Trademark/registered marks: 'Windows(R)', 'Windows®' (ServiceNow/CMDB discovery exports).
+    $normalized = $normalized -replace '\((?:r|tm|c)\)', ' '
+    $normalized = $normalized -replace '[®™©]', ' '
+    $normalized = $normalized -replace '[\/_,-]+', ' '
     $normalized = $normalized -replace '\s+', ' '
     $normalized = $normalized -replace '^microsoft\s+', ''
     return $normalized.Trim()

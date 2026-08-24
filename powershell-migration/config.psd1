@@ -114,6 +114,42 @@
             "Red Hat Enterprise Linux ES 6.10"                 = "Red Hat Enterprise Linux 6 (64 bit)"
             "Red Hat Enterprise Linux ES 6.6"                  = "Red Hat Enterprise Linux 6 (64 bit)"
             "CentOS Linux 7"                                   = "CentOS Linux 7 (64 bit)"
+            # Same naming pattern as "CentOS Linux 7" above; verify against
+            # Get-SCOperatingSystem before relying on it in production.
+            "CentOS 6"                                         = "CentOS Linux 6 (64 bit)"
+
+            # ServiceNow cmdb_ci_server short forms: "Windows <year> <edition>"
+            # without the word "Server" (Discovery/CMDB "Operating System" field).
+            # Targets reuse the exact SCVMM names already validated above.
+            "Windows 2025 Datacenter"                          = "Windows Server 2025 Datacenter"
+            "Windows 2025 Standard"                            = "Windows Server 2025 Standard"
+            "Windows 2022 Datacenter"                          = "Windows Server 2022 Datacenter"
+            "Windows 2022 Standard"                            = "Windows Server 2022 Standard"
+            "Windows 2019 Datacenter"                          = "Windows Server 2019 Datacenter"
+            "Windows 2019 Standard"                            = "Windows Server 2019 Standard"
+            "Windows 2016 Datacenter"                          = "Windows Server 2016 Datacenter"
+            "Windows 2016 Standard"                            = "Windows Server 2016 Standard"
+            "Windows 2012 R2 Datacenter"                       = "Windows Server 2012 R2 Datacenter"
+            "Windows 2012 R2 Standard"                         = "Windows Server 2012 R2 Standard"
+            "Windows 2012 Datacenter"                          = "64-bit edition of Windows Server 2012 Datacenter"
+            "Windows 2012 Standard"                            = "64-bit edition of Windows Server 2012 Standard"
+            "Windows 2008 R2 Standard"                         = "64-bit edition of Windows Server 2008 R2 Standard"
+            "Windows 2008 R2 Enterprise"                       = "64-bit edition of Windows Server 2008 R2 Enterprise"
+            "Windows 2008 R2 Datacenter"                       = "64-bit edition of Windows Server 2008 R2 Datacenter"
+            # Also matches "Windows (R) 2008 Standard" once trademark symbols are stripped.
+            "Windows 2008 Standard"                            = "Windows Server 2008 Standard 32-Bit"
+            "Windows 2008 Standard without Hyper-V"            = "Windows Server 2008 Standard 32-Bit"
+            "Windows 2003 Standard"                            = "Windows Server 2003 Standard Edition (32-bit x86)"
+            "Windows 2003 Enterprise"                          = "Windows Server 2003 Enterprise Edition (32-bit x86)"
+
+            # NOTE: this CMDB export stores Linux distribution and version in two
+            # separate columns ("Operating System" = "Linux Red Hat" / "Linux CentOS" /
+            # "Linux SuSE" / "Linux Rocky" / "Linux Ubuntu" / "GNU/Linux", "OS Version" =
+            # "8.10", "15.6", ...). Neither column alone is enough to resolve an SCVMM
+            # OS: merge the two into a single value (e.g. "Linux Red Hat" + "8.10" ->
+            # "Red Hat Enterprise Linux 8.10") in the CmdbExtractCsv before it reaches
+            # this pipeline, otherwise those VMs fail to resolve and keep whatever guest
+            # OS SCVMM guessed (see doc/config.md).
         }
     }
 
@@ -183,10 +219,17 @@
     CMDB = @{
         CsvDelimiter           = ";"
         VmNameColumns          = @("VMName", "Name")
-        OperatingSystemColumns = @("OperatingSystem", "Operating system")
-        EnvironmentColumns     = @("Environment", "Environnement")
-        SlaColumns             = @("SLA", "Sla")
+        OperatingSystemColumns = @("OperatingSystem", "Operating system", "Operating System")
+        # "Used for" is the environment column name in a ServiceNow cmdb_ci_server export.
+        EnvironmentColumns     = @("Environment", "Environnement", "Used for")
+        # "Support Level" is the SLA column name in a ServiceNow cmdb_ci_server export
+        # (values there are typically "1 - Gold" / "2 - Silver" / "3 - Bronze").
+        SlaColumns             = @("SLA", "Sla", "Support Level")
         ApplicationColumns     = @("Application", "ApplicationName", "NomApplication")
+        # Values found in "Used for" seen in practice: Production, Test, Validation,
+        # Development, UAT, Pre-Production, Training, Sandbox, Archive, Disaster recovery.
+        # Only "production"/"prod" (case-insensitive) count as production; every other
+        # non-empty value -- Pre-Production included -- gets Tags.BackupNonProductionTag.
         ProductionValues       = @("production", "prod")
     }
 

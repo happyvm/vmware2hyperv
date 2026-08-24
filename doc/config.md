@@ -293,3 +293,39 @@ et reçoivent `Tags.BackupProductionTag`. Toute autre valeur d'environnement non
 vide reçoit `Tags.BackupNonProductionTag`. Sans environnement,
 `Tags.BackupTag` conserve le comportement historique. Toutes ces clés peuvent
 être surchargées dans `config.local.psd1`.
+
+### Exemple : export ServiceNow `cmdb_ci_server`
+
+Un export ServiceNow de la table `cmdb_ci_server` fournit typiquement ces
+colonnes : `Name`, `Operational status`, `IP Address`, `Operating System`,
+`Support Level`, `Used for`, `Location`, `DRP Criticality`, `OS Service Pack`,
+`OS Version`. Correspondance avec `CMDB` :
+
+| Colonne ServiceNow | Clé `CMDB` déjà configurée |
+|---|---|
+| `Name`            | `VmNameColumns` |
+| `Operating System`| `OperatingSystemColumns` |
+| `Used for`        | `EnvironmentColumns` |
+| `Support Level`   | `SlaColumns` (valeurs du type `1 - Gold` / `2 - Silver` / `3 - Bronze`) |
+
+`Used for` contient en pratique : `Production`, `Test`, `Validation`,
+`Development`, `UAT`, `Pre-Production`, `Training`, `Sandbox`, `Archive`,
+`Disaster recovery`. Seule la valeur `Production` (insensible à la casse)
+déclenche `Tags.BackupProductionTag` ; toutes les autres -- `Pre-Production`
+compris -- reçoivent `Tags.BackupNonProductionTag`.
+
+`Operating System` y donne des libellés courts sans le mot « Server »
+(`Windows 2022 Standard`, `Windows 2012 R2 Datacenter`, `Windows ® 2008
+Standard`...) : `SCVMM.OperatingSystemMap` contient déjà les entrées
+correspondantes, qui pointent vers les mêmes noms SCVMM que leurs formes
+longues (`Windows Server 2022 Standard`, etc.).
+
+> Pour les serveurs Linux, cet export sépare la distribution et la version sur
+> deux colonnes (`Operating System` = `Linux Red Hat` / `Linux CentOS` /
+> `Linux SuSE` / `Linux Rocky` / `Linux Ubuntu` / `GNU/Linux`, `OS Version` =
+> `8.10`, `15.6`...). Ni l'une ni l'autre ne suffit seule à résoudre un OS
+> SCVMM : fusionnez les deux colonnes dans le CSV produit pour
+> `Paths.CmdbExtractCsv` (par exemple `Linux Red Hat` + `8.10` ->
+> `Red Hat Enterprise Linux 8.10`) avant de l'utiliser, sans quoi ces VM ne
+> seront pas résolues et garderont l'OS deviné par SCVMM (voir le diagnostic
+> décrit plus haut).
