@@ -299,6 +299,54 @@ function Set-VmBackupTag {
     Write-MigrationLog "[$Name] Backup tag '$TagName' applied." -LogFile $LogFile
 }
 
+function Set-VmCmdbCustomProperties {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [hashtable]$Context,
+        [Parameter(Mandatory = $false)] [PSObject]$Result
+    )
+
+    $propertyValues = [ordered]@{
+        Environment = [string]$Context.CmdbEnvironment
+        SLA         = [string]$Context.CmdbSLA
+        Application = [string]$Context.CmdbApplication
+    }
+    $configuredProperties = Get-MigrationConfigValue -Config $Context.Config -Path 'SCVMMCustomProperties' -Default @{}
+    $createIfMissing = [bool](Get-MigrationConfigValue -Config $configuredProperties -Path 'CreateIfMissing' -Default $true)
+    $assignments = @()
+    foreach ($key in $propertyValues.Keys) {
+        $propertyName = [string](Get-MigrationConfigValue -Config $configuredProperties -Path $key -Default '')
+        if (-not [string]::IsNullOrWhiteSpace($propertyName) -and -not [string]::IsNullOrWhiteSpace($propertyValues[$key])) {
+            $assignments += [pscustomobject]@{ Name = $propertyName; Value = $propertyValues[$key] }
+        }
+    }
+
+    if ($assignments.Count -eq 0) {
+        Write-MigrationLog "[$($Context.VMName)] No non-empty CMDB custom property to apply." -Level WARNING -LogFile $Context.LogFile
+        return
+    }
+
+    Invoke-SCVMMCommand -ScriptBlock {
+        param($VmName, $VmmServerName, $PropertyAssignments, $MayCreate)
+        $server = Get-SCVMMServer -ComputerName $VmmServerName
+        $vm = Get-SCVirtualMachine -Name $VmName -VMMServer $server | Select-Object -First 1
+        if (-not $vm) { throw "VM '$VmName' not found in SCVMM while setting CMDB custom properties." }
+
+        foreach ($assignment in @($PropertyAssignments)) {
+            $customProperty = Get-SCCustomProperty -VMMServer $server -Name $assignment.Name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $customProperty -and $MayCreate) {
+                $customProperty = New-SCCustomProperty -VMMServer $server -Name $assignment.Name -AddMember @('VM') -ErrorAction Stop
+            }
+            if (-not $customProperty) {
+                throw "SCVMM custom property '$($assignment.Name)' does not exist and SCVMMCustomProperties.CreateIfMissing is disabled."
+            }
+            Set-SCCustomPropertyValue -CustomProperty $customProperty -InputObject $vm -Value $assignment.Value -ErrorAction Stop | Out-Null
+        }
+    } -ArgumentList @($Context.VMName, $Context.VMMServerName, $assignments, $createIfMissing)
+
+    Write-MigrationLog "[$($Context.VMName)] CMDB custom properties applied: $($assignments.Name -join ', ')." -Level SUCCESS -LogFile $Context.LogFile
+}
+
 # ---------------------------------------------------------------------------
 # Set-VmIntegrationServices — configure Hyper-V Integration Services
 # ---------------------------------------------------------------------------

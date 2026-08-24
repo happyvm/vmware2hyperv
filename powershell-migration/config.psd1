@@ -173,7 +173,28 @@
 
     Tags = @{
         Category  = "HypV-Migration"           # VMware tag category for migration
-        BackupTag = "TAGforbackupsolution"      # Tag applied to VMs after migration
+        BackupTag = "TAGforbackupsolution"      # Legacy/default tag when no environment is available
+        BackupProductionTag    = "TAGforbackupsolution-PROD"
+        BackupNonProductionTag = "TAGforbackupsolution-NONPROD"
+    }
+
+    # Columns read from the merged CMDB extract and SCVMM custom properties
+    # populated during step3. Every value can be overridden in config.local.psd1.
+    CMDB = @{
+        CsvDelimiter           = ";"
+        VmNameColumns          = @("VMName", "Name")
+        OperatingSystemColumns = @("OperatingSystem", "Operating system")
+        EnvironmentColumns     = @("Environment", "Environnement")
+        SlaColumns             = @("SLA", "Sla")
+        ApplicationColumns     = @("Application", "ApplicationName", "NomApplication")
+        ProductionValues       = @("production", "prod")
+    }
+
+    SCVMMCustomProperties = @{
+        Environment = "CMDB Environment"
+        SLA         = "CMDB SLA"
+        Application = "CMDB Application"
+        CreateIfMissing = $true
     }
 
     Smtp = @{

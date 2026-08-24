@@ -278,3 +278,18 @@ Settings for `step4-StartVM.ps1`. `IntegrationMaxIterations = 0` makes the scrip
 - [README.md](../README.md) — Complete documentation
 - [ADR-001](adr/001-architecture-decisions.md) — Architecture decisions
 - [lib.ps1](lib.md) — Functions that use this configuration
+
+## Enrichissement CMDB et sauvegarde selon l'environnement
+
+Le fichier `Paths.CmdbExtractCsv` peut contenir, en plus de l'OS,
+l'environnement, le SLA et le nom de l'application. Le délimiteur et les noms
+de colonnes acceptés sont configurables dans `CMDB` (`CsvDelimiter`,
+`VmNameColumns`, `OperatingSystemColumns`, `EnvironmentColumns`, `SlaColumns`
+et `ApplicationColumns`). Step 3 copie les trois valeurs métier dans les
+propriétés personnalisées SCVMM nommées par `SCVMMCustomProperties`.
+
+Les valeurs de `CMDB.ProductionValues` sont considérées comme de la production
+et reçoivent `Tags.BackupProductionTag`. Toute autre valeur d'environnement non
+vide reçoit `Tags.BackupNonProductionTag`. Sans environnement,
+`Tags.BackupTag` conserve le comportement historique. Toutes ces clés peuvent
+être surchargées dans `config.local.psd1`.
