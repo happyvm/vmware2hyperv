@@ -257,20 +257,35 @@
         # The three DR mechanisms DrpToolMap values must resolve to.
         DrpToolValues          = @("storage réplication", "VM réplication", "backup restore")
         # Maps a raw CMDB.DrpToolColumns value to one of CMDB.DrpToolValues above.
-        # Left empty on purpose: fill in with your own CMDB's real values (product
-        # names, technology labels...) in config.local.psd1, e.g.:
-        #   "SRDF"       = "storage réplication"
-        #   "Zerto"      = "VM réplication"
-        #   "Veeam B&R"  = "backup restore"
-        # A CMDB value with no matching key here logs a warning during step3 and
-        # leaves the SCVMMCustomProperties.DrpTool property unset for that VM.
+        # Left empty on purpose: the entries below are illustrative only (public
+        # product names, not real CMDB data) -- uncomment and replace with your
+        # own CMDB's actual values in config.local.psd1. A CMDB value with no
+        # matching key here logs a warning during step3 and leaves the
+        # SCVMMCustomProperties.DrpTool property unset for that VM.
         DrpToolMap             = @{
+            # "SRDF"        = "storage réplication"   # storage-array replication
+            # "Zerto"       = "VM réplication"         # hypervisor-level VM replication
+            # "Veeam B&R"   = "backup restore"         # restore from backup
         }
         # Values found in "Used for" seen in practice: Production, Test, Validation,
         # Development, UAT, Pre-Production, Training, Sandbox, Archive, Disaster recovery.
         # Only "production"/"prod" (case-insensitive) count as production; every other
         # non-empty value -- Pre-Production included -- gets Tags.BackupNonProductionTag.
         ProductionValues       = @("production", "prod")
+        # Optional finer-grained override of the Production/NonProduction binary
+        # above: maps a raw CMDB.EnvironmentColumns value directly to a specific
+        # backup tag. When an environment has an entry here, that tag wins outright
+        # and ProductionValues/BackupProductionTag/BackupNonProductionTag are not
+        # consulted for it. Any environment value with no entry still falls back to
+        # the binary split, so leaving this empty (the default) changes nothing.
+        # Left empty on purpose: the entries below are illustrative only -- uncomment
+        # and replace with your own tag names in config.local.psd1.
+        EnvironmentTagMap      = @{
+            # "Production"     = "TAGforbackupsolution-PROD"
+            # "Pre-Production" = "TAGforbackupsolution-PREPROD"
+            # "UAT"            = "TAGforbackupsolution-UAT"
+            # "Sandbox"        = "TAGforbackupsolution-NOBACKUP"
+        }
     }
 
     SCVMMCustomProperties = @{

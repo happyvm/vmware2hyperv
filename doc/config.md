@@ -324,6 +324,38 @@ vide reçoit `Tags.BackupNonProductionTag`. Sans environnement,
 `Tags.BackupTag` conserve le comportement historique. Toutes ces clés peuvent
 être surchargées dans `config.local.psd1`.
 
+### Tag de backup par environnement (`CMDB.EnvironmentTagMap`)
+
+Le binaire production/non-production ci-dessus regroupe tous les
+environnements non-production (`Test`, `UAT`, `Pre-Production`, `Sandbox`...)
+sous un seul et même tag. `CMDB.EnvironmentTagMap` permet d'affiner : il
+associe une valeur brute de `CMDB.EnvironmentColumns` directement à un tag de
+backup précis, en priorité sur le binaire.
+
+```powershell
+# Vide par défaut -- à remplir avec vos propres noms de tags dans
+# config.local.psd1 :
+EnvironmentTagMap = @{
+    "Production"     = "TAGforbackupsolution-PROD"
+    "Pre-Production" = "TAGforbackupsolution-PREPROD"
+    "UAT"            = "TAGforbackupsolution-UAT"
+    "Sandbox"        = "TAGforbackupsolution-NOBACKUP"
+}
+```
+
+Résolution dans `step3-MigrateVM.ps1` (uniquement quand `-BackupTag` n'est pas
+passé explicitement en argument) :
+
+1. Une entrée de `CMDB.EnvironmentTagMap` correspondant à l'environnement CMDB
+   (correspondance exacte, insensible à la casse et aux espaces) l'emporte
+   directement -- le binaire `ProductionValues` n'est alors pas consulté.
+2. Sans entrée pour cet environnement, le binaire production/non-production
+   habituel s'applique.
+
+`EnvironmentTagMap` est livré vide intentionnellement : tant qu'il n'est pas
+rempli, le comportement reste exactement celui d'avant (le binaire
+production/non-production pour toutes les valeurs).
+
 ### Exemple : export ServiceNow `cmdb_ci_server`
 
 Un export ServiceNow de la table `cmdb_ci_server` fournit typiquement ces

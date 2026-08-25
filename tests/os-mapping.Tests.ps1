@@ -259,6 +259,47 @@ Describe 'Resolve-CmdbDrpTool' {
     }
 }
 
+Describe 'Resolve-CmdbEnvironmentTag' {
+
+    BeforeAll {
+        # EnvironmentTagMap is shipped empty in config.psd1 (finer-grained override,
+        # opt-in), so tests exercise the resolver directly against a representative
+        # map instead of the shipped one.
+        $script:EnvironmentTagTestMap = @{
+            'Production'     = 'TAGforbackupsolution-PROD'
+            'Pre-Production' = 'TAGforbackupsolution-PREPROD'
+            'UAT'            = 'TAGforbackupsolution-UAT'
+            'Sandbox'        = 'TAGforbackupsolution-NOBACKUP'
+        }
+    }
+
+    It 'resolves a raw CMDB environment value to its mapped tag' {
+        Resolve-CmdbEnvironmentTag -Environment 'Pre-Production' -EnvironmentTagMap $script:EnvironmentTagTestMap |
+            Should -Be 'TAGforbackupsolution-PREPROD'
+        Resolve-CmdbEnvironmentTag -Environment 'Sandbox' -EnvironmentTagMap $script:EnvironmentTagTestMap |
+            Should -Be 'TAGforbackupsolution-NOBACKUP'
+    }
+
+    It 'matches case-insensitively and ignores surrounding whitespace' {
+        Resolve-CmdbEnvironmentTag -Environment '  uat  ' -EnvironmentTagMap $script:EnvironmentTagTestMap |
+            Should -Be 'TAGforbackupsolution-UAT'
+    }
+
+    It 'returns null for an environment value with no matching entry, so the caller falls back to the binary split' {
+        Resolve-CmdbEnvironmentTag -Environment 'Test' -EnvironmentTagMap $script:EnvironmentTagTestMap | Should -BeNullOrEmpty
+    }
+
+    It 'returns null for an empty value or an empty map' {
+        Resolve-CmdbEnvironmentTag -Environment '' -EnvironmentTagMap $script:EnvironmentTagTestMap | Should -BeNullOrEmpty
+        Resolve-CmdbEnvironmentTag -Environment 'Production' -EnvironmentTagMap @{} | Should -BeNullOrEmpty
+    }
+
+    It 'ships with an empty EnvironmentTagMap, so the Production/NonProduction binary is unaffected by default' {
+        $shippedMap = (Import-PowerShellDataFile (Join-Path $script:MigrationRoot 'config.psd1')).CMDB.EnvironmentTagMap
+        $shippedMap.Count | Should -Be 0
+    }
+}
+
 Describe 'ConvertTo-NormalizedOperatingSystemName trademark and separator handling' {
 
     It 'strips a trailing registered-trademark symbol' {

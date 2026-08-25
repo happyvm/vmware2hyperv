@@ -103,8 +103,18 @@ $productionValues = @(Get-MigrationConfigValue -Config $Config -Path 'CMDB.Produ
 $normalizedProductionValues = @($productionValues | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
 $isProduction = -not [string]::IsNullOrWhiteSpace($CmdbEnvironment) -and ($normalizedProductionValues -contains $CmdbEnvironment.Trim().ToLowerInvariant())
 if (-not $PSBoundParameters.ContainsKey('BackupTag') -and -not [string]::IsNullOrWhiteSpace($CmdbEnvironment)) {
-    $backupTagPath = if ($isProduction) { 'Tags.BackupProductionTag' } else { 'Tags.BackupNonProductionTag' }
-    $BackupTag = [string](Get-MigrationConfigValue -Config $Config -Path $backupTagPath -Default $BackupTag)
+    # CMDB.EnvironmentTagMap (per-environment override) wins when it has an entry
+    # for this environment; the Production/NonProduction binary below is the
+    # fallback used for every environment value left unmapped -- empty by
+    # default, so this keeps the previous behavior exactly when unconfigured.
+    $environmentTagMap = Get-MigrationConfigValue -Config $Config -Path 'CMDB.EnvironmentTagMap' -Default @{}
+    $mappedTag = Resolve-CmdbEnvironmentTag -Environment $CmdbEnvironment -EnvironmentTagMap $environmentTagMap
+    if (-not [string]::IsNullOrWhiteSpace($mappedTag)) {
+        $BackupTag = $mappedTag
+    } else {
+        $backupTagPath = if ($isProduction) { 'Tags.BackupProductionTag' } else { 'Tags.BackupNonProductionTag' }
+        $BackupTag = [string](Get-MigrationConfigValue -Config $Config -Path $backupTagPath -Default $BackupTag)
+    }
 }
 
 if ($ForceNetworkConfigOnly) {
