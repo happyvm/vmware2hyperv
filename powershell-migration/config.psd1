@@ -272,6 +272,20 @@
         # Only "production"/"prod" (case-insensitive) count as production; every other
         # non-empty value -- Pre-Production included -- gets Tags.BackupNonProductionTag.
         ProductionValues       = @("production", "prod")
+        # Optional finer-grained override of the Production/NonProduction binary
+        # above: maps a raw CMDB.EnvironmentColumns value directly to a specific
+        # backup tag. When an environment has an entry here, that tag wins outright
+        # and ProductionValues/BackupProductionTag/BackupNonProductionTag are not
+        # consulted for it. Any environment value with no entry still falls back to
+        # the binary split, so leaving this empty (the default) changes nothing.
+        # Left empty on purpose: the entries below are illustrative only -- uncomment
+        # and replace with your own tag names in config.local.psd1.
+        EnvironmentTagMap      = @{
+            # "Production"     = "TAGforbackupsolution-PROD"
+            # "Pre-Production" = "TAGforbackupsolution-PREPROD"
+            # "UAT"            = "TAGforbackupsolution-UAT"
+            # "Sandbox"        = "TAGforbackupsolution-NOBACKUP"
+        }
     }
 
     SCVMMCustomProperties = @{

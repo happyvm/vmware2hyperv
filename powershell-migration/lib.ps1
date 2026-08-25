@@ -1344,13 +1344,40 @@ function Merge-CmdbOperatingSystemVersion {
 }
 
 # ---------------------------------------------------------------------------
+# Resolve-CmdbMappedValue : trimmed, case-insensitive exact-match lookup of a
+# raw CMDB value in a business-label mapping table
+#
+# Shared by every CMDB value classifier that maps a raw label (backup product
+# name, DR technology, environment name...) to a fixed set of output values.
+# Unlike Resolve-OperatingSystemMapping, there is no family-key fallback: the
+# keys here are business labels, not OS names with a recognizable version
+# structure, so an exact match is all that makes sense.
+# ---------------------------------------------------------------------------
+function Resolve-CmdbMappedValue {
+    param(
+        [AllowNull()]
+        [string]$Value,
+
+        $Map
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value) -or -not $Map) {
+        return $null
+    }
+
+    $normalized = $Value.Trim().ToLowerInvariant()
+    foreach ($entry in $Map.GetEnumerator()) {
+        if (([string]$entry.Key).Trim().ToLowerInvariant() -eq $normalized) {
+            return [string]$entry.Value
+        }
+    }
+
+    return $null
+}
+
+# ---------------------------------------------------------------------------
 # Resolve-CmdbDrpTool : resolve a raw CMDB DRP tool value to one of the
 # canonical CMDB.DrpToolValues categories via CMDB.DrpToolMap
-#
-# Unlike Resolve-OperatingSystemMapping, there is no family-key fallback here:
-# DrpToolMap keys are business labels (backup product names, replication
-# technology...), not OS labels with a recognizable version structure, so an
-# exact match (trimmed, case-insensitive) is all that makes sense.
 # ---------------------------------------------------------------------------
 function Resolve-CmdbDrpTool {
     param(
@@ -1360,18 +1387,28 @@ function Resolve-CmdbDrpTool {
         $DrpToolMap
     )
 
-    if ([string]::IsNullOrWhiteSpace($DrpTool) -or -not $DrpToolMap) {
-        return $null
-    }
+    return Resolve-CmdbMappedValue -Value $DrpTool -Map $DrpToolMap
+}
 
-    $normalized = $DrpTool.Trim().ToLowerInvariant()
-    foreach ($entry in $DrpToolMap.GetEnumerator()) {
-        if (([string]$entry.Key).Trim().ToLowerInvariant() -eq $normalized) {
-            return [string]$entry.Value
-        }
-    }
+# ---------------------------------------------------------------------------
+# Resolve-CmdbEnvironmentTag : resolve a raw CMDB environment value directly
+# to a backup tag via CMDB.EnvironmentTagMap
+#
+# Finer-grained alternative to the CMDB.ProductionValues binary split: lets an
+# operator give each environment value (Production, UAT, Pre-Production,
+# Sandbox...) its own tag instead of collapsing everything non-production into
+# one tag. Returns $null (no override) when EnvironmentTagMap is empty or has
+# no entry for this environment -- the caller falls back to the binary split.
+# ---------------------------------------------------------------------------
+function Resolve-CmdbEnvironmentTag {
+    param(
+        [AllowNull()]
+        [string]$Environment,
 
-    return $null
+        $EnvironmentTagMap
+    )
+
+    return Resolve-CmdbMappedValue -Value $Environment -Map $EnvironmentTagMap
 }
 
 # ---------------------------------------------------------------------------
