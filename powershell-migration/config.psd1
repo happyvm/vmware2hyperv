@@ -348,5 +348,13 @@
         Step3MaxParallelJobs         = 5  # Number of persistent step3 workers
         Step3JobStartupDelaySec      = 2  # Delay between worker starts to smooth SCVMM/Veeam load spikes
         InstantRecoveryStartDelaySec = 2  # Delay between two bulk Instant Recovery starts (step3 phase 1)
+        # Each step3 worker runs in its own console window (Start-Process). Without
+        # this, an early crash (module import failure, bad path...) closes that
+        # window the instant it happens -- too fast to read, even though the error
+        # was already written to the worker's log file in Paths.LogDir. This keeps
+        # the window open for this many seconds after the worker exits (success or
+        # failure) so the last output stays visible. Set to 0 to close immediately
+        # (e.g. for unattended/scheduled runs, once the pipeline is trusted).
+        WorkerWindowHoldSeconds      = 120
     }
 }

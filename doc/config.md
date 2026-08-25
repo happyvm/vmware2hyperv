@@ -200,8 +200,19 @@ Orchestrator = @{
     Step3MaxParallelJobs      = 5
     Step3JobStartupDelaySec   = 2
     InstantRecoveryStartDelaySec = 2
+    WorkerWindowHoldSeconds   = 120
 }
 ```
+
+Chaque worker step3 tourne dans sa propre fenêtre console (`run-migration.ps1`
+les lance via `Start-Process`). `WorkerWindowHoldSeconds` garde cette fenêtre
+ouverte ce nombre de secondes après que le worker se termine -- succès ou
+échec -- au lieu de la fermer instantanément. Utile pour un crash au
+démarrage (import de module SCVMM, chemin de queue invalide...) : sans ça, la
+fenêtre se fermait avant d'avoir pu lire l'erreur, même si celle-ci était déjà
+écrite dans le log du worker (`Paths.LogDir\step3-worker-NN-<tag>-<horodatage>.log`).
+Mettre à `0` pour fermer immédiatement (ex. exécutions planifiées/non
+surveillées, une fois le pipeline validé).
 
 ### `Precheck`
 

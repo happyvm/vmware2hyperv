@@ -36,210 +36,253 @@ param(
 
     [int]$PollIntervalSeconds = 3,
 
-    [string]$LogFile
+    [string]$LogFile,
+
+    # Each worker runs in its own console window (Start-Process, run-migration.ps1).
+    # A crash right after launch (module import failure, bad queue path...) used to
+    # close that window instantly -- too fast to read, even though the error was
+    # already written to $LogFile. Wait-BeforeWindowClose (below) keeps the window
+    # open this many seconds after the worker exits, success or failure, so the
+    # last output stays visible. 0 disables the wait.
+    [int]$WindowHoldSeconds = 120
 )
 
 Set-StrictMode -Version Latest
 
-. "$PSScriptRoot\lib.ps1"
-. "$PSScriptRoot\step3\Step3.TaskResult.ps1"
-
-if (-not $LogFile) {
-    $LogFile = "$PSScriptRoot\$WorkerName.log"
-}
-
-$pendingDir = Join-Path $QueueRoot "pending"
-$processingDir = Join-Path $QueueRoot "processing"
-$doneDir = Join-Path $QueueRoot "done"
-$failedDir = Join-Path $QueueRoot "failed"
-$dispatchCompleteFlag = Join-Path $QueueRoot "dispatch.complete"
-$step3ScriptPath = "$PSScriptRoot\step3-MigrateVM.ps1"
-
-Assert-PathPresent -Path $pendingDir -Label "Worker pending queue" -LogFile $LogFile
-Assert-PathPresent -Path $processingDir -Label "Worker processing queue" -LogFile $LogFile
-Assert-PathPresent -Path $doneDir -Label "Worker done queue" -LogFile $LogFile
-Assert-PathPresent -Path $failedDir -Label "Worker failed queue" -LogFile $LogFile
-Assert-PathPresent -Path $step3ScriptPath -Label "step3 migration script" -LogFile $LogFile
-
-function Write-TaskStateFile {
+# Defined before the try block below so it still runs even if dot-sourcing
+# lib.ps1 itself is what failed (Write-Host/Write-Warning need no dependency).
+function Wait-BeforeWindowClose {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-
-        [Parameter(Mandatory = $true)]
-        $TaskObject
+        [int]$Seconds
     )
 
-    $TaskObject | ConvertTo-Json -Depth 10 | Set-Content -Path $Path -Encoding utf8
+    if ($Seconds -le 0) {
+        return
+    }
+
+    Write-Host ""
+    Write-Warning "[$WorkerName] This window will stay open for $Seconds more second(s) so the output above can be read, then it will close on its own."
+    Start-Sleep -Seconds $Seconds
 }
-
-function Get-NetworkConfigurationState {
-    <#
-    .SYNOPSIS
-        Determines the network configuration state from the TaskResult JSON
-        (preferred) or falls back to grepping the VM log (legacy).
-
-    .DESCRIPTION
-        First tries to read "{VmLogFile}.result.json" produced by the refactored
-        step3-MigrateVM.ps1 (Step3.TaskResult). If the file exists, delegates the
-        phase-to-state mapping to Get-Step3NetworkConfigurationState.
-
-        Falls back to the legacy log-grep approach when no result file exists,
-        ensuring backward compatibility with the pre-refactoring step3-MigrateVM.ps1.
-
-    .PARAMETER VmLogFile
-        Path to the VM log file. The result file is expected at "{VmLogFile}.result.json".
-    #>
-
-    param(
-        [AllowNull()]
-        [string]$VmLogFile
-    )
-
-    if ([string]::IsNullOrWhiteSpace($VmLogFile)) {
-        return "Unknown"
-    }
-
-    # ── Preferred path: read the structured TaskResult JSON ──
-    $resultFilePath = "$VmLogFile.result.json"
-    if (Test-Path -Path $resultFilePath -PathType Leaf) {
-        try {
-            $result = Get-Content -Path $resultFilePath -Raw -ErrorAction Stop |
-                ConvertFrom-Json -ErrorAction Stop
-
-            return Get-Step3NetworkConfigurationState -Result $result
-        } catch {
-            Write-MigrationLog "[$WorkerName] Unable to read TaskResult file '$resultFilePath': $($_.Exception.Message). Falling back to log grep." -Level WARNING -LogFile $LogFile
-        }
-    }
-
-    # ── Legacy fallback: grep the VM log (pre-refactoring step3-MigrateVM.ps1) ──
-    if (-not (Test-Path -Path $VmLogFile)) {
-        return "Unknown"
-    }
-
-    $successMatch = Select-String -Path $VmLogFile -Pattern "Network configured (default VLAN" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
-    $warningMatch = Select-String -Path $VmLogFile -Pattern "fallback mapping used" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
-
-    # Fallback warnings are logged before the success line: test them together, otherwise
-    # a degraded configuration would always be summarized as plain "Configured".
-    if ($successMatch) {
-        if ($warningMatch) {
-            return "ConfiguredWithWarning"
-        }
-        return "Configured"
-    }
-
-    return "NotDetected"
-}
-
-Write-MigrationLog "[$WorkerName] Persistent step3 worker starting. Queue root: $QueueRoot" -LogFile $LogFile
 
 try {
-    Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
-    Write-MigrationLog "[$WorkerName] SCVMM module warmed up. Veeam will be loaded lazily only for non-network-only tasks." -Level SUCCESS -LogFile $LogFile
+    . "$PSScriptRoot\lib.ps1"
+    . "$PSScriptRoot\step3\Step3.TaskResult.ps1"
+
+    if (-not $LogFile) {
+        $LogFile = "$PSScriptRoot\$WorkerName.log"
+    }
+
+    $pendingDir = Join-Path $QueueRoot "pending"
+    $processingDir = Join-Path $QueueRoot "processing"
+    $doneDir = Join-Path $QueueRoot "done"
+    $failedDir = Join-Path $QueueRoot "failed"
+    $dispatchCompleteFlag = Join-Path $QueueRoot "dispatch.complete"
+    $step3ScriptPath = "$PSScriptRoot\step3-MigrateVM.ps1"
+
+    Assert-PathPresent -Path $pendingDir -Label "Worker pending queue" -LogFile $LogFile
+    Assert-PathPresent -Path $processingDir -Label "Worker processing queue" -LogFile $LogFile
+    Assert-PathPresent -Path $doneDir -Label "Worker done queue" -LogFile $LogFile
+    Assert-PathPresent -Path $failedDir -Label "Worker failed queue" -LogFile $LogFile
+    Assert-PathPresent -Path $step3ScriptPath -Label "step3 migration script" -LogFile $LogFile
+
+    function Write-TaskStateFile {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Path,
+
+            [Parameter(Mandatory = $true)]
+            $TaskObject
+        )
+
+        $TaskObject | ConvertTo-Json -Depth 10 | Set-Content -Path $Path -Encoding utf8
+    }
+
+    function Get-NetworkConfigurationState {
+        <#
+        .SYNOPSIS
+            Determines the network configuration state from the TaskResult JSON
+            (preferred) or falls back to grepping the VM log (legacy).
+
+        .DESCRIPTION
+            First tries to read "{VmLogFile}.result.json" produced by the refactored
+            step3-MigrateVM.ps1 (Step3.TaskResult). If the file exists, delegates the
+            phase-to-state mapping to Get-Step3NetworkConfigurationState.
+
+            Falls back to the legacy log-grep approach when no result file exists,
+            ensuring backward compatibility with the pre-refactoring step3-MigrateVM.ps1.
+
+        .PARAMETER VmLogFile
+            Path to the VM log file. The result file is expected at "{VmLogFile}.result.json".
+        #>
+
+        param(
+            [AllowNull()]
+            [string]$VmLogFile
+        )
+
+        if ([string]::IsNullOrWhiteSpace($VmLogFile)) {
+            return "Unknown"
+        }
+
+        # ── Preferred path: read the structured TaskResult JSON ──
+        $resultFilePath = "$VmLogFile.result.json"
+        if (Test-Path -Path $resultFilePath -PathType Leaf) {
+            try {
+                $result = Get-Content -Path $resultFilePath -Raw -ErrorAction Stop |
+                    ConvertFrom-Json -ErrorAction Stop
+
+                return Get-Step3NetworkConfigurationState -Result $result
+            } catch {
+                Write-MigrationLog "[$WorkerName] Unable to read TaskResult file '$resultFilePath': $($_.Exception.Message). Falling back to log grep." -Level WARNING -LogFile $LogFile
+            }
+        }
+
+        # ── Legacy fallback: grep the VM log (pre-refactoring step3-MigrateVM.ps1) ──
+        if (-not (Test-Path -Path $VmLogFile)) {
+            return "Unknown"
+        }
+
+        $successMatch = Select-String -Path $VmLogFile -Pattern "Network configured (default VLAN" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
+        $warningMatch = Select-String -Path $VmLogFile -Pattern "fallback mapping used" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
+
+        # Fallback warnings are logged before the success line: test them together, otherwise
+        # a degraded configuration would always be summarized as plain "Configured".
+        if ($successMatch) {
+            if ($warningMatch) {
+                return "ConfiguredWithWarning"
+            }
+            return "Configured"
+        }
+
+        return "NotDetected"
+    }
+
+    Write-MigrationLog "[$WorkerName] Persistent step3 worker starting. Queue root: $QueueRoot" -LogFile $LogFile
+
+    try {
+        Import-RequiredModule -Name "VirtualMachineManager" -LogFile $LogFile -UseWindowsPowerShellFallback
+        Write-MigrationLog "[$WorkerName] SCVMM module warmed up. Veeam will be loaded lazily only for non-network-only tasks." -Level SUCCESS -LogFile $LogFile
+    } catch {
+        Write-MigrationLog "[$WorkerName] Worker initialization failed: $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
+        throw
+    }
+
+    while ($true) {
+        $nextTask = @(Get-ChildItem -Path $pendingDir -Filter "*.json" -File -ErrorAction SilentlyContinue |
+            Sort-Object Name |
+            Select-Object -First 1)
+
+        if (-not $nextTask) {
+            if (Test-Path -Path $dispatchCompleteFlag) {
+                Write-MigrationLog "[$WorkerName] No pending step3 task remains. Worker stopping." -LogFile $LogFile
+                break
+            }
+
+            Start-Sleep -Seconds $PollIntervalSeconds
+            continue
+        }
+
+        $claimedTaskPath = Join-Path $processingDir $nextTask.Name
+        try {
+            Move-Item -Path $nextTask.FullName -Destination $claimedTaskPath -ErrorAction Stop
+        } catch {
+            Start-Sleep -Milliseconds 250
+            continue
+        }
+
+        $task = $null
+        try {
+            $task = Get-Content -Path $claimedTaskPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $failedTask = [ordered]@{
+                WorkerName   = $WorkerName
+                Status       = "Failed"
+                ErrorMessage = "Unable to parse task payload: $($_.Exception.Message)"
+                TaskFileName = $nextTask.Name
+                FailedAt     = (Get-Date).ToString("o")
+            }
+
+            Write-TaskStateFile -Path (Join-Path $failedDir $nextTask.Name) -TaskObject $failedTask
+            Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
+            Write-MigrationLog "[$WorkerName] Unable to parse task '$($nextTask.Name)'." -Level ERROR -LogFile $LogFile
+            continue
+        }
+
+        $task | Add-Member -NotePropertyName WorkerName -NotePropertyValue $WorkerName -Force
+        $task | Add-Member -NotePropertyName StartedAt -NotePropertyValue (Get-Date).ToString("o") -Force
+
+        $vmName = [string]$task.VMName
+        Write-MigrationLog "[$WorkerName] Starting step3 task for VM '$vmName'." -LogFile $LogFile
+
+        try {
+            # 'exit <n>' in a script invoked with '&' ends only that script and never
+            # reaches the catch below; reset then check $LASTEXITCODE so such failures
+            # cannot be silently recorded as a successful task (same guard as
+            # Invoke-OrchestratorStep in run-migration.ps1).
+            $global:LASTEXITCODE = 0
+            & $step3ScriptPath `
+                -BackupJobName ([string]$task.BackupJobName) `
+                -VMName $vmName `
+                -VlanId ([string]$task.VlanId) `
+                -AdapterVlanMapJson ([string]$task.AdapterVlanMapJson) `
+                -OperatingSystem ([string]$task.OperatingSystem) `
+                -CmdbEnvironment ([string]$task.CmdbEnvironment) `
+                -CmdbSLA ([string]$task.CmdbSLA) `
+                -CmdbApplication ([string]$task.CmdbApplication) `
+                -CmdbDrp ([string]$task.CmdbDrp) `
+                -CmdbDrpTool ([string]$task.CmdbDrpTool) `
+                -Remark ([string]$task.Remark) `
+                -VmwareCluster ([string]$task.VmwareCluster) `
+                -HyperVHost ([string]$task.HyperVHost) `
+                -HyperVHost2 ([string]$task.HyperVHost2) `
+                -HyperVCluster ([string]$task.HyperVCluster) `
+                -ClusterStorage ([string]$task.ClusterStorage) `
+                -SkipInstantRecoveryStart:$([bool]$task.SkipInstantRecoveryStart) `
+                -ForceNetworkConfigOnly:$([bool]$task.ForceNetworkConfigOnly) `
+                -LogFile ([string]$task.VmLogFile)
+
+            if ($LASTEXITCODE -ne 0) {
+                throw "step3-MigrateVM.ps1 ended with exit code $LASTEXITCODE."
+            }
+
+            $task | Add-Member -NotePropertyName Status -NotePropertyValue "Success" -Force
+            $task | Add-Member -NotePropertyName CompletedAt -NotePropertyValue (Get-Date).ToString("o") -Force
+            $task | Add-Member -NotePropertyName ErrorMessage -NotePropertyValue $null -Force
+            $task | Add-Member -NotePropertyName NetworkConfigurationState -NotePropertyValue (Get-NetworkConfigurationState -VmLogFile ([string]$task.VmLogFile)) -Force
+
+            Write-TaskStateFile -Path (Join-Path $doneDir $nextTask.Name) -TaskObject $task
+            Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
+            Write-MigrationLog "[$WorkerName] Step3 task completed successfully for VM '$vmName'." -Level SUCCESS -LogFile $LogFile
+        } catch {
+            $task | Add-Member -NotePropertyName Status -NotePropertyValue "Failed" -Force
+            $task | Add-Member -NotePropertyName CompletedAt -NotePropertyValue (Get-Date).ToString("o") -Force
+            $task | Add-Member -NotePropertyName ErrorMessage -NotePropertyValue $_.Exception.Message -Force
+            $task | Add-Member -NotePropertyName ErrorRecord -NotePropertyValue ([string]$_) -Force
+            $task | Add-Member -NotePropertyName NetworkConfigurationState -NotePropertyValue (Get-NetworkConfigurationState -VmLogFile ([string]$task.VmLogFile)) -Force
+
+            Write-TaskStateFile -Path (Join-Path $failedDir $nextTask.Name) -TaskObject $task
+            Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
+            Write-MigrationLog "[$WorkerName] Step3 task failed for VM '$vmName': $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
+        }
+    }
+
+    Write-MigrationLog "[$WorkerName] Worker stopped cleanly." -Level SUCCESS -LogFile $LogFile
 } catch {
-    Write-MigrationLog "[$WorkerName] Worker initialization failed: $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
-    throw
+    # Anything that reaches here happened before or between tasks (dot-sourcing,
+    # queue path checks, module import, an unexpected error escaping the per-task
+    # try/catch above) -- every per-task failure is already caught and logged
+    # inside the while loop and never reaches this point. Log with whatever is
+    # available: Write-MigrationLog needs lib.ps1, which is exactly what may have
+    # failed to load.
+    if (Get-Command -Name Write-MigrationLog -ErrorAction SilentlyContinue) {
+        Write-MigrationLog "[$WorkerName] Worker crashed: $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
+        Write-MigrationLog ([string]$_) -Level ERROR -LogFile $LogFile
+    } else {
+        Write-Host "[$WorkerName] Worker crashed before logging was available: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host ([string]$_) -ForegroundColor Red
+    }
+    exit 1
+} finally {
+    Wait-BeforeWindowClose -Seconds $WindowHoldSeconds
 }
-
-while ($true) {
-    $nextTask = @(Get-ChildItem -Path $pendingDir -Filter "*.json" -File -ErrorAction SilentlyContinue |
-        Sort-Object Name |
-        Select-Object -First 1)
-
-    if (-not $nextTask) {
-        if (Test-Path -Path $dispatchCompleteFlag) {
-            Write-MigrationLog "[$WorkerName] No pending step3 task remains. Worker stopping." -LogFile $LogFile
-            break
-        }
-
-        Start-Sleep -Seconds $PollIntervalSeconds
-        continue
-    }
-
-    $claimedTaskPath = Join-Path $processingDir $nextTask.Name
-    try {
-        Move-Item -Path $nextTask.FullName -Destination $claimedTaskPath -ErrorAction Stop
-    } catch {
-        Start-Sleep -Milliseconds 250
-        continue
-    }
-
-    $task = $null
-    try {
-        $task = Get-Content -Path $claimedTaskPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    } catch {
-        $failedTask = [ordered]@{
-            WorkerName   = $WorkerName
-            Status       = "Failed"
-            ErrorMessage = "Unable to parse task payload: $($_.Exception.Message)"
-            TaskFileName = $nextTask.Name
-            FailedAt     = (Get-Date).ToString("o")
-        }
-
-        Write-TaskStateFile -Path (Join-Path $failedDir $nextTask.Name) -TaskObject $failedTask
-        Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
-        Write-MigrationLog "[$WorkerName] Unable to parse task '$($nextTask.Name)'." -Level ERROR -LogFile $LogFile
-        continue
-    }
-
-    $task | Add-Member -NotePropertyName WorkerName -NotePropertyValue $WorkerName -Force
-    $task | Add-Member -NotePropertyName StartedAt -NotePropertyValue (Get-Date).ToString("o") -Force
-
-    $vmName = [string]$task.VMName
-    Write-MigrationLog "[$WorkerName] Starting step3 task for VM '$vmName'." -LogFile $LogFile
-
-    try {
-        # 'exit <n>' in a script invoked with '&' ends only that script and never
-        # reaches the catch below; reset then check $LASTEXITCODE so such failures
-        # cannot be silently recorded as a successful task (same guard as
-        # Invoke-OrchestratorStep in run-migration.ps1).
-        $global:LASTEXITCODE = 0
-        & $step3ScriptPath `
-            -BackupJobName ([string]$task.BackupJobName) `
-            -VMName $vmName `
-            -VlanId ([string]$task.VlanId) `
-            -AdapterVlanMapJson ([string]$task.AdapterVlanMapJson) `
-            -OperatingSystem ([string]$task.OperatingSystem) `
-            -CmdbEnvironment ([string]$task.CmdbEnvironment) `
-            -CmdbSLA ([string]$task.CmdbSLA) `
-            -CmdbApplication ([string]$task.CmdbApplication) `
-            -CmdbDrp ([string]$task.CmdbDrp) `
-            -CmdbDrpTool ([string]$task.CmdbDrpTool) `
-            -Remark ([string]$task.Remark) `
-            -VmwareCluster ([string]$task.VmwareCluster) `
-            -HyperVHost ([string]$task.HyperVHost) `
-            -HyperVHost2 ([string]$task.HyperVHost2) `
-            -HyperVCluster ([string]$task.HyperVCluster) `
-            -ClusterStorage ([string]$task.ClusterStorage) `
-            -SkipInstantRecoveryStart:$([bool]$task.SkipInstantRecoveryStart) `
-            -ForceNetworkConfigOnly:$([bool]$task.ForceNetworkConfigOnly) `
-            -LogFile ([string]$task.VmLogFile)
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "step3-MigrateVM.ps1 ended with exit code $LASTEXITCODE."
-        }
-
-        $task | Add-Member -NotePropertyName Status -NotePropertyValue "Success" -Force
-        $task | Add-Member -NotePropertyName CompletedAt -NotePropertyValue (Get-Date).ToString("o") -Force
-        $task | Add-Member -NotePropertyName ErrorMessage -NotePropertyValue $null -Force
-        $task | Add-Member -NotePropertyName NetworkConfigurationState -NotePropertyValue (Get-NetworkConfigurationState -VmLogFile ([string]$task.VmLogFile)) -Force
-
-        Write-TaskStateFile -Path (Join-Path $doneDir $nextTask.Name) -TaskObject $task
-        Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
-        Write-MigrationLog "[$WorkerName] Step3 task completed successfully for VM '$vmName'." -Level SUCCESS -LogFile $LogFile
-    } catch {
-        $task | Add-Member -NotePropertyName Status -NotePropertyValue "Failed" -Force
-        $task | Add-Member -NotePropertyName CompletedAt -NotePropertyValue (Get-Date).ToString("o") -Force
-        $task | Add-Member -NotePropertyName ErrorMessage -NotePropertyValue $_.Exception.Message -Force
-        $task | Add-Member -NotePropertyName ErrorRecord -NotePropertyValue ([string]$_) -Force
-        $task | Add-Member -NotePropertyName NetworkConfigurationState -NotePropertyValue (Get-NetworkConfigurationState -VmLogFile ([string]$task.VmLogFile)) -Force
-
-        Write-TaskStateFile -Path (Join-Path $failedDir $nextTask.Name) -TaskObject $task
-        Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
-        Write-MigrationLog "[$WorkerName] Step3 task failed for VM '$vmName': $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
-    }
-}
-
-Write-MigrationLog "[$WorkerName] Worker stopped cleanly." -Level SUCCESS -LogFile $LogFile
