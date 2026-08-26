@@ -615,6 +615,8 @@ $step3WorkerCountConfigured = Get-MigrationConfigValue -Config $Config -Path 'Or
 $step3WorkerCount = if ($step3WorkerCountConfigured) { [int]$step3WorkerCountConfigured } else { 5 }
 $step3StartupDelayConfigured = Get-MigrationConfigValue -Config $Config -Path 'Orchestrator.Step3JobStartupDelaySec'
 $step3WorkerStartupDelaySec = if ($null -ne $step3StartupDelayConfigured -and [int]$step3StartupDelayConfigured -ge 0) { [int]$step3StartupDelayConfigured } else { 2 }
+$step3ErrorPauseConfigured = Get-MigrationConfigValue -Config $Config -Path 'Orchestrator.Step3WorkerErrorPauseSec'
+$step3WorkerErrorPauseSec = if ($null -ne $step3ErrorPauseConfigured -and [int]$step3ErrorPauseConfigured -ge 0) { [int]$step3ErrorPauseConfigured } else { 120 }
 
 if ($step3WorkerCount -lt 1) {
     $step3WorkerCount = 1
@@ -627,7 +629,7 @@ if ($step3WorkerCount -gt $vmNames.Count) {
 $workerScriptPath = "$PSScriptRoot\worker-step3.ps1"
 Assert-PathPresent -Path $workerScriptPath -Label "step3 worker script" -LogFile $LogFile
 
-Write-MigrationLog "Step3 worker pool size: $step3WorkerCount persistent worker(s) (startup delay: ${step3WorkerStartupDelaySec}s)." -LogFile $LogFile
+Write-MigrationLog "Step3 worker pool size: $step3WorkerCount persistent worker(s) (startup delay: ${step3WorkerStartupDelaySec}s, error pause: ${step3WorkerErrorPauseSec}s)." -LogFile $LogFile
 
 $queueRoot = Join-Path $Config.Paths.LogDir ("step3-worker-queue-{0}-{1}" -f (Convert-ToSafeFileName -Value $Tag), (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $pendingDir = Join-Path $queueRoot "pending"
@@ -694,16 +696,24 @@ $workerProcesses = @()
 for ($workerIndex = 1; $workerIndex -le $step3WorkerCount; $workerIndex++) {
     $workerName = "step3-worker-{0:D2}" -f $workerIndex
     $workerLogFile = "$($Config.Paths.LogDir)\$workerName-$Tag-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    # Start-Process -ArgumentList does NOT quote array elements for us: it just joins
+    # them with spaces into a single command line. Any unquoted path containing a
+    # space (e.g. "D:\Scripts\API - Copy\...") splits into multiple tokens, which
+    # makes pwsh's OWN command-line parser fail before the worker script ever runs
+    # (exit code 64, no worker log ever created, window closes instantly). Every
+    # path-valued argument must be individually wrapped in embedded quotes here.
     $workerArguments = @(
         "-NoProfile"
         "-File"
-        $workerScriptPath
+        "`"$workerScriptPath`""
         "-QueueRoot"
-        $queueRoot
+        "`"$queueRoot`""
         "-WorkerName"
         $workerName
         "-LogFile"
-        $workerLogFile
+        "`"$workerLogFile`""
+        "-ErrorPauseSeconds"
+        $step3WorkerErrorPauseSec
     )
 
     $workerProcess = Start-Process -FilePath $pwshCommand.Source -ArgumentList $workerArguments -PassThru

@@ -20,6 +20,11 @@
 .PARAMETER LogFile
     Path to the log file. Auto-generated if not provided.
 
+.PARAMETER ErrorPauseSeconds
+    How long (seconds) to keep this worker's console window open after an error
+    (init failure or a failed task) before exiting, so the message stays readable
+    instead of the window closing immediately. Default: 120. 0 disables the pause.
+
 .EXAMPLE
     .\worker-step3.ps1 -QueueRoot D:\Scripts\Logs\step3-queue -WorkerName step3-worker-01
 
@@ -36,7 +41,11 @@ param(
 
     [int]$PollIntervalSeconds = 3,
 
-    [string]$LogFile
+    [string]$LogFile,
+
+    # How long to keep this worker's window open after an error before it exits, so
+    # the message stays readable instead of the window closing immediately. 0 disables.
+    [int]$ErrorPauseSeconds = 120
 )
 
 Set-StrictMode -Version Latest
@@ -133,6 +142,41 @@ function Get-NetworkConfigurationState {
     return "NotDetected"
 }
 
+function Wait-BeforeWorkerWindowCloses {
+    <#
+    .SYNOPSIS
+        Holds this worker's console window open for a bit after an error so the
+        operator has time to read it before the process exits and the window closes.
+
+    .DESCRIPTION
+        A worker runs in its own Start-Process window with no pause on exit: as soon
+        as the script ends, the window disappears, taking the on-screen error with
+        it (the message still lands in the log file, but not everyone thinks to look
+        there first). Prints a countdown so it's clear the window isn't just frozen.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Reason,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Seconds
+    )
+
+    if ($Seconds -le 0) {
+        return
+    }
+
+    Write-MigrationLog "[$WorkerName] $Reason Keeping this window open for ${Seconds}s so the message above stays visible..." -Level WARNING -LogFile $LogFile
+
+    $remaining = $Seconds
+    while ($remaining -gt 0) {
+        $step = [Math]::Min(15, $remaining)
+        Write-Host "[$WorkerName] Fermeture de la fenetre dans $remaining s (Ctrl+C pour fermer maintenant)..." -ForegroundColor Yellow
+        Start-Sleep -Seconds $step
+        $remaining -= $step
+    }
+}
+
 Write-MigrationLog "[$WorkerName] Persistent step3 worker starting. Queue root: $QueueRoot" -LogFile $LogFile
 
 try {
@@ -140,8 +184,11 @@ try {
     Write-MigrationLog "[$WorkerName] SCVMM module warmed up. Veeam will be loaded lazily only for non-network-only tasks." -Level SUCCESS -LogFile $LogFile
 } catch {
     Write-MigrationLog "[$WorkerName] Worker initialization failed: $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
+    Wait-BeforeWorkerWindowCloses -Reason "Worker initialization failed." -Seconds $ErrorPauseSeconds
     throw
 }
+
+$hadFailure = $false
 
 while ($true) {
     $nextTask = @(Get-ChildItem -Path $pendingDir -Filter "*.json" -File -ErrorAction SilentlyContinue |
@@ -181,6 +228,7 @@ while ($true) {
         Write-TaskStateFile -Path (Join-Path $failedDir $nextTask.Name) -TaskObject $failedTask
         Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
         Write-MigrationLog "[$WorkerName] Unable to parse task '$($nextTask.Name)'." -Level ERROR -LogFile $LogFile
+        $hadFailure = $true
         continue
     }
 
@@ -239,7 +287,12 @@ while ($true) {
         Write-TaskStateFile -Path (Join-Path $failedDir $nextTask.Name) -TaskObject $task
         Remove-Item -Path $claimedTaskPath -Force -ErrorAction SilentlyContinue
         Write-MigrationLog "[$WorkerName] Step3 task failed for VM '$vmName': $($_.Exception.Message)" -Level ERROR -LogFile $LogFile
+        $hadFailure = $true
     }
 }
 
 Write-MigrationLog "[$WorkerName] Worker stopped cleanly." -Level SUCCESS -LogFile $LogFile
+
+if ($hadFailure) {
+    Wait-BeforeWorkerWindowCloses -Reason "This worker had at least one failed task." -Seconds $ErrorPauseSeconds
+}
