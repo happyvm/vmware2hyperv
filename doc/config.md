@@ -199,9 +199,12 @@ Paths = @{
 Orchestrator = @{
     Step3MaxParallelJobs      = 5
     Step3JobStartupDelaySec   = 2
+    Step3WorkerErrorPauseSec  = 120
     InstantRecoveryStartDelaySec = 2
 }
 ```
+
+- `Step3WorkerErrorPauseSec`: how long (in seconds) a step3 worker window stays open after an error before it exits, so the error message stays on screen instead of the window closing immediately. Set to `0` to disable the pause.
 
 ### `Precheck`
 

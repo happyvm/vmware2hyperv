@@ -69,6 +69,8 @@ N workers `worker-step3.ps1` sont lancés comme processus `pwsh` séparés. Chac
 
 L'orchestrateur attend que tous les workers aient fini, puis vérifie l'état final de la queue.
 
+Chaque worker s'exécute dans sa propre fenêtre `pwsh`. En cas d'erreur (échec d'initialisation ou tâche en échec), la fenêtre reste ouverte `Orchestrator.Step3WorkerErrorPauseSec` secondes (120 par défaut, voir [config.md](config.md)) avant de se fermer, pour laisser le temps de lire le message affiché.
+
 ## Résolution VLAN
 
 Avant de lancer les workers, l'orchestrateur se connecte à vCenter pour résoudre les VLANs de chaque VM via une pipeline multi-couche :

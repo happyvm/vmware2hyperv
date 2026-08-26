@@ -33,6 +33,7 @@ Chaque worker est un processus `pwsh` indépendant, ce qui garantit l'isolation 
 | `-WorkerName` | string | Non | `step3-worker-01` | Nom unique du worker |
 | `-PollIntervalSeconds` | int | Non | `3` | Intervalle de poll de la queue |
 | `-LogFile` | string | Non | auto-généré | Fichier de log |
+| `-ErrorPauseSeconds` | int | Non | `120` | Durée pendant laquelle la fenêtre du worker reste ouverte après une erreur (échec d'init ou tâche en échec) avant de se fermer, pour laisser le temps de lire le message. `0` désactive la pause. |
 
 ## Boucle de traitement
 
