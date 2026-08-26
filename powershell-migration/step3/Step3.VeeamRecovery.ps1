@@ -566,6 +566,12 @@ function Complete-InstantRecovery {
     # ignores the duration of the Veeam queries.
     $waitStartedAt = Get-Date
     $elapsed = 0
+    # Veeam retries transient errors internally (e.g. "Connection with Hyper-V
+    # mount agent was lost" -> "Retry count: N") and can still land on Success
+    # or Warning afterwards. A single poll landing mid-retry could read
+    # Result='Failed' before Veeam's own retry flips it, so a Failed reading
+    # must be observed on two consecutive polls before being treated as final.
+    $failedConfirmationPending = $false
     do {
         $check = Invoke-VeeamCommand -ScriptBlock {
             param($Vm)
@@ -613,7 +619,13 @@ function Complete-InstantRecovery {
             }
 
             if ($check.Result -eq "Failed") {
-                throw "Restore session '$($check.Name)' ended with result 'Failed'."
+                if ($failedConfirmationPending) {
+                    throw "Restore session '$($check.Name)' ended with result 'Failed' (confirmed on two consecutive polls)."
+                }
+                Write-MigrationLog "[$VMName] Restore session '$($check.Name)' reported result 'Failed'. Veeam may still be retrying a transient error internally; re-checking after $WaitingPollIntervalSeconds seconds before giving up." -Level WARNING -LogFile $LogFile
+                $failedConfirmationPending = $true
+            } else {
+                $failedConfirmationPending = $false
             }
         }
 
